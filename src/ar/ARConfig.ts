@@ -144,6 +144,12 @@ export interface LandmarkConfig {
   maxLandmarkAgeFrames: number;
   /** Frames without a map pose before the map is reset (Phase 5 relocalization replaces this). */
   lostResetFrames: number;
+  /**
+   * Re-triangulate a landmark from its anchor observation when the ray
+   * parallax has grown by this factor since its last triangulation
+   * (depth refinement as the baseline grows).
+   */
+  refineParallaxGrowth: number;
 }
 
 /** Plane detection (spec §21–§24, §51, Phase 3). */
@@ -314,20 +320,21 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxReferenceParallaxPx: 120,
   },
   landmarks: {
-    initMinParallaxPx: 20,
+    initMinParallaxPx: 30,
     initMinTranslationConfidence: 0.5,
     initMinLandmarks: 30,
     minTriangulationAngleDeg: 1.0,
-    maxTriangulationErrorPx: 3.0,
+    maxTriangulationErrorPx: 4.0,
     triangulateMinParallaxPx: 8,
-    pnpHuberPx: 3.0,
-    pnpInlierPx: 4.0,
+    pnpHuberPx: 4.0,
+    pnpInlierPx: 6.0,
     pnpMaxIterations: 10,
     minPnPInliers: 15,
-    maxOutlierCount: 3,
+    maxOutlierCount: 5,
     maxLandmarks: 1000,
     maxLandmarkAgeFrames: 150,
     lostResetFrames: 150,
+    refineParallaxGrowth: 1.3,
   },
   relocalization: {
     maxKeyframes: 8,
@@ -340,8 +347,8 @@ export const DEFAULT_CONFIG: ARConfig = {
     coarseSearchRadius: 24,
     coarseMinScore: 0.3,
     lkMaxDisplacementPx: 40,
-    pnpHuberPx: 3,
-    pnpInlierPx: 4,
+    pnpHuberPx: 4,
+    pnpInlierPx: 6,
     minInliers: 20,
     goodInliers: 60,
     maxMeanErrorPx: 2.0,
@@ -349,8 +356,8 @@ export const DEFAULT_CONFIG: ARConfig = {
     attemptEveryNFrames: 1,
   },
   plane: {
-    inlierThresholdRatio: 0.02,
-    minInliers: 30,
+    inlierThresholdRatio: 0.05,
+    minInliers: 20,
     maxIterations: 200,
     confidence: 0.99,
     horizontalThreshold: 0.9,

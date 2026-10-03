@@ -203,6 +203,7 @@ function refreshHud(): void {
         }
       : null,
     gravityAvailable: s.gravityAvailable,
+    planeSearch: s.planeSearch,
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
     reloc: s.relocalization
       ? {

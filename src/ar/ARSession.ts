@@ -12,7 +12,7 @@ import { ARRenderer } from "../rendering/ARRenderer";
 import { ARWorld } from "../rendering/ARWorld";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
-import type { MapPoseOutput, PlaneOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
+import type { MapPoseOutput, PlaneOutput, PlaneSearchOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
 import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
@@ -93,6 +93,7 @@ export interface ARStats {
   worldScale: number;
   placedObjects: number;
   relocalization: RelocalizationOutput | null;
+  planeSearch: PlaneSearchOutput | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -152,6 +153,7 @@ export class ARSession {
   private plane: PlaneOutput | null = null;
   private landmarkCount = 0;
   private relocalization: RelocalizationOutput | null = null;
+  private planeSearch: PlaneSearchOutput | null = null;
   private planeWasFound = false;
   private lastGravity: number[] | null = null;
   private visionMs = 0;
@@ -361,6 +363,7 @@ export class ARSession {
       worldScale: this.worldAnchor.frame?.scale ?? 0,
       placedObjects: this.world.placedCount,
       relocalization: this.relocalization,
+      planeSearch: this.planeSearch,
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -444,6 +447,7 @@ export class ARSession {
     this.plane = r.plane;
     this.landmarkCount = r.landmarkCount;
     this.relocalization = r.relocalization;
+    this.planeSearch = r.planeSearch;
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
     this.setState(r.state);

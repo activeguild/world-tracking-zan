@@ -48,6 +48,7 @@ export interface HudStats {
     usedGravity: boolean;
   } | null;
   gravityAvailable?: boolean;
+  planeSearch?: { points: number; bestInliers: number; minInliers: number; threshold: number; horizontalness: number } | null;
   world?: { ready: boolean; scale: number; placed: number } | null;
   reloc?: { keyframes: number; attempt: string; inliers: number; successes: number } | null;
   /** Build identifier (phase + commit + time) so testers can confirm the deployed version. */
@@ -101,7 +102,11 @@ export class DebugOverlay {
             `Plane n     (${s.plane.normal.map((v) => v.toFixed(2)).join(", ")})  in ${s.plane.inliers}`,
             `Plane       hz ${s.plane.horizontalness.toFixed(2)} ${s.plane.horizontal ? "H" : "-"}  stable ${s.plane.stableFrames}  conf ${s.plane.confidence.toFixed(2)}  ${s.plane.found ? "FOUND" : ""}`,
           ]
-        : [`Plane       —`]),
+        : [
+            s.planeSearch
+              ? `Plane       — searching: ${s.planeSearch.points} pts, best ${s.planeSearch.bestInliers}/${s.planeSearch.minInliers} in, thr ${s.planeSearch.threshold.toFixed(3)}${s.planeSearch.horizontalness ? `, hz ${s.planeSearch.horizontalness.toFixed(2)}` : ""}`
+              : `Plane       —`,
+          ]),
       `Gravity     ${s.gravityAvailable ? "yes" : "no (fallback up = −Y)"}`,
       `World       ${s.world?.ready ? `ready  scale ${s.world.scale.toFixed(3)} m/unit  objects ${s.world.placed}` : "—"}`,
       `Keyframes   ${s.reloc ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${s.reloc.attempt === "success" ? ` (${s.reloc.inliers})` : ""}  ok×${s.reloc.successes}` : "—"}`,

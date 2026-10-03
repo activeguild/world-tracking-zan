@@ -291,6 +291,9 @@ export class VisionEngine {
       pose,
       mapPose: this.lastMapPose,
       plane: this.lastPlane,
+      planeSearch: this.mapTracker.initialized
+        ? { ...this.planeDetector.lastSearch, minInliers: this.config.plane.minInliers }
+        : null,
       relocalization: this.relocStatus,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
       landmarkCount: this.packedLandmarkCount,

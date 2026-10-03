@@ -20,11 +20,24 @@ export interface PlaneCandidate extends PlaneOutput {
   inlierIds: number[];
 }
 
+/** Diagnostics of the last plane search (shown in the HUD when no plane is found). */
+export interface PlaneSearchInfo {
+  /** Landmarks offered to RANSAC. */
+  points: number;
+  /** Best sample support found (even when below minInliers). */
+  bestInliers: number;
+  /** Inlier distance threshold used (map units). */
+  threshold: number;
+  /** Horizontalness of the best plane when one was fitted. */
+  horizontalness: number;
+}
+
 export class PlaneDetector {
   private previous: PlaneCandidate | null = null;
   private stableFrames = 0;
   private found = false;
   private missedFrames = 0;
+  lastSearch: PlaneSearchInfo = { points: 0, bestInliers: 0, threshold: 0, horizontalness: 0 };
 
   constructor(
     private readonly config: PlaneConfig,
@@ -53,6 +66,7 @@ export class PlaneDetector {
    */
   update(points: Float64Array, ids: number[], n: number, up: Float64Array | null): PlaneCandidate | null {
     const cfg = this.config;
+    this.lastSearch = { points: n, bestInliers: 0, threshold: 0, horizontalness: 0 };
     if (n < cfg.minInliers) {
       return this.miss();
     }
@@ -70,6 +84,8 @@ export class PlaneDetector {
       maxIterations: cfg.maxIterations,
       minInliers: cfg.minInliers,
     }, this.rng);
+    this.lastSearch.threshold = threshold;
+    this.lastSearch.bestInliers = res.bestInlierCount;
     if (!res.plane || res.inlierCount < cfg.minInliers) {
       return this.miss();
     }
@@ -81,6 +97,7 @@ export class PlaneDetector {
 
     const upVec = up ?? new Float64Array([0, -1, 0]);
     const hz = planeHorizontalness(plane.normal, upVec);
+    this.lastSearch.horizontalness = hz;
     const horizontal = hz >= (up ? cfg.horizontalThreshold : cfg.fallbackHorizontalThreshold);
 
     // Temporal stability against the previous candidate.

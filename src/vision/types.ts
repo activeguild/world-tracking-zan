@@ -96,6 +96,15 @@ export interface MapPoseOutput {
 export const LANDMARK_STRIDE = 4;
 
 /** Keyframe / relocalization status (Phase 5). */
+/** Plane search diagnostics (why no plane yet). */
+export interface PlaneSearchOutput {
+  points: number;
+  bestInliers: number;
+  minInliers: number;
+  threshold: number;
+  horizontalness: number;
+}
+
 export interface RelocalizationOutput {
   keyframes: number;
   /** Result of the attempt made in this frame. */
@@ -180,6 +189,8 @@ export interface VisionOutput {
   mapPose: MapPoseOutput | null;
   /** Current plane candidate (Phase 3). Null when none. */
   plane: PlaneOutput | null;
+  /** Plane search diagnostics (null until the map exists). */
+  planeSearch: PlaneSearchOutput | null;
   /** Keyframe / relocalization status (Phase 5). */
   relocalization: RelocalizationOutput;
   /** Packed landmarks for debug rendering: see `LANDMARK_STRIDE`. */

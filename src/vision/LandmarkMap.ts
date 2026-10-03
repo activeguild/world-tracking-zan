@@ -19,6 +19,15 @@ export interface Landmark {
   outlierCount: number;
   /** Set by the plane detector for debug rendering. */
   planeInlier: boolean;
+  /**
+   * Anchor observation used for (re-)triangulation: camera pose and pixel
+   * of the first view. Null for landmarks without a usable anchor.
+   */
+  anchorPose: { rotation: Float64Array; translation: Float64Array } | null;
+  anchorX: number;
+  anchorY: number;
+  /** Ray parallax angle (radians) of the last triangulation. */
+  parallax: number;
 }
 
 export class LandmarkMap {
@@ -39,6 +48,10 @@ export class LandmarkMap {
       trackId,
       outlierCount: 0,
       planeInlier: false,
+      anchorPose: null,
+      anchorX: 0,
+      anchorY: 0,
+      parallax: 0,
     };
     this.landmarks.set(lm.id, lm);
     return lm;

@@ -113,7 +113,7 @@ describe("MapTracker", () => {
     const tracker = new MapTracker(cfg);
     const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(4));
     const refPose = cameraAt(0);
-    const f0 = 8;
+    const f0 = 12;
     // Only the first 70 points exist at initialization; the rest appear later.
     const initPts = points.subarray(0, 70 * 3);
     let tracks = makeTracks(initPts, cameraAt(f0), refPose, 0, rng);

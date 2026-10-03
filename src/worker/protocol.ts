@@ -2,7 +2,7 @@ import type { ARConfig } from "../ar/ARConfig";
 import type { TrackingState } from "../ar/ARState";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import type { TrackingQuality } from "../vision/TrackingQuality";
-import type { MapPoseOutput, PlaneOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
+import type { MapPoseOutput, PlaneOutput, PlaneSearchOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
 
 /**
  * Main thread ⇄ Vision Worker message protocol (spec §40, §41).
@@ -63,6 +63,7 @@ export interface ResultResponse {
   pose: PoseOutput | null;
   mapPose: MapPoseOutput | null;
   plane: PlaneOutput | null;
+  planeSearch: PlaneSearchOutput | null;
   relocalization: RelocalizationOutput;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */
   landmarks: ArrayBuffer;

@@ -86,6 +86,8 @@ export interface PlaneRansacResult {
   /** RMS distance of inliers to the plane. */
   rmsResidual: number;
   iterations: number;
+  /** Best sample support seen, even when below `minInliers` (diagnostics). */
+  bestInlierCount: number;
 }
 
 export function ransacPlane(
@@ -96,7 +98,7 @@ export function ransacPlane(
 ): PlaneRansacResult {
   const inliers = new Uint8Array(n);
   if (n < Math.max(3, config.minInliers)) {
-    return { plane: null, inliers, inlierCount: 0, rmsResidual: 0, iterations: 0 };
+    return { plane: null, inliers, inlierCount: 0, rmsResidual: 0, iterations: 0, bestInlierCount: 0 };
   }
   const thr = config.threshold;
   const best = new Uint8Array(n);
@@ -146,7 +148,7 @@ export function ransacPlane(
   }
   if (!bestPlane || bestCount < config.minInliers) {
     inliers.fill(0);
-    return { plane: null, inliers, inlierCount: 0, rmsResidual: 0, iterations: iter };
+    return { plane: null, inliers, inlierCount: 0, rmsResidual: 0, iterations: iter, bestInlierCount: bestCount };
   }
 
   // Refit on inliers (PCA), re-classify, and refit once more.
@@ -184,7 +186,14 @@ export function ransacPlane(
     const dist = planeDistance(plane, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
     errSum += dist * dist;
   }
-  return { plane, inliers, inlierCount: count, rmsResidual: count ? Math.sqrt(errSum / count) : 0, iterations: iter };
+  return {
+    plane,
+    inliers,
+    inlierCount: count,
+    rmsResidual: count ? Math.sqrt(errSum / count) : 0,
+    iterations: iter,
+    bestInlierCount: Math.max(bestCount, count),
+  };
 }
 
 /**

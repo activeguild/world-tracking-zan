@@ -4,7 +4,7 @@ import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
 import { refinePosePnP } from "../math/PnP";
 import { composeTransforms, invertTransform, type RigidTransform } from "../math/Pose";
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
-import { LandmarkMap } from "./LandmarkMap";
+import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
 import type { Track } from "./types";
 
@@ -128,14 +128,27 @@ export class MapTracker {
     this._mapFrameId = refFrameId;
     this._pose = { rotation: Float64Array.from(rel.rotation), translation: Float64Array.from(rel.translationDirection) };
     this._framesSinceTracked = 0;
+    const refPose = identity();
     for (const { track, p } of created) {
       const lm = this.map.add(p, track.id, frameId);
       lm.observations = 2;
+      lm.anchorPose = refPose;
+      lm.anchorX = track.refX;
+      lm.anchorY = track.refY;
+      lm.parallax = this.tri.parallax; // last computed; refined below
       track.landmarkId = lm.id;
+    }
+    // Record each landmark's own parallax (the loop above reused the scratch).
+    for (const { track, p } of created) {
+      void p;
+      const lm = this.map.get(track.landmarkId)!;
+      const x1 = (track.refX - k.cx) / k.fx, y1 = (track.refY - k.cy) / k.fy;
+      const x2 = (track.x - k.cx) / k.fx, y2 = (track.y - k.cy) / k.fy;
+      triangulatePoint(pose, x1, y1, x2, y2, this.tri);
+      lm.parallax = this.tri.parallax;
     }
     // Anchors: reference tracks anchor at the map origin; the others at the
     // current pose.
-    const refPose = identity();
     for (const t of tracks) {
       if (t.refFrame === refFrameId) {
         t.anchorFrame = refFrameId;
@@ -210,12 +223,14 @@ export class MapTracker {
         meanErrPx = res.meanError * f;
         this._pose = res.pose;
         this._framesSinceTracked = 0;
+        const maxErr = cfg.maxTriangulationErrorPx / f;
         for (let i = 0; i < n; i++) {
           const lm = this.map.get(obsTracks[i].landmarkId)!;
           if (res.inliers[i]) {
             lm.observations++;
             lm.lastSeenFrame = frameId;
             lm.outlierCount = 0;
+            this.refineLandmark(lm, obsTracks[i], k, maxErr);
           } else {
             lm.outlierCount++;
             if (lm.outlierCount > cfg.maxOutlierCount) {
@@ -273,6 +288,10 @@ export class MapTracker {
         const Z = r[6] * pa[0] + r[7] * pa[1] + r[8] * pa[2] + tt[2];
         const lm = this.map.add([X, Y, Z], t.id, frameId);
         lm.observations = 2;
+        lm.anchorPose = t.anchorPose;
+        lm.anchorX = t.anchorX;
+        lm.anchorY = t.anchorY;
+        lm.parallax = this.tri.parallax;
         t.landmarkId = lm.id;
         created++;
       }
@@ -281,6 +300,34 @@ export class MapTracker {
     this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
     this.lastResult = { tracked, inlierCount, meanReprojectionErrorPx: meanErrPx, newLandmarks: created };
     return this.lastResult;
+  }
+
+  /**
+   * Depth refinement: once the baseline between a landmark's anchor view and
+   * the current view has grown enough, re-triangulate it. Two-view depth
+   * error scales with 1/parallax, so the first estimate (from the small
+   * initialization baseline) is replaced by progressively better ones.
+   */
+  private refineLandmark(lm: Landmark, track: Track, k: CameraIntrinsics, maxErr: number): void {
+    if (!lm.anchorPose) return;
+    const cfg = this.config;
+    const anchorInv = invertTransform(lm.anchorPose);
+    const rel = composeTransforms(this._pose, anchorInv);
+    const x1 = (lm.anchorX - k.cx) / k.fx;
+    const y1 = (lm.anchorY - k.cy) / k.fy;
+    const x2 = (track.x - k.cx) / k.fx;
+    const y2 = (track.y - k.cy) / k.fy;
+    triangulatePoint(rel, x1, y1, x2, y2, this.tri);
+    if (this.tri.depth1 <= 0 || this.tri.depth2 <= 0) return;
+    if (this.tri.error > maxErr) return;
+    if (this.tri.parallax < lm.parallax * cfg.refineParallaxGrowth) return;
+    const pa = this.tri.point;
+    const r = anchorInv.rotation;
+    const tt = anchorInv.translation;
+    lm.position[0] = r[0] * pa[0] + r[1] * pa[1] + r[2] * pa[2] + tt[0];
+    lm.position[1] = r[3] * pa[0] + r[4] * pa[1] + r[5] * pa[2] + tt[1];
+    lm.position[2] = r[6] * pa[0] + r[7] * pa[1] + r[8] * pa[2] + tt[2];
+    lm.parallax = this.tri.parallax;
   }
 
   private ensure(n: number): void {
