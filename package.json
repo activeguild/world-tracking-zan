@@ -1,0 +1,25 @@
+{
+  "name": "world-tracking-zan",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-built WebAR plane detection and visual tracking engine (Phase 1: feature tracking)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "playwright": "^1.57.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  }
+}

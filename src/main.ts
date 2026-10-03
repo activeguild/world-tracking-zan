@@ -1,0 +1,121 @@
+import { ARSession } from "./ar/ARSession";
+import { ARError, TrackingState } from "./ar/ARState";
+import { DebugOverlay } from "./debug/DebugOverlay";
+import "./style.css";
+
+/**
+ * Phase 1 demo: camera → feature tracking → debug overlay.
+ *
+ * Query parameters:
+ *   ?debug=1    enable `[AR]` console logs
+ *   ?worker=0   run the vision engine on the main thread
+ *   ?hud=0      hide the HUD
+ */
+const params = new URLSearchParams(location.search);
+const debugLog = params.get("debug") === "1";
+const useWorker = params.get("worker") !== "0";
+const showHud = params.get("hud") !== "0";
+
+const app = document.getElementById("app") as HTMLElement;
+const video = document.getElementById("video") as HTMLVideoElement;
+const overlay = document.getElementById("overlay") as HTMLCanvasElement;
+const startButton = document.getElementById("start") as HTMLButtonElement;
+const messageEl = document.getElementById("message") as HTMLElement;
+
+const hud = new DebugOverlay(app);
+hud.visible = showHud;
+
+const session = new ARSession({
+  video,
+  overlayCanvas: overlay,
+  config: {
+    debug: { log: debugLog, overlay: true },
+    useWorker,
+  },
+});
+
+session.on("trackingStateChanged", (state) => {
+  messageEl.textContent = userMessageFor(state, session.getStats().quality.lowFeature);
+});
+
+session.on("frame", (r) => {
+  if (r.quality.lowFeature && session.state !== TrackingState.TRACKING) {
+    messageEl.textContent = userMessageFor(session.state, true);
+  }
+});
+
+session.on("error", (err) => {
+  showError(err);
+});
+
+startButton.addEventListener("click", async () => {
+  startButton.disabled = true;
+  startButton.textContent = "Starting…";
+  try {
+    await session.start();
+    startButton.style.display = "none";
+  } catch (e) {
+    startButton.disabled = false;
+    startButton.textContent = "Retry";
+    showError(e);
+  }
+});
+
+function showError(e: unknown): void {
+  const code = e instanceof ARError ? e.code : "ERROR";
+  const msg = e instanceof Error ? e.message : String(e);
+  messageEl.textContent = `${code}: ${msg}`;
+}
+
+function userMessageFor(state: TrackingState, lowFeature: boolean): string {
+  switch (state) {
+    case TrackingState.INITIALIZING:
+      return "Initializing…";
+    case TrackingState.SEARCHING_FEATURES:
+      return lowFeature
+        ? "周囲をゆっくり動かしてください（特徴点が足りません）"
+        : "Searching features…";
+    case TrackingState.TRACKING:
+      return "";
+    case TrackingState.TRACKING_LOST:
+      return "Tracking lost — ゆっくり元の位置に戻してください";
+    default:
+      return state;
+  }
+}
+
+// HUD refresh loop (independent of vision rate).
+function refreshHud(): void {
+  const s = session.getStats();
+  hud.update({
+    renderFps: s.renderFps,
+    visionFps: s.visionFps,
+    featureCount: s.quality.featureCount,
+    trackedCount: s.quality.trackedCount,
+    inlierCount: s.quality.inlierCount,
+    planeConfidence: s.quality.planeConfidence,
+    state: s.state,
+    visionMs: s.visionMs,
+    fastThreshold: s.fastThreshold,
+    processingSize: `${s.processingWidth}x${s.processingHeight}`,
+    backend: s.backend,
+  });
+  requestAnimationFrame(refreshHud);
+}
+requestAnimationFrame(refreshHud);
+
+// Test hook for the Playwright smoke test and for manual inspection.
+declare global {
+  interface Window {
+    __ar: {
+      session: ARSession;
+      stats: () => ReturnType<ARSession["getStats"]>;
+      start: () => Promise<void>;
+    };
+  }
+}
+window.__ar = {
+  session,
+  stats: () => session.getStats(),
+  start: () => session.start(),
+};

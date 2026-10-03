@@ -1,0 +1,222 @@
+# WebAR 自前平面検出・Visual Tracking Engine — Claude Code 実装指示書
+
+> このファイルはプロジェクトの正本となる仕様書です。実装・レビュー時は必ずこの指示書に従うこと。
+> 現在の進捗は末尾の「実装状況」を参照。
+
+## 0. 目的
+
+ブラウザ上で動作する WebAR 向けの、独自の平面検出・カメラトラッキングエンジンを実装する。
+8th Wall 等の汎用 AR エンジンの完全再現は目標にしない。
+
+対象ユースケース:
+
+- iOS Safari / Android Chrome
+- `getUserMedia()` によるカメラ入力、単眼カメラ
+- 主に床・机などの水平面
+- 数秒〜30 秒程度の AR セッション、最大 2 つ程度の対象
+- Three.js による 3D コンテンツ表示、GLB モデル配置
+- カメラを動かしてもワールド空間上のオブジェクトを固定
+- WebAssembly を利用した画像処理、Web Worker による Vision 処理分離
+
+最初から完全な SLAM を作らない。まず **Visual Tracking + Plane Detection + World Coordinate + Three.js Integration** を成立させる。
+
+## 1. 最終的なユーザー体験
+
+カメラ起動 → 水平面探索 → 平面検出 → タップ → タップ位置を平面上の 3D 座標へ変換 → GLB 配置 → スマートフォンを動かす → カメラ Pose を継続推定 → GLB は同じ World 座標に固定。
+
+## 2. 非目標（初期実装では行わない）
+
+完全な汎用 SLAM / 大規模 3D Map / Loop Closure / 複雑な Relocalization / Face・Body Tracking / Sky Segmentation / Dense・Mesh Reconstruction / LiDAR・ARKit・ARCore・WebXR Plane Detection・8th Wall SDK 依存。
+WebXR/ARKit/ARCore の平面検出を利用せず、自前の画像処理で実装する。
+
+## 3. 基本アーキテクチャ
+
+```
+Camera → getUserMedia() → VideoFrame → Image Preprocessing
+ → Feature Detection (FAST / ORB) → Feature Tracking (Pyramidal LK) → RANSAC
+ → Homography / Essential Matrix → Camera Pose → 3D Landmark Map
+ → Plane Fitting (RANSAC) → World Coordinate → Three.js Camera → GLB Model
+```
+
+## 4. 技術スタック
+
+- Frontend: TypeScript / Three.js / Vite / WebGL
+- Camera: `navigator.mediaDevices.getUserMedia()` / HTMLVideoElement / Canvas
+- Computer Vision: FAST, ORB, Pyramidal Lucas-Kanade, RANSAC, Homography, Essential Matrix, recoverPose, Triangulation, Plane RANSAC（初期は OpenCV.js/WASM 利用可。独自 WASM へ移行可能な構造にする）
+- Performance: Web Worker / WebAssembly / WASM SIMD / OffscreenCanvas
+
+## 5. ディレクトリ構成
+
+```
+src/
+├── ar/         ARSession.ts, ARState.ts, ARConfig.ts
+├── camera/     CameraManager.ts, CameraFrame.ts, CameraIntrinsics.ts
+├── vision/     FeatureDetector.ts, FeatureTracker.ts, PoseEstimator.ts,
+│               LandmarkMap.ts, PlaneDetector.ts, TrackingQuality.ts
+├── math/       Pose.ts, Plane.ts, Ray.ts, Matrix.ts, CoordinateSystem.ts
+├── worker/     VisionWorker.ts, VisionWorkerClient.ts
+├── rendering/  ARCamera.ts, ARWorld.ts, ARObject.ts
+├── debug/      DebugOverlay.ts, FeatureRenderer.ts, PlaneRenderer.ts
+└── main.ts
+wasm/vision/
+tests/  vision/ math/ plane/ integration/
+```
+
+## 6–7. 座標系
+
+- World 座標は Three.js と整合させる（Y-up）。基本平面は `Y = 0`。
+- Camera 座標は一般的な CV 座標系（X right, Y down, Z forward）。
+- Three.js への座標変換はコード全体に分散させず **`CoordinateSystem.ts` に集約**する。
+
+## 8. Camera Intrinsics
+
+```ts
+interface CameraIntrinsics { fx; fy; cx; cy; width; height }
+```
+初期段階は `fx ≈ fy ≈ width, cx = width/2, cy = height/2` の近似でよいが、端末ごとのカメラ特性を考慮できる設計にする。
+
+## 9–10. Camera 入力 / Processing Frame Rate
+
+- `facingMode: "environment"`。処理解像度は 640×480 または 640×360 程度。高解像度映像をそのまま Vision 処理しない。
+- Camera は 30fps 以上でよい。Vision 処理は 15〜30fps、1 frame ≈ 33ms 以下（可能なら 15〜20ms）。
+
+## 11–14. Feature Detection / Tracking / 失敗判定 / RANSAC
+
+- 初期フレームでは FAST。100〜500 points。設定値は `FeatureConfig { maxFeatures; minFeatures; qualityLevel; minDistance }` として設定可能にする（固定値を埋め込まない）。
+- 毎フレーム全特徴点を再検出しない。Pyramidal LK（640×480 / 320×240 / 160×120）で追跡。
+- 各特徴点について LK status / tracking error / image boundary / **forward-backward error** を確認する。
+- 特徴点対応には必ず外れ値除去（Essential Matrix + RANSAC または Homography + RANSAC）。平面が支配的な場合は Homography が有効。
+
+## 15–18. Homography / Essential Matrix / Pose Recovery / Scale
+
+- Homography `p' = H p`: 平面追跡、平面安定性評価、小さな移動推定。
+- Essential Matrix `E = Kᵀ F K` から `R, t` を復元（recoverPose 相当）。
+  `RelativePose { rotation: Matrix3; translationDirection: Vector3; inlierCount }`
+- 単眼では translation の絶対スケールが求まらない。初期実装では scale-free とし、AR 開始時の Plane を World 座標の基準にする。
+
+## 19–24. Landmark Map / Triangulation / Plane Detection
+
+- `Landmark { id; position; descriptor?; observations; lastSeenFrame }`。Triangulation で 3D 化。深度が不安定な点は採用しない。
+- 3D Landmark 群に RANSAC Plane Fitting (`ax + by + cz + d = 0`)。
+  `Plane { normal; distance; center; inlierCount; areaEstimate; confidence }`
+- 水平面判定: `abs(normal.y) > 0.90`（実機で調整）。
+- Plane Confidence は inlier count + plane residual + horizontalness + temporal stability で評価し、複数フレーム安定した場合のみ `PLANE_FOUND` へ遷移。
+
+## 25–30. World Origin / 座標生成 / Tap Placement / Three.js 統合
+
+- 最初に確定した Plane center を World Origin、Plane normal を World +Y にする。
+  `PlaneCoordinateSystem { origin; right; up; forward; matrix }`
+- タップ: Screen → NDC → Camera Ray → World Ray → Ray ∩ Plane。`t = -(n·o + d) / (n·r)`、`n·r ≈ 0` は交差なし。
+- Three.js 側は `ARCamera / ARWorld / ARObject` を分離。Camera Pose を `camera.position / quaternion` に反映し、GLB は World 座標に置く。
+- **絶対にやらないこと**: `GLB position += camera delta`。必ず Camera Pose → World Coordinate → GLB 固定。
+
+## 31–34. Tracking State / Quality / Lost / Smoothing
+
+```
+INITIALIZING → SEARCHING_FEATURES → TRACKING → PLANE_DETECTING → PLANE_FOUND
+→ AR_ACTIVE → TRACKING_LOST → RELOCALIZING → TRACKING
+```
+- `TrackingQuality { featureCount; trackedCount; inlierCount; reprojectionError; poseDelta; planeConfidence; trackingConfidence }` を毎フレーム計算。
+- `trackedCount < minimum` または `inlierCount < minimum` で Tracking Lost。いきなり AR オブジェクトを消さず最後の Pose を短時間保持。
+- Pose smoothing（One Euro Filter 等）。過剰な平滑化で Latency を増やさない。
+
+## 35–38. Keyframe / Relocalization / Bundle Adjustment / IMU（後期 Phase）
+
+- Keyframe は Phase 2 以降。移動・回転・品質変化が閾値を超えたら作成。
+- Relocalization: Feature Detection → Keyframe Matching → PnP / Homography / Pose Recovery。
+- BA は Local Bundle Adjustment から（最近の Keyframe + 周辺 Landmark のみ）。
+- IMU（Gyro / Accel）は将来的に。初期実装は Vision-only で動作すること。
+
+## 39–41. Web Worker
+
+Vision 処理を Main Thread で実行し続けない。Main: Three.js / UI / Camera、Worker: Vision Engine。
+`VisionInput { frameId; timestamp; image; intrinsics }` / `VisionOutput { frameId; pose; plane?; trackingQuality }`。
+毎フレーム大量の JS Object をコピーせず Transferable / SharedArrayBuffer / TypedArray / ImageBitmap を使う。
+
+## 42–44. Debug
+
+- Debug Mode 必須: FPS / Vision FPS / Feature Count / Tracked Count / Inlier Count / Plane Confidence / Tracking State / Pose を表示。
+- 特徴点と移動方向（● ───→ ●）を描画。検出 Plane を Three.js 上に透明 Grid 等で可視化。
+
+## 45–47. テスト / 実機 / パフォーマンス目標
+
+Test 1 静止（jitter 小） / 2 左右移動（GLB 固定） / 3 前後移動（見かけサイズ変化） / 4 回転（World 不動） / 5 床 / 6 机（水平 Plane 検出） / 7 壁（採用しない） / 8 低テクスチャ（confidence 低下） / 9 モーションブラー（Lost 検出） / 10 30 秒 AR（大きな Drift なし）。
+実機: iPhone Safari / Android Chrome（可能なら低・中性能 Android + 高性能 iPhone）。
+目標: Camera 30fps+ / Vision 15〜30fps / Pose latency 100ms 以下 / Vision < 20ms/frame。
+
+## 48–53. メモリ / Feature 管理 / Low Texture / 優先順位 / エラー
+
+- Landmark 上限 500〜2000。古い Landmark は削除可能に。
+- `tracked < target` または coverage が悪い場合に Feature を追加。Grid-based feature distribution で分散。
+- 特徴点が少ない場合 `LOW_FEATURE` を返し、UI で「周囲をゆっくり動かしてください」等を表示できる設計に。
+- 複数平面は Horizontal + Feature count + Area + Stability で選択。初期版は Active Plane 最大 1 つ。最大 2 対象だが Vision Map は共有。
+- エラーコード: `CAMERA_PERMISSION_DENIED / CAMERA_UNAVAILABLE / INSUFFICIENT_FEATURES / TRACKING_LOST / PLANE_NOT_FOUND`。
+
+## 54. API 設計
+
+```ts
+const ar = new ARSession({ canvas, video, threeScene, threeCamera });
+await ar.start();
+ar.on("planeFound", plane => {});
+ar.on("trackingStateChanged", state => {});
+const hit = ar.hitTest(x, y);
+```
+内部アルゴリズムを外部 API に露出させない。
+
+## 55–66. Phase 計画
+
+| Phase | 内容 | 完了条件 |
+|---|---|---|
+| 1 | Camera → Grayscale → FAST → LK → Forward-Backward → RANSAC → Debug Overlay | 300 程度の Feature から 100 以上を安定追跡、● → ● が正しく表示 |
+| 2 | Essential Matrix → recoverPose → Relative Pose | 左右前後回転で Pose が連続的に変化 |
+| 3 | Triangulation → 3D Landmarks → Plane RANSAC | 床・机で normal ≈ World Y、壁は不採用 |
+| 4 | World Coordinate → Raycast → Plane Intersection → Three.js Cube/GLB 配置 | タップで配置、カメラを動かしても同じ場所 |
+| 5 | Keyframe + Relocalization | 短時間 Lost から復帰 |
+| 6 | IMU + Pose Fusion (Madgwick 等) | — |
+| 7 | Local Bundle Adjustment (Ceres → WASM) | — |
+| 8 | 性能最適化 (WASM SIMD / Worker / OffscreenCanvas / Transferable) | — |
+
+## 67. 実装上の重要原則
+
+1. 一度に全部実装しない。Phase → Test → Phase → Test。
+2. アルゴリズムをブラックボックス化しない（Input / Processing / Output / Quality / Failure condition を明確に）。
+3. Vision と Rendering を分離する。Vision は Pose / Plane / TrackingQuality だけを返す。
+4. GLB を Vision 処理に依存させない。
+5. 実機で成立しない最適化を先に行わない。まず iPhone Safari で成立させる。
+
+## 68. 最初に作る Demo
+
+Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera → Object remains fixed。最初は Cube でよい。
+
+## 69–72. Claude Code への実装ルール
+
+- 実装開始時に既存 Repository（package.json / tsconfig / vite.config / Three.js version / 既存 camera・WebGL・WASM コード）を調査し、不用意に破壊しない。
+- 実装順序: Repository analysis → Camera → Grayscale → Feature detection → LK → RANSAC → Essential Matrix → Pose recovery → Triangulation → Plane detection → World coordinate → Ray/Plane hit test → Three.js integration → Cube placement → Tracking quality → Keyframe → Relocalization → IMU → BA → Performance optimization。
+- 各 Step 終了時に TypeScript compile / Unit test / Browser test / Debug visualization / Performance measurement を行う。テスト失敗状態で次の Step へ進まない。
+- Debug mode では `[AR] state=TRACKING features=283 tracked=219 inliers=184 planeConfidence=0.92 visionFPS=24` 形式のログ。Production では無効化可能に。
+
+## 73–75. 完成条件 / 最重要事項
+
+床・机を検出 / タップ位置に GLB 配置 / 動かしても World 固定 / 短時間 AR で大きな Jitter なし / iPhone Safari で実用的 FPS / 短時間 Lost から復帰。
+
+> **最初の成功条件**: iPhone Safari 上で、机・床を検出し、タップした場所に Cube を配置し、スマートフォンを動かしても Cube が現実空間上の同じ場所に留まり続けること。この最小機能が成立してから GLB → Keyframe → Relocalization → IMU → BA へ進む。
+
+**ユーザーの承認なしに次の Phase へ進まないこと。**
+
+---
+
+## 実装状況
+
+### Phase 1 — 実装済み（承認待ち）
+
+- 純 TypeScript 実装（OpenCV.js 不使用、TypedArray ベース。後で WASM に置換可能な粒度でモジュール化）
+- `src/camera/`: getUserMedia ラッパ（エラーコード対応）、処理解像度への縮小 + グレースケール、バッファプール
+- `src/vision/`: ImagePyramid（3 段 + 勾配）、FAST-9 + NMS + Grid 分散 + 適応閾値、Pyramidal LK + Forward-Backward、Homography RANSAC、VisionEngine、TrackingQuality
+- `src/worker/`: Transferable ベースの Worker プロトコル、Worker / Main-thread 両バックエンド
+- `src/ar/`: ARConfig（全チューニング値）、ARState（状態機械）、ARSession（公開 API）
+- `src/debug/`: HUD、特徴点・モーションベクトル描画、`[AR]` ロガー
+- テスト: `npm test`（Vitest 単体 46 件）、`npm run test:browser`（headless Chromium + 合成カメラ映像）
+
+### 未実装（Phase 2 以降）
+
+Essential Matrix / Pose / Triangulation / Plane Detection / Three.js 配置 / Keyframe / Relocalization / IMU / BA / WASM。
