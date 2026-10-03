@@ -62,6 +62,7 @@ export class MapTracker {
   private pts3 = new Float64Array(0);
   private obsX = new Float64Array(0);
   private obsY = new Float64Array(0);
+  private maskBuf = new Uint8Array(0);
   private tri: TriangulationResult = { point: new Float64Array(3), depth1: 0, depth2: 0, parallax: 0, error: Infinity };
 
   constructor(private readonly config: LandmarkConfig) {}
@@ -269,13 +270,34 @@ export class MapTracker {
         : rotationPrior
           ? { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation }
           : this._pose;
+      // Solve on mature landmarks only (v2 §27): fresh triangulations are
+      // candidates that must first agree with the pose a few times.
+      let mask: Uint8Array | null = null;
+      if (!poseOverride) {
+        let mature = 0;
+        this.ensureMask(n);
+        for (let i = 0; i < n; i++) {
+          const m = this.map.get(obsTracks[i].landmarkId)!.observations >= cfg.minObservationsForPose ? 1 : 0;
+          this.maskBuf[i] = m;
+          mature += m;
+        }
+        if (mature >= cfg.minMaturePnPPoints) mask = this.maskBuf;
+      }
       // With an override the optimizer runs zero iterations: classification only.
-      const res = refinePosePnP(prior, this.pts3, this.obsX, this.obsY, n, {
-        huber: cfg.pnpHuberPx / f,
-        inlierThreshold: cfg.pnpInlierPx / f,
-        maxIterations: poseOverride ? 0 : cfg.pnpMaxIterations,
-        epsilon: 1e-6,
-      });
+      const res = refinePosePnP(
+        prior,
+        this.pts3,
+        this.obsX,
+        this.obsY,
+        n,
+        {
+          huber: cfg.pnpHuberPx / f,
+          inlierThreshold: cfg.pnpInlierPx / f,
+          maxIterations: poseOverride ? 0 : cfg.pnpMaxIterations,
+          epsilon: 1e-6,
+        },
+        mask,
+      );
       let accept = poseOverride !== null || res.inlierCount >= cfg.minPnPInliers;
       if (accept && !poseOverride) {
         // Jump gate (v2 §8): a weakly supported solve that moves the camera
@@ -295,14 +317,16 @@ export class MapTracker {
       }
       if (accept) {
         tracked = true;
-        inlierCount = res.inlierCount;
-        meanErrPx = res.meanError * f;
         this._pose = res.pose;
         this._framesSinceTracked = 0;
+        // Classify every observed landmark (mature and young) against the final pose.
+        const cls = mask ? this.classify(res.pose, n, cfg.pnpInlierPx / f) : res;
+        inlierCount = cls.inlierCount;
+        meanErrPx = cls.meanError * f;
         const maxErr = cfg.maxTriangulationErrorPx / f;
         for (let i = 0; i < n; i++) {
           const lm = this.map.get(obsTracks[i].landmarkId)!;
-          if (res.inliers[i]) {
+          if (cls.inliers[i]) {
             lm.observations++;
             lm.lastSeenFrame = frameId;
             lm.outlierCount = 0;
@@ -311,7 +335,12 @@ export class MapTracker {
             if (cfg.enableLandmarkDepthRefinement) this.refineLandmark(lm, obsTracks[i], k, maxErr);
           } else {
             lm.outlierCount++;
-            if (lm.outlierCount > cfg.maxOutlierCount) {
+            if (lm.observations <= 2 && lm.outlierCount >= cfg.youngOutlierFrames) {
+              // A candidate that disagrees with the pose right away was a bad
+              // triangulation: drop it before it can bias anything.
+              obsTracks[i].landmarkId = -1;
+              this.map.remove(lm.id);
+            } else if (lm.outlierCount > cfg.maxOutlierCount) {
               // The track drifted away from the landmark (LK drift) more
               // often than the landmark is wrong: unlink the track and keep
               // the landmark for the map / plane; young landmarks (never
@@ -362,6 +391,9 @@ export class MapTracker {
       const maxErr = cfg.maxTriangulationErrorPx / f;
       const minAngle = (cfg.minTriangulationAngleDeg * Math.PI) / 180;
       const minPar = cfg.triangulateMinParallaxPx;
+      // Depth sanity against the existing map (a point "at infinity" or in
+      // front of the lens is a triangulation failure, not a landmark).
+      const medDepth = n > 0 ? this.medianDepth(this._pose, n) : 0;
       for (const t of tracks) {
         if (t.landmarkId >= 0 || !t.anchorPose || t.anchorFrame === frameId) continue;
         if (Math.hypot(t.x - t.anchorX, t.y - t.anchorY) < minPar) continue;
@@ -376,6 +408,7 @@ export class MapTracker {
         triangulatePoint(rel, x1, y1, x2, y2, this.tri);
         if (this.tri.depth1 <= 0 || this.tri.depth2 <= 0) continue;
         if (this.tri.error > maxErr || this.tri.parallax < minAngle) continue;
+        if (medDepth > 0 && (this.tri.depth2 > cfg.maxDepthRatio * medDepth || this.tri.depth2 < medDepth / cfg.maxDepthRatio)) continue;
         // To map frame: X_map = anchorInv(X_anchor)
         const pa = this.tri.point;
         const r = anchorInv.rotation;
@@ -435,6 +468,34 @@ export class MapTracker {
     lm.position[1] = r[3] * pa[0] + r[4] * pa[1] + r[5] * pa[2] + tt[1];
     lm.position[2] = r[6] * pa[0] + r[7] * pa[1] + r[8] * pa[2] + tt[2];
     lm.parallax = this.tri.parallax;
+  }
+
+  /** Inlier classification of the first `n` scratch observations under `pose`. */
+  private classify(pose: RigidTransform, n: number, thr: number): { inliers: Uint8Array; inlierCount: number; meanError: number } {
+    const r = pose.rotation;
+    const t = pose.translation;
+    const inliers = new Uint8Array(n);
+    const thrSq = thr * thr;
+    let count = 0;
+    let errSum = 0;
+    for (let i = 0; i < n; i++) {
+      const X = this.pts3[i * 3], Y = this.pts3[i * 3 + 1], Z = this.pts3[i * 3 + 2];
+      const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
+      if (z <= 1e-6) continue;
+      const u = (r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z;
+      const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
+      const e2 = (u - this.obsX[i]) ** 2 + (v - this.obsY[i]) ** 2;
+      if (e2 < thrSq) {
+        inliers[i] = 1;
+        count++;
+        errSum += Math.sqrt(e2);
+      }
+    }
+    return { inliers, inlierCount: count, meanError: count ? errSum / count : 0 };
+  }
+
+  private ensureMask(n: number): void {
+    if (this.maskBuf.length < n) this.maskBuf = new Uint8Array(n);
   }
 
   /** Median depth of the first `n` scratch points under `pose` (map units). */

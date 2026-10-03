@@ -157,6 +157,19 @@ export interface LandmarkConfig {
   minPnPInliers: number;
   /** Consecutive PnP-outlier frames before a landmark is removed. */
   maxOutlierCount: number;
+  /** A young landmark (≤ 2 observations) is removed after this many outlier frames. */
+  youngOutlierFrames: number;
+  /**
+   * Landmarks take part in the pose solve only once they have been PnP
+   * inliers this many times (v2 §27: a fresh triangulation is a candidate,
+   * not yet part of the fixed map). Younger ones are classified against the
+   * solved pose and mature or die.
+   */
+  minObservationsForPose: number;
+  /** Use the mature-only solve when at least this many mature landmarks are observed. */
+  minMaturePnPPoints: number;
+  /** Reject new triangulations deeper than this × (or shallower than 1/this ×) the median landmark depth. */
+  maxDepthRatio: number;
   /** Upper bound on stored landmarks (spec §48: 500–2000). */
   maxLandmarks: number;
   /** Landmarks unseen for this many frames are removed. */
@@ -419,13 +432,20 @@ export const DEFAULT_CONFIG: ARConfig = {
     initMinTranslationConfidence: 0.5,
     initMinLandmarks: 30,
     minTriangulationAngleDeg: 1.0,
-    maxTriangulationErrorPx: 4.0,
-    triangulateMinParallaxPx: 6,
+    // The map is fixed once built (no depth refinement), so landmarks must
+    // be well conditioned when created: 20 px of parallax from the anchor
+    // (6 px with later refinement before) and a tight two-view residual.
+    maxTriangulationErrorPx: 2.5,
+    triangulateMinParallaxPx: 20,
     pnpHuberPx: 4.0,
     pnpInlierPx: 6.0,
     pnpMaxIterations: 10,
     minPnPInliers: 12,
     maxOutlierCount: 5,
+    youngOutlierFrames: 2,
+    minObservationsForPose: 3,
+    minMaturePnPPoints: 24,
+    maxDepthRatio: 3,
     maxLandmarks: 1000,
     maxLandmarkAgeFrames: 150,
     lostResetFrames: 150,

@@ -221,6 +221,8 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **Pose smoothing A/B**: `?smooth=0`（§17）。**合格条件は smoothing OFF でも World 固定**
 - **実機で確認すべきこと（§26, §34 Step 2）**: 既定（精錬 OFF）と `?refine=1` で、Cube 配置後に 5 / 10 / 20 / 50 cm 横移動したときの画面ドリフトを比較。HUD の `world C` が移動量相当（10 cm → ≈0.10）変化し、`Object 1` の X Y Z が不変であること
 - **実機結果（Map 固定後）**: ゆっくり動かせば Cube は固定される（ユーザー確認）。少し速く動かすと失探、または別の場所へ飛ぶ
+- **実機結果（速い動き対処後、`4d5375e`）**: 追跡点 257 個すべて追えているのに PnP inlier 0 で `RELOCALIZING`、Landmark が 157 → 649 に膨張（plane inlier 0）。精錬 OFF により、視差 6 px の小さな基線で三角測量した精度の悪い Landmark がそのまま固定され、カメラが動くほど PnP が合わなくなる → 失探・別の Landmark 群で復帰して飛ぶ、という構図
+- **Landmark を「作るときに厳しく」（v2 §27–28、Map 固定は維持）**: 新規三角測量の必要視差 6 → 20 px、二視点残差 4 → 2.5 px、既存 Landmark の中央奥行きの 3 倍超 / 1/3 未満は棄却（`maxDepthRatio`）。新しい Landmark は候補扱いで、PnP inlier を 3 回重ねる（`minObservationsForPose`）まで姿勢の解には使わず（成熟 Landmark が 24 個以上あるとき。`minMaturePnPPoints`）、解いた姿勢で分類して成熟させる。若い Landmark が 2 フレーム外れたら即削除（`youngOutlierFrames`）
 - **速い動きへの対処**: (1) LK ピラミッドを 3 → 4 段（`tracker.pyramidLevels`。1 フレームの追従範囲が約 28 → 56 px）、(2) 前フレームの変位を初期値にする等速予測（`tracker.predictMotion`）。合成の 32 px/frame パンで追跡維持率 0.76–0.80 → 0.82–0.95。(3) 姿勢ジャンプの拒否（§8、`landmarks.jumpReject*`）: inlier 40 未満または誤差 1.5 px 超の弱い PnP 解で、カメラ中心が max(Landmark 中央奥行きの 8%、前フレーム移動量の 3 倍) を超えて動くか 20° 超回転した場合は採用せず姿勢を保持（HUD の PnP 行に `JUMP`）。多数 inlier で誤差が小さい解は速い動きとして受け入れる
 
 ### 実機チューニング（iPhone Safari、2026-10-03）
