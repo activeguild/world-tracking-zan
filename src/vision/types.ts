@@ -28,6 +28,8 @@ export interface Track {
   score: number;
   /** Survived RANSAC in the current frame. New tracks start as inliers. */
   inlier: boolean;
+  /** Consecutive frames the track was a frame-to-frame RANSAC outlier. */
+  outlierStreak: number;
   /**
    * Position in the current reference frame (Phase 2 two-view geometry).
    * Only meaningful when `refFrame` equals the engine's reference frame id;

@@ -78,6 +78,8 @@ export interface RansacConfig {
   maxIterations: number;
   /** Minimum correspondences needed to run RANSAC at all. */
   minCorrespondences: number;
+  /** Consecutive outlier frames before a track is dropped (1 = immediately). */
+  outlierFramesToDrop: number;
 }
 
 /** Two-view relative pose estimation (spec §15–§18, Phase 2). */
@@ -301,10 +303,16 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxDisplacement: 60,
   },
   ransac: {
-    inlierThreshold: 3.0,
+    // Frame-to-frame homography gate. Real rooms are not planar: with the
+    // camera 1 m from the floor and furniture 3 m away, correct tracks on the
+    // background legitimately deviate from the floor homography by several
+    // pixels per frame. The gate therefore only catches gross LK failures;
+    // tracks must be outliers in `outlierFramesToDrop` consecutive frames.
+    inlierThreshold: 6.0,
     confidence: 0.99,
     maxIterations: 200,
     minCorrespondences: 12,
+    outlierFramesToDrop: 2,
   },
   pose: {
     minCorrespondences: 20,
@@ -325,11 +333,11 @@ export const DEFAULT_CONFIG: ARConfig = {
     initMinLandmarks: 30,
     minTriangulationAngleDeg: 1.0,
     maxTriangulationErrorPx: 4.0,
-    triangulateMinParallaxPx: 8,
+    triangulateMinParallaxPx: 6,
     pnpHuberPx: 4.0,
     pnpInlierPx: 6.0,
     pnpMaxIterations: 10,
-    minPnPInliers: 15,
+    minPnPInliers: 12,
     maxOutlierCount: 5,
     maxLandmarks: 1000,
     maxLandmarkAgeFrames: 150,
@@ -343,7 +351,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     keyframeMaxFrameGap: 90,
     keyframeRotationDeg: 10,
     keyframeParallaxPx: 40,
-    candidatesPerFrame: 3,
+    candidatesPerFrame: 2,
     coarseSearchRadius: 24,
     coarseMinScore: 0.45,
     lkMaxDisplacementPx: 40,
@@ -353,7 +361,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     goodInliers: 60,
     maxMeanErrorPx: 1.5,
     startAfterLostFrames: 1,
-    attemptEveryNFrames: 1,
+    attemptEveryNFrames: 2,
   },
   plane: {
     inlierThresholdRatio: 0.05,

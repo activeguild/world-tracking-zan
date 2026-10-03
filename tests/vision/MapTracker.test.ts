@@ -44,7 +44,7 @@ function makeTracks(points: Float64Array, pose: RigidTransform, refPose: RigidTr
     const ref = project(points, refPose, i, 0.3, rng);
     if (!cur || !ref) continue;
     tracks.push({
-      id: i + 1, x: cur[0], y: cur[1], prevX: cur[0], prevY: cur[1], age: 5, score: 10, inlier: true,
+      id: i + 1, x: cur[0], y: cur[1], prevX: cur[0], prevY: cur[1], age: 5, score: 10, inlier: true, outlierStreak: 0,
       refX: ref[0], refY: ref[1], refFrame,
       landmarkId: -1, anchorFrame: -1, anchorX: cur[0], anchorY: cur[1], anchorPose: null,
     });
@@ -131,7 +131,7 @@ describe("MapTracker", () => {
       const p = project(points, cameraAt(f0 + 1), i, 0.3, rng);
       if (!p) continue;
       byId.set(i + 1, {
-        id: i + 1, x: p[0], y: p[1], prevX: p[0], prevY: p[1], age: 0, score: 10, inlier: true,
+        id: i + 1, x: p[0], y: p[1], prevX: p[0], prevY: p[1], age: 0, score: 10, inlier: true, outlierStreak: 0,
         refX: p[0], refY: p[1], refFrame: -1,
         landmarkId: -1, anchorFrame: -1, anchorX: p[0], anchorY: p[1], anchorPose: null,
       });

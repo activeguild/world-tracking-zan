@@ -256,12 +256,21 @@ export class MapTracker {
     }
 
     // ---- Anchors for tracks the map has not seen yet ----
+    // Anchors need a trustworthy pose: only assign them in tracked frames.
+    // While the camera is lost, anchors of landmark-less tracks are cleared
+    // so they re-anchor once the pose is known again.
     for (const t of tracks) {
-      if (t.anchorFrame < 0) {
-        t.anchorFrame = frameId;
-        t.anchorX = t.x;
-        t.anchorY = t.y;
-        t.anchorPose = this._pose;
+      if (t.landmarkId >= 0) continue;
+      if (tracked) {
+        if (t.anchorFrame < 0) {
+          t.anchorFrame = frameId;
+          t.anchorX = t.x;
+          t.anchorY = t.y;
+          t.anchorPose = this._pose;
+        }
+      } else {
+        t.anchorFrame = -1;
+        t.anchorPose = null;
       }
     }
 

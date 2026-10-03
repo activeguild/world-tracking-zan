@@ -454,6 +454,7 @@ export class VisionEngine {
         age: 1,
         score: 0,
         inlier: true,
+        outlierStreak: 0,
         refX: o.x,
         refY: o.y,
         refFrame: -1,
@@ -593,12 +594,27 @@ export class VisionEngine {
       // Too few correspondences to run RANSAC: keep all.
       return n;
     }
+    // Outliers are dropped only after `outlierFramesToDrop` consecutive
+    // frames: one-off deviations (parallax in non-planar scenes) survive,
+    // repeated ones (a track that jumped) do not.
+    const dropAfter = this.config.ransac.outlierFramesToDrop;
     const kept: Track[] = [];
+    let inlierCount = 0;
     for (let i = 0; i < n; i++) {
-      if (r.inliers[i]) kept.push(tracks[i]);
+      const t = tracks[i];
+      if (r.inliers[i]) {
+        t.outlierStreak = 0;
+        t.inlier = true;
+        inlierCount++;
+        kept.push(t);
+      } else {
+        t.outlierStreak++;
+        t.inlier = false;
+        if (t.outlierStreak < dropAfter) kept.push(t);
+      }
     }
     this.tracks = kept;
-    return kept.length;
+    return inlierCount;
   }
 
   /** Detect new FAST corners away from existing tracks and add them. */
@@ -623,6 +639,7 @@ export class VisionEngine {
         age: 0,
         score: c.score,
         inlier: true,
+        outlierStreak: 0,
         refX: c.x,
         refY: c.y,
         refFrame: -1,
