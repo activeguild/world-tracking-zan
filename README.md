@@ -6,9 +6,27 @@ single rear camera, `getUserMedia()`, and our own vision pipeline running in a
 Web Worker.
 
 The full specification lives in [CLAUDE.md](./CLAUDE.md). Development is
-strictly phased; **Phases 1–4 (feature tracking, relative camera pose,
-landmark map + plane detection, world coordinate + Three.js placement) are
-implemented**, later phases are not started.
+strictly phased; **Phases 1–5 (feature tracking, relative camera pose,
+landmark map + plane detection, world coordinate + Three.js placement,
+keyframes + relocalization) are implemented**, later phases are not started.
+
+## Phase 5 — keyframes and relocalization
+
+```
+tracked frames → keyframes (pose, image pyramid, landmark observations;
+                 new one after 10° rotation / 40 px parallax / 90 frames; max 8)
+camera lost in the map (PnP fails) → RELOCALIZING, world kept, objects hold 1.5 s
+  → per frame, most recent keyframes first:
+      coarse 1/8-res NCC shift search (±192 px)
+      → pyramidal LK keyframe → current, seeded with the shift
+      → PnP from the keyframe pose (LM + Huber), ≥ 20 inliers, ≤ 2 px
+  → success: pose restored in the same map, observations become live tracks,
+             placed objects reappear where they were
+  → no success for 5 s → map reset (world lost)
+```
+
+Placing a GLB instead of the cube: `?model=URL&size=0.15` (same-origin or
+CORS-enabled URL); in code `ar.placeObject(gltf.scene, hit, 0.15)`.
 
 ## Phase 4 — world coordinate, hit test, Three.js placement
 
@@ -115,6 +133,7 @@ Query parameters:
 | `?worker=0` | run the vision engine on the main thread    |
 | `?hud=0`    | hide the HUD                                |
 | `?gravity=x,y,z` | override the gravity direction (camera frame) |
+| `?model=URL&size=0.15` | place this GLB (footprint in meters) instead of the cube |
 
 ## Tests
 
@@ -154,7 +173,7 @@ src/
   vision/    ImagePyramid, FeatureDetector (FAST-9), FeatureTracker (LK + FB),
              OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
              LandmarkMap, MapTracker (init / PnP / triangulation), PlaneDetector,
-             VisionEngine, TrackingQuality, types
+             Keyframe, Relocalizer (coarse NCC shift + LK + PnP), VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
              HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)

@@ -55,6 +55,8 @@ export interface FrameObservation {
   mapInitialized?: boolean;
   /** A stable horizontal plane is available (Phase 3). */
   planeFound?: boolean;
+  /** Map initialized but the camera pose could not be computed this frame (Phase 5). */
+  mapLost?: boolean;
 }
 
 /**
@@ -92,13 +94,14 @@ export class TrackingStateMachine {
       case TrackingState.TRACKING_LOST:
       case TrackingState.RELOCALIZING:
         if (obs.inlierCount >= t.minTrackedForTracking) {
-          this._state = TrackingState.TRACKING;
+          // Features track again. If a map exists but the camera is not yet
+          // located in it, we are relocalizing; otherwise plain tracking.
+          this._state = obs.mapInitialized && obs.mapLost ? TrackingState.RELOCALIZING : TrackingState.TRACKING;
           this.badFrames = 0;
-        } else if (
-          this._state === TrackingState.RELOCALIZING ||
-          this._state === TrackingState.TRACKING_LOST
-        ) {
-          // Nothing tracked for a while → go back to searching.
+        } else if (this._state === TrackingState.TRACKING_LOST) {
+          // Nothing tracked for a while → searching (or relocalizing when a map exists).
+          this._state = obs.mapInitialized ? TrackingState.RELOCALIZING : TrackingState.SEARCHING_FEATURES;
+        } else if (this._state === TrackingState.RELOCALIZING && !obs.mapInitialized) {
           this._state = TrackingState.SEARCHING_FEATURES;
         }
         return this._state;
@@ -116,6 +119,11 @@ export class TrackingStateMachine {
           return this._state;
         }
         this.badFrames = 0;
+        // Phase 5: features track but the camera is not located in the map.
+        if (obs.mapInitialized && obs.mapLost) {
+          this._state = TrackingState.RELOCALIZING;
+          return this._state;
+        }
         // Phase 3 transitions driven by the landmark map / plane detector.
         if (this._state === TrackingState.AR_ACTIVE) {
           if (!obs.mapInitialized) this._state = TrackingState.TRACKING;

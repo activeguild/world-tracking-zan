@@ -49,6 +49,7 @@ export interface HudStats {
   } | null;
   gravityAvailable?: boolean;
   world?: { ready: boolean; scale: number; placed: number } | null;
+  reloc?: { keyframes: number; attempt: string; inliers: number; successes: number } | null;
 }
 
 function fmt(deg: number): string {
@@ -101,6 +102,7 @@ export class DebugOverlay {
         : [`Plane       —`]),
       `Gravity     ${s.gravityAvailable ? "yes" : "no (fallback up = −Y)"}`,
       `World       ${s.world?.ready ? `ready  scale ${s.world.scale.toFixed(3)} m/unit  objects ${s.world.placed}` : "—"}`,
+      `Keyframes   ${s.reloc ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${s.reloc.attempt === "success" ? ` (${s.reloc.inliers})` : ""}  ok×${s.reloc.successes}` : "—"}`,
       `FAST thr    ${s.fastThreshold}`,
       `Proc size   ${s.processingSize}  [${s.backend}]`,
     ];

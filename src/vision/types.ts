@@ -95,6 +95,19 @@ export interface MapPoseOutput {
 /** Packed landmark layout (Float32): [x, y, z, planeInlier] in the map frame. */
 export const LANDMARK_STRIDE = 4;
 
+/** Keyframe / relocalization status (Phase 5). */
+export interface RelocalizationOutput {
+  keyframes: number;
+  /** Result of the attempt made in this frame. */
+  attempt: "none" | "success" | "fail";
+  inlierCount: number;
+  candidatesTried: number;
+  /** Frame id of the last successful relocalization (-1 when none). */
+  lastSuccessFrame: number;
+  /** Total successful relocalizations in this session. */
+  successCount: number;
+}
+
 /**
  * Camera pose output (Phase 2, spec §17–§18). Scale-free: the translation is
  * a unit direction. All quantities are in the CV camera frame
@@ -167,6 +180,8 @@ export interface VisionOutput {
   mapPose: MapPoseOutput | null;
   /** Current plane candidate (Phase 3). Null when none. */
   plane: PlaneOutput | null;
+  /** Keyframe / relocalization status (Phase 5). */
+  relocalization: RelocalizationOutput;
   /** Packed landmarks for debug rendering: see `LANDMARK_STRIDE`. */
   landmarks: Float32Array;
   landmarkCount: number;

@@ -81,6 +81,14 @@ export class ARWorld {
     return obj;
   }
 
+  /** Add a loaded model normalized to `targetSize` meters (see ARObject.fromModel). */
+  addModel(model: THREE.Object3D, targetSize: number): ARObject {
+    const obj = ARObject.fromModel(this.nextId++, model, targetSize);
+    this.objects.push(obj);
+    this.root.add(obj.root);
+    return obj;
+  }
+
   remove(obj: ARObject): void {
     const i = this.objects.indexOf(obj);
     if (i >= 0) this.objects.splice(i, 1);

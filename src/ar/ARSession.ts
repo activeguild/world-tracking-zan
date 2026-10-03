@@ -12,7 +12,7 @@ import { ARRenderer } from "../rendering/ARRenderer";
 import { ARWorld } from "../rendering/ARWorld";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
-import type { MapPoseOutput, PlaneOutput, PoseOutput } from "../vision/types";
+import type { MapPoseOutput, PlaneOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
 import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
@@ -92,6 +92,7 @@ export interface ARStats {
   /** Map units → meters (0 when no world). */
   worldScale: number;
   placedObjects: number;
+  relocalization: RelocalizationOutput | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -150,6 +151,7 @@ export class ARSession {
   private mapPose: MapPoseOutput | null = null;
   private plane: PlaneOutput | null = null;
   private landmarkCount = 0;
+  private relocalization: RelocalizationOutput | null = null;
   private planeWasFound = false;
   private lastGravity: number[] | null = null;
   private visionMs = 0;
@@ -303,12 +305,22 @@ export class ARSession {
     return obj;
   }
 
-  /** Place an arbitrary Three.js object (e.g. a loaded GLB) at a hit. */
-  placeObject(object3d: THREE.Object3D, hit: ARHitResult): ARObject {
-    const obj = this.world.add(object3d);
+  /**
+   * Place an arbitrary Three.js object (e.g. a loaded GLB scene) at a hit.
+   * With `targetSize` > 0 the model is normalized to that footprint (m) and
+   * stood on the plane; otherwise it is used as is.
+   */
+  placeObject(object3d: THREE.Object3D, hit: ARHitResult, targetSize = 0): ARObject {
+    const obj = targetSize > 0 ? this.world.addModel(object3d, targetSize) : this.world.add(object3d);
     obj.place([hit.position.x, hit.position.y, hit.position.z]);
     this.renderNow();
     return obj;
+  }
+
+  /** Move an already placed object to a new hit. */
+  moveObject(obj: ARObject, hit: ARHitResult): void {
+    obj.place([hit.position.x, hit.position.y, hit.position.z]);
+    this.renderNow();
   }
 
   private renderNow(): void {
@@ -348,6 +360,7 @@ export class ARSession {
       worldReady: this.worldAnchor.isReady,
       worldScale: this.worldAnchor.frame?.scale ?? 0,
       placedObjects: this.world.placedCount,
+      relocalization: this.relocalization,
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -430,6 +443,7 @@ export class ARSession {
     this.mapPose = r.mapPose;
     this.plane = r.plane;
     this.landmarkCount = r.landmarkCount;
+    this.relocalization = r.relocalization;
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
     this.setState(r.state);
@@ -502,6 +516,7 @@ export class ARSession {
     const tracking =
       r.mapPose.framesSinceTracked === 0 &&
       this._state !== TrackingState.TRACKING_LOST &&
+      this._state !== TrackingState.RELOCALIZING &&
       this._state !== TrackingState.SEARCHING_FEATURES;
     if (pose && tracking) this.arCamera.setPose(pose, r.timestamp / 1000);
     this.world.updateTracking(tracking, performance.now());

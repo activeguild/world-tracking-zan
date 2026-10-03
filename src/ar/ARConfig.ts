@@ -175,6 +175,42 @@ export interface PlaneConfig {
   minLandmarkObservations: number;
 }
 
+/** Keyframes and relocalization (spec §35–§36, Phase 5). */
+export interface RelocalizationConfig {
+  /** Keyframes kept (the first one is always kept). */
+  maxKeyframes: number;
+  /** PnP inliers required in a frame to become a keyframe. */
+  keyframeMinInliers: number;
+  /** Minimum frames between keyframes. */
+  keyframeMinFrameGap: number;
+  /** Create a keyframe at the latest after this many frames. */
+  keyframeMaxFrameGap: number;
+  /** Rotation since the last keyframe (degrees) that triggers a new one. */
+  keyframeRotationDeg: number;
+  /** Median landmark displacement since the last keyframe (px) that triggers a new one. */
+  keyframeParallaxPx: number;
+  /** Keyframe candidates tried per lost frame. */
+  candidatesPerFrame: number;
+  /** Coarse search radius (pixels of the coarse image ≈ level-0 / 8). */
+  coarseSearchRadius: number;
+  /** Minimum NCC score of the coarse alignment to proceed. */
+  coarseMinScore: number;
+  /** LK displacement gate around the coarse guess (px). */
+  lkMaxDisplacementPx: number;
+  pnpHuberPx: number;
+  pnpInlierPx: number;
+  /** Inliers needed to accept a relocalization. */
+  minInliers: number;
+  /** Stop trying more candidates once this many inliers are found. */
+  goodInliers: number;
+  /** Accept only when the mean reprojection error is below this (px). */
+  maxMeanErrorPx: number;
+  /** Frames the map may stay lost before a relocalization attempt starts. */
+  startAfterLostFrames: number;
+  /** Try to relocalize every N lost frames (cost control). */
+  attemptEveryNFrames: number;
+}
+
 /** World anchoring, hit test and rendering (spec §25–§30, §33–§34, Phase 4). */
 export interface WorldConfig {
   /** Assumed camera→plane distance (m) when the world is created; fixes the monocular scale. */
@@ -221,6 +257,7 @@ export interface ARConfig {
   pose: PoseConfig;
   landmarks: LandmarkConfig;
   plane: PlaneConfig;
+  relocalization: RelocalizationConfig;
   world: WorldConfig;
   state: StateConfig;
   debug: DebugConfig;
@@ -289,8 +326,27 @@ export const DEFAULT_CONFIG: ARConfig = {
     minPnPInliers: 15,
     maxOutlierCount: 3,
     maxLandmarks: 1000,
-    maxLandmarkAgeFrames: 60,
-    lostResetFrames: 30,
+    maxLandmarkAgeFrames: 150,
+    lostResetFrames: 150,
+  },
+  relocalization: {
+    maxKeyframes: 8,
+    keyframeMinInliers: 30,
+    keyframeMinFrameGap: 10,
+    keyframeMaxFrameGap: 90,
+    keyframeRotationDeg: 10,
+    keyframeParallaxPx: 40,
+    candidatesPerFrame: 3,
+    coarseSearchRadius: 24,
+    coarseMinScore: 0.3,
+    lkMaxDisplacementPx: 40,
+    pnpHuberPx: 3,
+    pnpInlierPx: 4,
+    minInliers: 20,
+    goodInliers: 60,
+    maxMeanErrorPx: 2.0,
+    startAfterLostFrames: 1,
+    attemptEveryNFrames: 1,
   },
   plane: {
     inlierThresholdRatio: 0.02,
@@ -345,6 +401,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     pose: { ...base.pose, ...overrides.pose },
     landmarks: { ...base.landmarks, ...overrides.landmarks },
     plane: { ...base.plane, ...overrides.plane },
+    relocalization: { ...base.relocalization, ...overrides.relocalization },
     world: {
       ...base.world,
       ...overrides.world,
@@ -366,6 +423,7 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     pose: { ...c.pose },
     landmarks: { ...c.landmarks },
     plane: { ...c.plane },
+    relocalization: { ...c.relocalization },
     world: { ...c.world, positionSmoothing: { ...c.world.positionSmoothing }, rotationSmoothing: { ...c.world.rotationSmoothing } },
     state: { ...c.state },
     debug: { ...c.debug },

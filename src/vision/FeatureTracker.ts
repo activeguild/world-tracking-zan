@@ -71,21 +71,27 @@ export class FeatureTracker {
     points: Float32Array,
     count: number,
     out?: TrackResult,
+    /** Optional initial guesses in `cur` (x,y interleaved); defaults to `points`. */
+    guesses: Float32Array | null = null,
+    /** Override of `maxDisplacement` (e.g. for relocalization with a known coarse shift). */
+    maxDisplacement = this.config.maxDisplacement,
   ): TrackResult {
     const res = out && out.status.length >= count ? out : allocResult(count);
     const cfg = this.config;
     const fbThreshSq = cfg.forwardBackwardThreshold * cfg.forwardBackwardThreshold;
-    const maxDispSq = cfg.maxDisplacement * cfg.maxDisplacement;
+    const maxDispSq = maxDisplacement * maxDisplacement;
     const tmp = new Float32Array(3); // x, y, residual
     let okCount = 0;
 
     for (let i = 0; i < count; i++) {
       const px = points[i * 2];
       const py = points[i * 2 + 1];
+      const gx = guesses ? guesses[i * 2] : px;
+      const gy = guesses ? guesses[i * 2 + 1] : py;
       res.fbError[i] = 0;
       res.residual[i] = 0;
 
-      const status = this.trackOne(prev, cur, px, py, px, py, tmp);
+      const status = this.trackOne(prev, cur, px, py, gx, gy, tmp);
       if (status !== TrackStatus.OK) {
         res.status[i] = status;
         continue;
@@ -93,8 +99,10 @@ export class FeatureTracker {
       const nx = tmp[0];
       const ny = tmp[1];
       res.residual[i] = tmp[2];
-      const dx = nx - px;
-      const dy = ny - py;
+      // Displacement is measured from the initial guess so that a coarse
+      // pre-alignment (relocalization) does not count against the gate.
+      const dx = nx - gx;
+      const dy = ny - gy;
       if (dx * dx + dy * dy > maxDispSq) {
         res.status[i] = TrackStatus.TOO_FAR;
         continue;

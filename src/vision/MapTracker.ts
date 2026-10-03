@@ -67,6 +67,15 @@ export class MapTracker {
     return this.lastResult;
   }
 
+  /**
+   * Phase 5: a relocalization found the camera in the existing map. The
+   * pose becomes the PnP prior of the following `update()`.
+   */
+  applyRelocalization(pose: RigidTransform): void {
+    this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
+    this._framesSinceTracked = 0;
+  }
+
   reset(tracks: readonly Track[]): void {
     this.map.clear();
     this._initialized = false;

@@ -7,6 +7,7 @@ import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker } from "./MapTracker";
 import { PlaneDetector } from "./PlaneDetector";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
+import { Relocalizer } from "./Relocalizer";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
 import {
   LANDMARK_STRIDE,
@@ -14,6 +15,7 @@ import {
   type MapPoseOutput,
   type PlaneOutput,
   type PoseOutput,
+  type RelocalizationOutput,
   type Track,
   type VisionInput,
   type VisionOutput,
@@ -88,8 +90,14 @@ export class VisionEngine {
   private packedLandmarks = new Float32Array(0);
   private packedLandmarkCount = 0;
 
+  // Phase 5: keyframes + relocalization.
+  private readonly relocalizer: Relocalizer;
+  private relocStatus: RelocalizationOutput = emptyReloc();
+  private relocSuccessCount = 0;
+  private relocLastSuccessFrame = -1;
+
   /** Timing breakdown of the last frame (ms). */
-  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, total: 0 };
+  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, reloc: 0, total: 0 };
 
   constructor(
     width: number,
@@ -120,6 +128,11 @@ export class VisionEngine {
     this.poseEstimator = new PoseEstimator(config.pose, config.ransac, rng);
     this.mapTracker = new MapTracker(config.landmarks);
     this.planeDetector = new PlaneDetector(config.plane, rng);
+    this.relocalizer = new Relocalizer(config.relocalization, config.tracker);
+  }
+
+  get keyframeCount(): number {
+    return this.relocalizer.count;
   }
 
   /** Last camera pose in the map frame (null until the map is initialized). */
@@ -167,6 +180,10 @@ export class VisionEngine {
     this.lastMapPose = null;
     this.lastPlane = null;
     this.packedLandmarkCount = 0;
+    this.relocalizer.reset();
+    this.relocStatus = emptyReloc();
+    this.relocSuccessCount = 0;
+    this.relocLastSuccessFrame = -1;
   }
 
   /** Last pose output (null until a reference frame and enough tracks exist). */
@@ -247,6 +264,7 @@ export class VisionEngine {
       featureCount,
       mapInitialized: this.mapTracker.initialized,
       planeFound: this.lastPlane?.found ?? false,
+      mapLost: this.mapTracker.initialized && this.mapTracker.framesSinceTracked > 0,
     });
 
     // Swap pyramids for the next frame.
@@ -261,7 +279,7 @@ export class VisionEngine {
     this.timing.ransac = t3 - t2;
     this.timing.detect = t4 - t3;
     this.timing.pose = t4b - t4;
-    this.timing.map = t4c - t4b;
+    this.timing.map = t4c - t4b - this.timing.reloc;
     this.timing.plane = t4d - t4c;
     this.timing.total = t5 - t0;
 
@@ -273,6 +291,7 @@ export class VisionEngine {
       pose,
       mapPose: this.lastMapPose,
       plane: this.lastPlane,
+      relocalization: this.relocStatus,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
       landmarkCount: this.packedLandmarkCount,
       tracks: packTracks(this.tracks),
@@ -298,18 +317,63 @@ export class VisionEngine {
       rotationPrior = mat3Multiply(this.lastRelative.rotation, transpose3(this.prevFrameRotation));
     }
 
+    this.timing.reloc = 0;
+    this.relocStatus = {
+      keyframes: this.relocalizer.count,
+      attempt: "none",
+      inlierCount: 0,
+      candidatesTried: 0,
+      lastSuccessFrame: this.relocLastSuccessFrame,
+      successCount: this.relocSuccessCount,
+    };
+
     if (!tracker.initialized) {
       if (this.lastRelative && this.lastRelativeRefFrame >= 0) {
         if (tracker.tryInitialize(this.tracks, this.lastRelative, this.lastRelativeRefFrame, frameId, k)) {
           this.planeDetector.reset();
+          this.relocalizer.reset();
+          // The initialization frame is the first keyframe.
+          this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
+          this.relocStatus.keyframes = this.relocalizer.count;
         }
       }
     } else {
+      // Phase 5: relocalize when the camera was not located in the previous frame.
+      const rc = this.config.relocalization;
+      if (
+        tracker.framesSinceTracked >= rc.startAfterLostFrames &&
+        (tracker.framesSinceTracked - rc.startAfterLostFrames) % rc.attemptEveryNFrames === 0
+      ) {
+        const tr0 = now();
+        const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k);
+        this.timing.reloc = now() - tr0;
+        this.relocStatus.attempt = r.success ? "success" : "fail";
+        this.relocStatus.inlierCount = r.inlierCount;
+        this.relocStatus.candidatesTried = r.candidatesTried;
+        if (r.success && r.pose) {
+          tracker.applyRelocalization(r.pose);
+          this.injectRelocalizedTracks(r.tracks, frameId, r.pose);
+          rotationPrior = null; // the relocalized pose is the prior
+          this.relocSuccessCount++;
+          this.relocLastSuccessFrame = frameId;
+          this.relocStatus.lastSuccessFrame = frameId;
+          this.relocStatus.successCount = this.relocSuccessCount;
+        }
+      }
+
       const res = tracker.update(this.tracks, frameId, k, rotationPrior);
-      if (!res.tracked && tracker.framesSinceTracked > cfg.lostResetFrames) {
-        // Lost the map for too long: start over (Phase 5 adds relocalization).
+      if (res.tracked) {
+        // Keyframe policy (spec §35).
+        const par = this.medianParallaxSinceLastKeyframe();
+        if (this.relocalizer.shouldCreate(tracker.pose, frameId, res.inlierCount, par)) {
+          this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
+          this.relocStatus.keyframes = this.relocalizer.count;
+        }
+      } else if (tracker.framesSinceTracked > cfg.lostResetFrames) {
+        // Lost for too long and relocalization did not succeed: start over.
         tracker.reset(this.tracks);
         this.planeDetector.reset();
+        this.relocalizer.reset();
       }
     }
 
@@ -330,6 +394,93 @@ export class VisionEngine {
     }
     // Remember this frame's relative rotation for the next prior.
     this.prevFrameRotation = this.lastRelative && this.lastRelative.model !== "none" ? this.lastRelative.rotation : null;
+  }
+
+  /**
+   * Phase 5: turn relocalized keyframe observations into live tracks so the
+   * following PnP / LK continue from them. Existing tracks observing the
+   * same landmark or sitting on the same spot are merged.
+   */
+  private injectRelocalizedTracks(
+    obs: { landmarkId: number; x: number; y: number }[],
+    frameId: number,
+    pose: { rotation: Float64Array; translation: Float64Array },
+  ): void {
+    const minDist = this.config.features.minDistance;
+    const minDistSq = minDist * minDist;
+    const byLandmark = new Map<number, Track>();
+    for (const t of this.tracks) if (t.landmarkId >= 0) byLandmark.set(t.landmarkId, t);
+    const anchorPose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
+    let added = 0;
+    for (const o of obs) {
+      const existing = byLandmark.get(o.landmarkId);
+      if (existing) {
+        existing.x = o.x;
+        existing.y = o.y;
+        continue;
+      }
+      // Reuse a nearby landmark-less track if there is one.
+      let near: Track | null = null;
+      for (const t of this.tracks) {
+        if (t.landmarkId >= 0) continue;
+        const dx = t.x - o.x;
+        const dy = t.y - o.y;
+        if (dx * dx + dy * dy < minDistSq) {
+          near = t;
+          break;
+        }
+      }
+      if (near) {
+        near.x = o.x;
+        near.y = o.y;
+        near.landmarkId = o.landmarkId;
+        near.anchorFrame = frameId;
+        near.anchorX = o.x;
+        near.anchorY = o.y;
+        near.anchorPose = anchorPose;
+        byLandmark.set(o.landmarkId, near);
+        continue;
+      }
+      if (this.tracks.length >= this.config.features.maxFeatures) continue;
+      this.tracks.push({
+        id: this.nextTrackId++,
+        x: o.x,
+        y: o.y,
+        prevX: o.x,
+        prevY: o.y,
+        age: 1,
+        score: 0,
+        inlier: true,
+        refX: o.x,
+        refY: o.y,
+        refFrame: -1,
+        landmarkId: o.landmarkId,
+        anchorFrame: frameId,
+        anchorX: o.x,
+        anchorY: o.y,
+        anchorPose,
+      });
+      added++;
+    }
+    void added;
+  }
+
+  /** Median pixel displacement of landmark tracks relative to the last keyframe. */
+  private medianParallaxSinceLastKeyframe(): number {
+    const kfs = this.relocalizer.keyframes;
+    if (kfs.length === 0) return Number.POSITIVE_INFINITY;
+    const last = kfs[kfs.length - 1];
+    const pos = new Map<number, { x: number; y: number }>();
+    for (const o of last.observations) pos.set(o.landmarkId, o);
+    const d: number[] = [];
+    for (const t of this.tracks) {
+      if (t.landmarkId < 0) continue;
+      const p = pos.get(t.landmarkId);
+      if (p) d.push(Math.hypot(t.x - p.x, t.y - p.y));
+    }
+    if (d.length === 0) return Number.POSITIVE_INFINITY;
+    d.sort((a, b) => a - b);
+    return d[d.length >> 1];
   }
 
   /** Phase 3: RANSAC plane on the landmarks, horizontality via gravity when available. */
@@ -627,4 +778,8 @@ export class VisionEngine {
 
 function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function emptyReloc(): RelocalizationOutput {
+  return { keyframes: 0, attempt: "none", inlierCount: 0, candidatesTried: 0, lastSuccessFrame: -1, successCount: 0 };
 }

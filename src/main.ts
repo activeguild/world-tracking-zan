@@ -1,5 +1,7 @@
 import { ARSession } from "./ar/ARSession";
 import { ARError, TrackingState } from "./ar/ARState";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import type * as THREE from "three";
 import { DebugOverlay } from "./debug/DebugOverlay";
 import { rotationToEulerDeg } from "./math/Pose";
 import type { ARObject } from "./rendering/ARObject";
@@ -7,13 +9,16 @@ import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider
 import "./style.css";
 
 /**
- * Demo: camera → feature tracking → relative pose → landmark map → plane.
+ * Demo: camera → feature tracking → relative pose → landmark map → plane
+ *       → tap to place a cube or a GLB model.
  *
  * Query parameters:
  *   ?debug=1          enable `[AR]` console logs
  *   ?worker=0         run the vision engine on the main thread
  *   ?hud=0            hide the HUD
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
+ *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
+ *   ?size=0.15        footprint of the model in meters (default 0.15)
  */
 const params = new URLSearchParams(location.search);
 const debugLog = params.get("debug") === "1";
@@ -21,6 +26,16 @@ const useWorker = params.get("worker") !== "0";
 const showHud = params.get("hud") !== "0";
 const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
+const modelUrl = params.get("model");
+const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
+
+// Start loading the GLB early; placement waits for it.
+let modelPromise: Promise<THREE.Object3D> | null = null;
+if (modelUrl) {
+  const loader = new GLTFLoader();
+  modelPromise = loader.loadAsync(modelUrl).then((gltf) => gltf.scene);
+  modelPromise.catch((e) => console.warn("[AR] GLB load failed, falling back to the cube:", e));
+}
 
 const app = document.getElementById("app") as HTMLElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -51,22 +66,35 @@ session.on("planeFound", () => {
   messageEl.textContent = userMessageFor(session.state, false);
 });
 
-// Phase 4: tap → hit test → place / move the cube (spec §27, §68).
-let cube: ARObject | undefined;
+// Phase 4: tap → hit test → place / move the object (spec §27, §68).
+// The first tap places the cube (or the GLB when ?model= is given), later
+// taps move it. Objects are fixed in world space; only the camera moves.
+let placed: ARObject | undefined;
 session.on("worldReady", () => {
-  messageEl.textContent = "平面をタップして Cube を置いてください";
+  messageEl.textContent = "平面をタップしてオブジェクトを置いてください";
 });
 session.on("worldLost", () => {
-  cube = undefined;
+  placed = undefined;
   messageEl.textContent = "トラッキングを失いました。平面を探し直しています…";
 });
-app.addEventListener("pointerup", (ev) => {
+app.addEventListener("pointerup", async (ev) => {
   if ((ev.target as HTMLElement).tagName === "BUTTON") return;
   if (!session.isRunning) return;
   const rect = video.getBoundingClientRect();
   const hit = session.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
   if (!hit) return;
-  cube = session.placeCube(hit, cube);
+  if (placed) {
+    session.moveObject(placed, hit);
+  } else if (modelPromise) {
+    try {
+      const model = await modelPromise;
+      placed = session.placeObject(model, hit, modelSize);
+    } catch {
+      placed = session.placeCube(hit);
+    }
+  } else {
+    placed = session.placeCube(hit);
+  }
   messageEl.textContent = "";
 });
 
@@ -117,6 +145,8 @@ function userMessageFor(state: TrackingState, lowFeature: boolean): string {
       return "平面をタップして Cube を置いてください";
     case TrackingState.AR_ACTIVE:
       return "";
+    case TrackingState.RELOCALIZING:
+      return "位置を探しています… さっき見ていた場所にカメラを戻してください";
     case TrackingState.TRACKING_LOST:
       return "Tracking lost — ゆっくり元の位置に戻してください";
     default:
@@ -173,6 +203,14 @@ function refreshHud(): void {
       : null,
     gravityAvailable: s.gravityAvailable,
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
+    reloc: s.relocalization
+      ? {
+          keyframes: s.relocalization.keyframes,
+          attempt: s.relocalization.attempt,
+          inliers: s.relocalization.inlierCount,
+          successes: s.relocalization.successCount,
+        }
+      : null,
   });
   requestAnimationFrame(refreshHud);
 }

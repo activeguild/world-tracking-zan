@@ -42,6 +42,29 @@ export class ARObject {
     });
   }
 
+  /**
+   * Wrap a loaded model (e.g. `gltf.scene`): uniformly scaled so that its
+   * largest horizontal extent equals `targetSize` meters (when > 0), centred
+   * on X/Z and standing on the plane (min Y = 0).
+   */
+  static fromModel(id: number, model: THREE.Object3D, targetSize = 0): ARObject {
+    const box = new THREE.Box3().setFromObject(model);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const holder = new THREE.Group();
+    let scale = 1;
+    if (targetSize > 0) {
+      const extent = Math.max(size.x, size.z, 1e-6);
+      scale = targetSize / extent;
+    }
+    model.scale.multiplyScalar(scale);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
+    holder.add(model);
+    return new ARObject(id, holder);
+  }
+
   /** Demo cube standing on the plane (its bottom face at Y = 0). */
   static cube(id: number, size: number, color = 0x3fa9f5): ARObject {
     const geometry = new THREE.BoxGeometry(size, size, size);

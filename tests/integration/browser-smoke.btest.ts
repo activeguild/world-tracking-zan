@@ -56,6 +56,7 @@ interface Stats {
     inlierCount: number;
     meanReprojectionErrorPx: number;
     landmarkCount: number;
+    mapFrameId: number;
     framesSinceTracked: number;
   } | null;
   plane: {
@@ -72,6 +73,7 @@ interface Stats {
   worldReady: boolean;
   worldScale: number;
   placedObjects: number;
+  relocalization: { keyframes: number; attempt: string; inlierCount: number; successCount: number } | null;
   state: string;
   framesProcessed: number;
   framesDropped: number;
@@ -228,6 +230,9 @@ describe("Phase 1 browser smoke test", () => {
     const phase3 = samples.map((s) => ({
       state: s.state,
       landmarks: s.landmarkCount,
+      mapFrame: s.mapPose?.mapFrameId ?? null,
+      keyframes: s.relocalization?.keyframes ?? null,
+      relocOk: s.relocalization?.successCount ?? null,
       pnp: s.mapPose?.inlierCount ?? null,
       reproj: s.mapPose ? s.mapPose.meanReprojectionErrorPx.toFixed(2) : null,
       mapT: s.mapPose ? s.mapPose.translation.map((v) => v.toFixed(2)).join(",") : null,
@@ -282,6 +287,14 @@ describe("Phase 1 browser smoke test", () => {
       expect(s.plane!.normal[2]).toBeLessThan(-0.95);
     }
     expect(states["PLANE_FOUND"] ?? 0).toBeGreaterThanOrEqual(1);
+
+    // Phase 5: the test video loops every 2 s with a hard cut. Relocalization
+    // must bring the camera back into the same map instead of resetting it,
+    // so the map frame id never changes once the map exists.
+    const mapFrames = new Set(samples.filter((s) => s.mapPose).map((s) => s.mapPose!.mapFrameId));
+    expect(mapFrames.size, `map frame ids seen: ${[...mapFrames]}`).toBe(1);
+    expect(samples[samples.length - 1].relocalization!.successCount).toBeGreaterThanOrEqual(1);
+    expect(samples[samples.length - 1].relocalization!.keyframes).toBeGreaterThanOrEqual(1);
 
     // Phase 4
     expect(placement.hit, "hit test on the found plane").not.toBeNull();

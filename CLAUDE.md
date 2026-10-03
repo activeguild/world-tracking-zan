@@ -207,7 +207,19 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
-### Phase 4 — 実装済み（承認待ち）
+### Phase 5 — 実装済み（承認待ち）
+
+- `src/vision/Keyframe.ts`: Keyframe（姿勢、画像ピラミッドのコピー、粗画像、Landmark 観測）
+- `src/vision/Relocalizer.ts`: Keyframe 作成ポリシー（PnP inlier ≥ 30、前 Keyframe から回転 10° / 視差 40 px / 90 フレーム、最大 8 枚・最初の 1 枚は保持）と再局所化。手順: 直近の Keyframe 候補（毎フレーム 3 枚まで）→ 粗画像（1/8）でゼロ平均 NCC による整数シフト探索（±24 px → ±192 px 相当）→ シフトを初期値に Keyframe 画像から現フレームへ Pyramidal LK（Forward-Backward 付き）→ Keyframe 姿勢を事前値に PnP（LM + Huber）→ inlier ≥ 20・平均誤差 ≤ 2 px で採用。記述子不要（短時間の Lost・ブラー・一時的な遮蔽・同じ場所に戻る場合が対象。大きな視点変化や Loop Closure は非対象 §2）
+- `FeatureTracker.track` に初期推定位置と変位ゲートの上書きを追加（再局所化用）
+- `MapTracker.applyRelocalization`: 再局所化した姿勢を次の PnP の事前値にする。マップのリセット猶予を 30 → 150 フレーム（5 秒）に延長
+- `VisionEngine`: マップ初期化フレームを最初の Keyframe にし、追跡中は Keyframe ポリシーで追加。カメラがマップ内で見失われた（PnP 失敗）フレームの次から毎フレーム再局所化を試行し、成功時は Keyframe 観測を生きた Track として注入（既存 Track とは Landmark / 近傍で統合）。`VisionOutput.relocalization`（Keyframe 数、試行結果、成功回数）
+- 状態機械: マップありで PnP 失敗 → `RELOCALIZING`（特徴追跡が続いていても）。成功で PLANE_FOUND / PLANE_DETECTING へ復帰。猶予超過でマップリセット → TRACKING
+- `ARSession` / `ARWorld`: RELOCALIZING 中は World を保持し、配置物は最後の姿勢で 1.5 s 表示後に非表示、復帰で再表示（§33）
+- GLB 対応: `ARObject.fromModel`（フットプリント正規化、底面を Y = 0 に）、`ARSession.placeObject(model, hit, targetSize)` / `moveObject`、デモは `?model=URL&size=0.15` で Cube の代わりに GLB を配置
+- テスト: 単体 116 件（粗シフト探索、**ブランク 8 フレーム後に同じマップへ復帰し配置点の再投影ずれ中央値 0.02 px**、別シーンを見てから戻る、Keyframe 数の上限、再局所化不能時のリセット）。ブラウザテストはループ映像のカット（約 180 px のジャンプ）を再局所化で跨ぎ、`mapFrameId` が全サンプルで不変であることを検証
+
+### Phase 4 — 実装済み
 
 - `src/math/CoordinateSystem.ts`: 座標変換を集約（マップ座標 = 初期化カメラの CV 座標、World = Three.js Y-up）。平面から World フレーム生成（原点 = 平面中心、+Y = 法線、−Z ≈ カメラ視線の平面射影）、map↔world 変換、CV カメラ姿勢 → Three.js カメラ姿勢（とその逆）、内部パラメータ → OpenGL 射影行列、`object-fit: cover` のビューポート内部パラメータ
 - `src/math/Ray.ts`: ピクセル → カメラ Ray、Ray の剛体変換、Ray ∩ Plane（`t = −(n·o + d)/(n·r)`、平行・後方は null）
@@ -255,6 +267,6 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - `src/debug/`: HUD、特徴点・モーションベクトル描画、`[AR]` ロガー
 - テスト: `npm test`（Vitest 単体 46 件）、`npm run test:browser`（headless Chromium + 合成カメラ映像）
 
-### 未実装（Phase 5 以降）
+### 未実装（Phase 6 以降）
 
-GLB ローダ（Cube 置換）/ Keyframe / Relocalization / IMU 融合 / BA / WASM。実機（iPhone Safari / Android Chrome）での検証は未実施。
+IMU 融合（Madgwick 等）/ Local BA / WASM SIMD 最適化。大きな視点変化からの再局所化（記述子マッチング）は対象外（§2）。実機（iPhone Safari / Android Chrome）での検証は未実施。

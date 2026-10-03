@@ -61,6 +61,7 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           pose: out.pose,
           mapPose: out.mapPose,
           plane: out.plane,
+          relocalization: out.relocalization,
           landmarks: landmarksBuf,
           landmarkCount: out.landmarkCount,
           tracks: tracksBuf,
