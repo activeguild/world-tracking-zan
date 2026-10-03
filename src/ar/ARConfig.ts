@@ -203,6 +203,12 @@ export interface LandmarkConfig {
   jumpRejectRotationDeg: number;
   jumpRejectTrustedInliers: number;
   jumpRejectTrustedErrorPx: number;
+  /**
+   * Hysteresis between pose sources (v3 §7): after the canonical pose
+   * switched source (map ↔ plane), switching back waits this many frames
+   * unless the current source has no valid candidate.
+   */
+  sourceSwitchCooldownFrames: number;
 }
 
 /** Plane detection (spec §21–§24, §51, Phase 3). */
@@ -266,6 +272,8 @@ export interface RelocalizationConfig {
   maxMeanErrorPx: number;
   /** Frames the map may stay lost before a relocalization attempt starts. */
   startAfterLostFrames: number;
+  /** Failed relocalization attempts required (besides the lost time) before the map / world are reset. */
+  minAttemptsBeforeReset: number;
   /** Try to relocalize every N lost frames (cost control). */
   attemptEveryNFrames: number;
 }
@@ -276,6 +284,12 @@ export interface WorldConfig {
   assumedPlaneDistanceMeters: number;
   /** Keep rendering objects at the last pose for this long after tracking is lost (ms, spec §33). */
   holdPoseOnLostMs: number;
+  /**
+   * Apply the One Euro filters to the rendered camera pose. Off while the
+   * raw pose is being validated (v3 §22): filter lag and real drift must not
+   * be confused. `?smooth=1` in the demo.
+   */
+  smoothing: boolean;
   /** Pose smoothing (One Euro) for the rendered camera position. */
   positionSmoothing: { minCutoff: number; beta: number; dCutoff: number };
   /** Pose smoothing for the rendered camera rotation. */
@@ -349,6 +363,12 @@ export interface PlaneTrackingConfig {
   minRayAngleDeg: number;
   /** Do not lift points farther than this × the anchoring camera–plane distance. */
   maxLiftDistanceRatio: number;
+  /**
+   * New plane points are lifted only from a trusted *map* pose (never from
+   * the plane pose itself, v3 §8–§11) and only this many frames after the
+   * pose source last switched.
+   */
+  liftCooldownFrames: number;
 }
 
 export interface ARConfig {
@@ -448,7 +468,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxDepthRatio: 3,
     maxLandmarks: 1000,
     maxLandmarkAgeFrames: 150,
-    lostResetFrames: 150,
+    // World reset is the last resort (v3 §16): 10 s lost AND enough failed
+    // relocalization attempts (relocalization.minAttemptsBeforeReset).
+    lostResetFrames: 300,
     refineParallaxGrowth: 1.3,
     enableLandmarkDepthRefinement: false,
     jumpRejectDepthRatio: 0.08,
@@ -456,6 +478,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     jumpRejectRotationDeg: 20,
     jumpRejectTrustedInliers: 40,
     jumpRejectTrustedErrorPx: 1.5,
+    sourceSwitchCooldownFrames: 15,
   },
   relocalization: {
     maxKeyframes: 8,
@@ -474,6 +497,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     goodInliers: 60,
     maxMeanErrorPx: 1.5,
     startAfterLostFrames: 1,
+    minAttemptsBeforeReset: 10,
     attemptEveryNFrames: 2,
   },
   plane: {
@@ -492,7 +516,10 @@ export const DEFAULT_CONFIG: ARConfig = {
   },
   world: {
     assumedPlaneDistanceMeters: 0.5,
-    holdPoseOnLostMs: 1500,
+    // Debug value (v3 §14): a short loss must not hide the content; the pose
+    // is held at the last good one. Tighten for production.
+    holdPoseOnLostMs: 10000,
+    smoothing: false,
     // Light smoothing: with the displayed frame synchronized to the pose,
     // any filter lag shows up as the object sliding during motion.
     positionSmoothing: { minCutoff: 4.0, beta: 1.5, dCutoff: 1.0 },
@@ -517,6 +544,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     liftMaxMeanErrorPx: 1.5,
     minRayAngleDeg: 5,
     maxLiftDistanceRatio: 4,
+    liftCooldownFrames: 10,
   },
   state: {
     minTrackedForTracking: 40,

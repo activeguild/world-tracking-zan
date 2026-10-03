@@ -3,6 +3,13 @@ import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
 import { refinePosePnP } from "../math/PnP";
 import { composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
+import {
+  poseDelta,
+  validatePoseCandidate,
+  type PoseCandidate,
+  type PoseSource,
+  type PoseValidationLimits,
+} from "./PoseValidation";
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
@@ -38,6 +45,37 @@ export interface MapTrackingResult {
   jumpRejected: boolean;
 }
 
+/** Pose candidate handed in by an external estimator (plane-relative PnP). */
+export interface ExternalPoseCandidate {
+  pose: RigidTransform;
+  inlierCount: number;
+  meanErrorPx: number;
+}
+
+/** How the canonical pose of the last frame was chosen (v3 §19–§21). */
+export interface PoseSelection {
+  source: PoseSource;
+  mapInlierCount: number;
+  planeInlierCount: number;
+  /** Why the map candidate was not used (null when used or absent). */
+  mapReject: string | null;
+  /** Why the plane candidate was not used (null when used or absent). */
+  planeReject: string | null;
+  /** Map vs plane candidate difference when both existed (map units / deg). */
+  sourceDeltaTranslation: number;
+  sourceDeltaRotationDeg: number;
+}
+
+const EMPTY_SELECTION: PoseSelection = {
+  source: "propagated",
+  mapInlierCount: 0,
+  planeInlierCount: 0,
+  mapReject: null,
+  planeReject: null,
+  sourceDeltaTranslation: 0,
+  sourceDeltaRotationDeg: 0,
+};
+
 const EMPTY_RESULT: MapTrackingResult = {
   tracked: false,
   inlierCount: 0,
@@ -57,6 +95,10 @@ export class MapTracker {
   private _pose: RigidTransform = identity();
   private _framesSinceTracked = 0;
   private lastResult: MapTrackingResult = EMPTY_RESULT;
+  private lastSelection: PoseSelection = EMPTY_SELECTION;
+  /** Source of the current canonical pose and frames since it last changed (hysteresis, v3 §7). */
+  private currentSource: PoseSource = "map";
+  private framesSinceSwitch = 0;
 
   // scratch
   private pts3 = new Float64Array(0);
@@ -87,6 +129,16 @@ export class MapTracker {
     return this.lastResult;
   }
 
+  /** How the last frame's pose was chosen. */
+  get selection(): PoseSelection {
+    return this.lastSelection;
+  }
+
+  /** Frames since the pose source last changed. */
+  get framesSinceSourceSwitch(): number {
+    return this.framesSinceSwitch;
+  }
+
   /**
    * Phase 5: a relocalization found the camera in the existing map. The
    * pose becomes the PnP prior of the following `update()`.
@@ -112,6 +164,9 @@ export class MapTracker {
     this._pose = identity();
     this._framesSinceTracked = 0;
     this.lastResult = EMPTY_RESULT;
+    this.lastSelection = EMPTY_SELECTION;
+    this.currentSource = "map";
+    this.framesSinceSwitch = 0;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -209,17 +264,17 @@ export class MapTracker {
    * Per-frame update once initialized: PnP, landmark bookkeeping, new
    * triangulations, pruning.
    * @param rotationPrior R_cur←prev from the two-view estimator (may be null)
-   * @param poseOverride  pose already solved for this frame by the plane-
-   *                      relative estimator: PnP is skipped, the landmarks
-   *                      are only classified against it (inliers / outliers
-   *                      for the bookkeeping), and the frame counts as tracked
+   * @param external      pose candidate from the plane-relative estimator for
+   *                      this frame (with its quality). It is validated like
+   *                      the landmark PnP candidate and never adopted
+   *                      unconditionally (v3 §3–§6)
    */
   update(
     tracks: Track[],
     frameId: number,
     k: CameraIntrinsics,
     rotationPrior: Mat3 | null,
-    poseOverride: RigidTransform | null = null,
+    external: ExternalPoseCandidate | null = null,
   ): MapTrackingResult {
     const cfg = this.config;
     const f = (k.fx + k.fy) / 2;
@@ -255,72 +310,121 @@ export class MapTracker {
       this.obsY[i] = (t.y - k.cy) / k.fy;
     }
 
-    let tracked = false;
-    let inlierCount = 0;
-    let meanErrPx = 0;
-    let jumpRejected = false;
-    if (poseOverride) {
-      tracked = true;
-      this._pose = { rotation: Float64Array.from(poseOverride.rotation), translation: Float64Array.from(poseOverride.translation) };
-      this._framesSinceTracked = 0;
-    }
+    // ---- Pose candidates → validation → canonical pose (v3 §1–§7) ----
+    //
+    //   landmark PnP  ─┐
+    //   plane PnP     ─┼─→ candidates → validatePoseCandidate() → this._pose
+    //   propagation   ─┘
+    //
+    // Neither estimator writes the pose directly. Both are checked against
+    // the previous accepted pose with the same limits (jump gate), the plane
+    // candidate additionally against the map candidate when both exist, and
+    // switching between sources is damped by a cooldown.
+    const prior: RigidTransform = rotationPrior
+      ? { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation }
+      : this._pose;
+    const depth = n > 0 ? this.medianDepth(prior, n) : 0;
+    const limits: PoseValidationLimits = {
+      maxTranslation: Math.max(cfg.jumpRejectDepthRatio * Math.max(depth, 1e-9), cfg.jumpRejectSpeedFactor * this.lastResult.poseDeltaTranslation),
+      maxRotationDeg: cfg.jumpRejectRotationDeg,
+    };
+    const trusted = (c: { inlierCount: number; reprojectionErrorPx: number }) =>
+      c.inlierCount >= cfg.jumpRejectTrustedInliers && c.reprojectionErrorPx <= cfg.jumpRejectTrustedErrorPx;
+
+    // Candidate 1: landmark PnP (mature landmarks only when enough of them, v2 §27).
+    let mapCandidate: PoseCandidate | null = null;
+    let mapReject: string | null = null;
+    let mask: Uint8Array | null = null;
     if (n >= 6) {
-      const prior: RigidTransform = poseOverride
-        ? this._pose
-        : rotationPrior
-          ? { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation }
-          : this._pose;
-      // Solve on mature landmarks only (v2 §27): fresh triangulations are
-      // candidates that must first agree with the pose a few times.
-      let mask: Uint8Array | null = null;
-      if (!poseOverride) {
-        let mature = 0;
-        this.ensureMask(n);
-        for (let i = 0; i < n; i++) {
-          const m = this.map.get(obsTracks[i].landmarkId)!.observations >= cfg.minObservationsForPose ? 1 : 0;
-          this.maskBuf[i] = m;
-          mature += m;
-        }
-        if (mature >= cfg.minMaturePnPPoints) mask = this.maskBuf;
+      let mature = 0;
+      this.ensureMask(n);
+      for (let i = 0; i < n; i++) {
+        const m = this.map.get(obsTracks[i].landmarkId)!.observations >= cfg.minObservationsForPose ? 1 : 0;
+        this.maskBuf[i] = m;
+        mature += m;
       }
-      // With an override the optimizer runs zero iterations: classification only.
+      if (mature >= cfg.minMaturePnPPoints) mask = this.maskBuf;
       const res = refinePosePnP(
         prior,
         this.pts3,
         this.obsX,
         this.obsY,
         n,
-        {
-          huber: cfg.pnpHuberPx / f,
-          inlierThreshold: cfg.pnpInlierPx / f,
-          maxIterations: poseOverride ? 0 : cfg.pnpMaxIterations,
-          epsilon: 1e-6,
-        },
+        { huber: cfg.pnpHuberPx / f, inlierThreshold: cfg.pnpInlierPx / f, maxIterations: cfg.pnpMaxIterations, epsilon: 1e-6 },
         mask,
       );
-      let accept = poseOverride !== null || res.inlierCount >= cfg.minPnPInliers;
-      if (accept && !poseOverride) {
+      if (res.inlierCount >= cfg.minPnPInliers) {
+        mapCandidate = { pose: res.pose, source: "map", inlierCount: res.inlierCount, reprojectionErrorPx: res.meanError * f };
         // Jump gate (v2 §8): a weakly supported solve that moves the camera
         // implausibly far in one frame is a wrong pose, not fast motion.
-        const trusted = res.inlierCount >= cfg.jumpRejectTrustedInliers && res.meanError * f <= cfg.jumpRejectTrustedErrorPx;
-        if (!trusted) {
-          const c = centerOf(res.pose);
-          const delta = Math.hypot(c[0] - prevCenter[0], c[1] - prevCenter[1], c[2] - prevCenter[2]);
-          const rotDeg = (rotationDistance(prevRotation, res.pose.rotation) * 180) / Math.PI;
-          const depth = this.medianDepth(prior, n);
-          const allowed = Math.max(cfg.jumpRejectDepthRatio * depth, cfg.jumpRejectSpeedFactor * this.lastResult.poseDeltaTranslation);
-          if (delta > allowed || rotDeg > cfg.jumpRejectRotationDeg) {
-            accept = false;
-            jumpRejected = true;
+        if (!trusted(mapCandidate)) {
+          const v = validatePoseCandidate(res.pose, this._pose, limits, "map");
+          if (!v.accepted) {
+            mapReject = v.reason;
+            mapCandidate = null;
           }
         }
+      } else {
+        mapReject = `map inliers ${res.inlierCount} < ${cfg.minPnPInliers}`;
       }
-      if (accept) {
-        tracked = true;
-        this._pose = res.pose;
-        this._framesSinceTracked = 0;
-        // Classify every observed landmark (mature and young) against the final pose.
-        const cls = mask ? this.classify(res.pose, n, cfg.pnpInlierPx / f) : res;
+    } else if (n > 0) {
+      mapReject = `map observations ${n} < 6`;
+    }
+
+    // Candidate 2: plane-relative PnP (external). Same gate, plus agreement
+    // with the map candidate (v3 §3–§6); never an unconditional override.
+    let planeCandidate: PoseCandidate | null = null;
+    let planeReject: string | null = null;
+    let sourceDelta = { translation: 0, rotationDeg: 0 };
+    if (external) {
+      planeCandidate = { pose: external.pose, source: "plane", inlierCount: external.inlierCount, reprojectionErrorPx: external.meanErrorPx };
+      if (!trusted(planeCandidate)) {
+        const v = validatePoseCandidate(external.pose, this._pose, limits, "plane");
+        if (!v.accepted) {
+          planeReject = v.reason;
+          planeCandidate = null;
+        }
+      }
+      if (planeCandidate && mapCandidate) {
+        sourceDelta = poseDelta(mapCandidate.pose, planeCandidate.pose);
+        const agree = validatePoseCandidate(planeCandidate.pose, mapCandidate.pose, limits, "plane vs map");
+        if (!agree.accepted) {
+          planeReject = agree.reason;
+          planeCandidate = null;
+        }
+      }
+    }
+
+    // Selection with hysteresis (v3 §7): the plane estimator is preferred when
+    // it produced a valid candidate, but switching back to it from the map
+    // waits for the cooldown unless the map has nothing.
+    let chosen: PoseCandidate | null = null;
+    if (planeCandidate && (this.currentSource === "plane" || !mapCandidate || this.framesSinceSwitch >= cfg.sourceSwitchCooldownFrames)) {
+      chosen = planeCandidate;
+    } else if (mapCandidate) {
+      chosen = mapCandidate;
+    }
+    if (chosen && planeCandidate && chosen !== planeCandidate && !planeReject) {
+      planeReject = `cooldown ${this.framesSinceSwitch}/${cfg.sourceSwitchCooldownFrames}`;
+    }
+
+    let tracked = false;
+    let inlierCount = 0;
+    let meanErrPx = 0;
+    const jumpRejected = mapReject !== null && mapReject.includes("jump");
+    if (chosen) {
+      tracked = true;
+      if (chosen.source !== this.currentSource) {
+        this.currentSource = chosen.source;
+        this.framesSinceSwitch = 0;
+      } else {
+        this.framesSinceSwitch++;
+      }
+      this._pose = { rotation: Float64Array.from(chosen.pose.rotation), translation: Float64Array.from(chosen.pose.translation) };
+      this._framesSinceTracked = 0;
+      if (n > 0) {
+        // Classify every observed landmark (mature and young) against the canonical pose.
+        const cls = this.classify(this._pose, n, cfg.pnpInlierPx / f);
         inlierCount = cls.inlierCount;
         meanErrPx = cls.meanError * f;
         const maxErr = cfg.maxTriangulationErrorPx / f;
@@ -357,6 +461,7 @@ export class MapTracker {
     let translationHeld = false;
     if (!tracked) {
       this._framesSinceTracked++;
+      this.framesSinceSwitch++;
       if (rotationPrior) {
         // Propagate the rotation so the pose does not freeze during short
         // dropouts; the translation is held (a two-view translation is
@@ -365,6 +470,15 @@ export class MapTracker {
         translationHeld = true;
       }
     }
+    this.lastSelection = {
+      source: chosen ? chosen.source : "propagated",
+      mapInlierCount: mapCandidate ? mapCandidate.inlierCount : 0,
+      planeInlierCount: external ? external.inlierCount : 0,
+      mapReject,
+      planeReject,
+      sourceDeltaTranslation: sourceDelta.translation,
+      sourceDeltaRotationDeg: sourceDelta.rotationDeg,
+    };
 
     // ---- Anchors for tracks the map has not seen yet ----
     // Anchors need a trustworthy pose: only assign them in tracked frames.
@@ -523,15 +637,4 @@ export class MapTracker {
 
 function identity(): RigidTransform {
   return { rotation: mat3Identity(), translation: new Float64Array(3) };
-}
-
-/** Camera center of a pose: C = −Rᵀ t. */
-function centerOf(pose: RigidTransform): Float64Array {
-  const r = pose.rotation;
-  const t = pose.translation;
-  return new Float64Array([
-    -(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]),
-    -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]),
-    -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2]),
-  ]);
 }

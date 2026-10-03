@@ -142,4 +142,9 @@ export class ARWorld {
   get isHidden(): boolean {
     return this.hidden;
   }
+
+  /** How long tracking has been lost (ms), 0 while tracking. */
+  lostDurationMs(nowMs: number): number {
+    return this.lostSince === null ? 0 : nowMs - this.lostSince;
+  }
 }

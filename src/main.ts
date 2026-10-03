@@ -21,7 +21,7 @@ import "./style.css";
  *   ?size=0.15        footprint of the model in meters (default 0.15)
  *   ?fov=66           camera field of view along the long side (degrees)
  *   ?sync=0           show the live video instead of the pose-synchronized frame
- *   ?smooth=0         disable pose smoothing
+ *   ?smooth=1         enable pose smoothing (off by default while the raw pose is validated)
  *   ?dist=0.5         assumed camera→plane distance in meters (scale)
  *   ?walk=1           the placed object walks back and forth on the plane (object motion test)
  *   ?refine=1         re-enable landmark depth refinement (A/B against the fixed map, v2 §26)
@@ -37,7 +37,8 @@ const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 const fovDeg = Number(params.get("fov") ?? "") || undefined;
 const syncVideo = params.get("sync") !== "0";
-const smoothing = params.get("smooth") !== "0";
+// Pose smoothing is off by default while the raw pose is validated (v3 §22).
+const smoothingParam = params.get("smooth");
 const assumedDist = Number(params.get("dist") ?? "") || undefined;
 const walk = params.get("walk") === "1";
 const planeTracking = params.get("planetrack") === "1";
@@ -79,12 +80,7 @@ const session = new ARSession({
     landmarks: { enableLandmarkDepthRefinement: refineLandmarks },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
-      ...(smoothing
-        ? {}
-        : {
-            positionSmoothing: { minCutoff: 1000, beta: 0, dCutoff: 1 },
-            rotationSmoothing: { minCutoff: 1000, beta: 0, dCutoff: 1 },
-          }),
+      ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
     },
   },
   gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
@@ -240,8 +236,15 @@ function refreshHud(): void {
           translationHeld: s.mapPose.translationHeld,
           jumpRejected: s.mapPose.jumpRejected,
           source: s.mapPose.source,
+          mapInliers: s.mapPose.mapInlierCount,
+          planeInliers: s.mapPose.planeInlierCount,
+          rejectReason: s.mapPose.rejectReason,
+          sourceDeltaM: s.worldReady ? s.mapPose.sourceDeltaTranslation * s.worldScale : NaN,
+          sourceDeltaDeg: s.mapPose.sourceDeltaRotationDeg,
+          history: s.mapPose.sourceHistory,
         }
       : null,
+    lostMs: s.lostMs,
     plane: s.plane
       ? {
           normal: s.plane.normal,

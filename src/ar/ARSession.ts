@@ -128,6 +128,8 @@ export interface ARStats {
   poseStale: boolean;
   /** Three.js camera position in world meters (null before the world exists). */
   cameraWorldPosition: number[] | null;
+  /** How long tracking has been lost (ms), 0 while tracking; objects hold their pose meanwhile. */
+  lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
   objects: { id: number; position: number[]; yaw: number }[];
   /** Focal length in processing pixels. */
@@ -222,6 +224,7 @@ export class ARSession {
     const w = this.config.world;
     this.worldAnchor = new WorldAnchor({ assumedPlaneDistanceMeters: w.assumedPlaneDistanceMeters });
     this.arCamera = new ARCamera(w.near, w.far, w.positionSmoothing, w.rotationSmoothing, options.threeCamera);
+    this.arCamera.setSmoothing(w.smoothing);
     this.world = new ARWorld(w.holdPoseOnLostMs);
     this.externalScene = options.threeScene ?? null;
     this.arRenderer = options.threeCanvas ? new ARRenderer(options.threeCanvas, options.threeScene) : null;
@@ -428,6 +431,7 @@ export class ARSession {
       poseAgeMs: this.poseAgeMs,
       poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
+      lostMs: this.world.lostDurationMs(performance.now()),
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),

@@ -168,6 +168,71 @@ describe("MapTracker", () => {
     expect(deg(rotationDistance(b.tracker.pose.rotation, jumped(f0 + 2).rotation))).toBeLessThan(0.5);
   });
 
+  it("plane candidate (v3 §3–§7): validated like the map candidate, compared with it, adopted only after the cooldown", () => {
+    const cfg = DEFAULT_CONFIG.landmarks;
+    const f0 = 8;
+    const { rng, points } = makeScene(41);
+    const tracker = new MapTracker(cfg);
+    const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(42));
+    const tracks = makeTracks(points, cameraAt(f0), cameraAt(0), 0, rng);
+    const rel = estimator.estimate(
+      Float64Array.from(tracks, (t) => t.refX), Float64Array.from(tracks, (t) => t.refY),
+      Float64Array.from(tracks, (t) => t.x), Float64Array.from(tracks, (t) => t.y),
+      tracks.length, TEST_K,
+    );
+    expect(tracker.tryInitialize(tracks, rel, 0, f0, TEST_K)).toBe(true);
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    const step = (f: number): Track[] => {
+      const next: Track[] = [];
+      for (const t of byId.values()) {
+        const p = project(points, cameraAt(f), t.id - 1, 0.3, rng);
+        if (!p) continue;
+        t.prevX = t.x; t.prevY = t.y; t.x = p[0]; t.y = p[1];
+        next.push(t);
+      }
+      return next;
+    };
+    // The map scale is |t| = 1 at f0 (true baseline |C(f0)|): express the
+    // "plane" candidate in map units so it agrees with the map candidate.
+    const scale = 1 / Math.hypot(0.03 * f0, 0.005 * f0, 0.01 * f0);
+    const inMapUnits = (p: RigidTransform): RigidTransform => ({
+      rotation: p.rotation,
+      translation: Float64Array.from(p.translation, (v) => v * scale),
+    });
+
+    // 1) A plane candidate that agrees with the map: not adopted before the
+    //    cooldown (hysteresis), adopted afterwards.
+    let adoptedAt = -1;
+    for (let f = f0 + 1; f <= f0 + 25; f++) {
+      const live = step(f);
+      const res = tracker.update(live, f, TEST_K, null, { pose: inMapUnits(cameraAt(f)), inlierCount: 60, meanErrorPx: 0.8 });
+      expect(res.tracked, `frame ${f}`).toBe(true);
+      const sel = tracker.selection;
+      if (sel.source === "plane" && adoptedAt < 0) adoptedAt = f;
+      if (adoptedAt < 0) {
+        expect(sel.source).toBe("map");
+        expect(sel.planeReject).toMatch(/cooldown/);
+      }
+      // Map candidate vs the synthetic truth: ~0.1 map units (noise + init scale).
+      expect(sel.sourceDeltaTranslation).toBeLessThan(0.3);
+    }
+    expect(adoptedAt).toBeGreaterThanOrEqual(f0 + 1 + cfg.sourceSwitchCooldownFrames - 1);
+    expect(adoptedAt).toBeGreaterThan(0);
+
+    // 2) A plane candidate far from the map candidate is rejected (plane vs
+    //    map disagreement) and the map keeps the pose; no jump in the camera.
+    const centerBefore = Array.from(tracker.cameraCenter());
+    const f = f0 + 26;
+    const live = step(f);
+    const wrong = inMapUnits(poseFromCenter(rotationAxisAngle([0, 1, 0], 0.004 * f), [0.03 * f + 0.5, 0.005 * f, 0.01 * f]));
+    const res = tracker.update(live, f, TEST_K, null, { pose: wrong, inlierCount: 60, meanErrorPx: 0.8 });
+    expect(res.tracked).toBe(true);
+    expect(tracker.selection.source).toBe("map");
+    expect(tracker.selection.planeReject).toMatch(/plane/);
+    const after = Array.from(tracker.cameraCenter());
+    expect(Math.hypot(after[0] - centerBefore[0], after[1] - centerBefore[1], after[2] - centerBefore[2])).toBeLessThan(0.3);
+  });
+
   it("triangulates new landmarks from anchors once parallax is sufficient", () => {
     const { rng, points } = makeScene(3, 120);
     const cfg = DEFAULT_CONFIG.landmarks;

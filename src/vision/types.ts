@@ -114,6 +114,16 @@ export interface MapPoseOutput {
   translationHeld: boolean;
   /** PnP found a pose but the jump gate rejected it (v2 §8). */
   jumpRejected: boolean;
+  /** Inliers of the landmark-PnP candidate / the plane candidate this frame (0 when absent). */
+  mapInlierCount: number;
+  planeInlierCount: number;
+  /** Why a candidate was not adopted this frame (plane first, then map), null when nothing was rejected. */
+  rejectReason: string | null;
+  /** Map vs plane candidate difference when both existed (map units / degrees). */
+  sourceDeltaTranslation: number;
+  sourceDeltaRotationDeg: number;
+  /** Last ~50 frames' pose sources, newest last: M = map, P = plane, · = propagated. */
+  sourceHistory: string;
   /**
    * Where this frame's pose came from: "plane" = plane-relative estimate
    * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no

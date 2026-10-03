@@ -19,6 +19,12 @@ function mapPose(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     deltaRotationDeg: 0,
     translationHeld: false,
     jumpRejected: false,
+    mapInlierCount: 100,
+    planeInlierCount: 0,
+    rejectReason: null,
+    sourceDeltaTranslation: 0,
+    sourceDeltaRotationDeg: 0,
+    sourceHistory: "M",
     source: "map",
   };
 }

@@ -137,7 +137,7 @@ Query parameters:
 | `?fov=66`   | camera field of view along the long side (degrees) |
 | `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
 | `?sync=0`   | show the live video instead of the pose-synchronized frame |
-| `?smooth=0` | disable pose smoothing (A/B: world fixity must hold without it) |
+| `?smooth=1` | enable pose smoothing (off by default while the raw pose is validated) |
 | `?refine=1` | re-enable landmark depth refinement (A/B against the fixed map) |
 | `?walk=1`   | the placed object walks back and forth on the plane (object-motion test) |
 | `?planetrack=1` | experimental plane-relative pose instead of landmark PnP |
@@ -154,6 +154,15 @@ A/B measurable: moving the camera 10 cm must change `world C` by ≈ 0.10 while
 `Object 1` stays put. `src/vision/PlaneTracker.ts` is an experimental,
 default-off alternative estimator (features lifted onto the fixed plane, PnP
 against them = plane-induced homography with known n, d).
+
+One canonical camera pose (v3): landmark PnP, plane PnP and propagation are
+*candidates*; `validatePoseCandidate` (continuity against the previous pose
+and, for the plane candidate, agreement with the map candidate) decides, with
+a cooldown against map ↔ plane flapping. New plane points are lifted only from
+a trusted map pose. A short tracking loss holds the last good pose (10 s debug
+hold); map and world reset only after 10 s lost *and* ≥ 10 failed
+relocalization attempts. The HUD shows the pose source, its history and the
+rejection reason.
 
 Fast motion: 4 LK pyramid levels and constant-velocity seeding
 (`tracker.pyramidLevels`, `tracker.predictMotion`) roughly double the per-frame

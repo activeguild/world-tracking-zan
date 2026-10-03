@@ -207,6 +207,17 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v3 対応 — Camera Pose の 1 本化・Tracking Lost の扱い（2026-10-03、実機確認待ち）
+
+- **Pose 候補 → 共通検証 → 正準 Pose**（§1–§6）: `src/vision/PoseValidation.ts` に `validatePoseCandidate(candidate, reference, limits)`（並進・回転の連続性、拒否理由つき）。`MapTracker.update` は Landmark PnP と平面 PnP（`external` 候補、品質つき）を両方「候補」として同じ上限（Landmark 中央奥行き 8% / 前フレーム移動量 3 倍 / 20°）で前フレームの採用姿勢と照合し、平面候補はさらに Map 候補との差でも照合する。`poseOverride` の無条件採用は廃止。Three.js に渡る Pose は `MapTracker.pose` の 1 本のみ
+- **ヒステリシス**（§7）: `landmarks.sourceSwitchCooldownFrames`（15）。切替直後は Map 候補がある限り戻さない。拒否理由に `cooldown n/15`
+- **PlanePoint の自己フィードバック遮断**（§8–§11）: 新規 PlanePoint は Pose source が `map` で inlier ≥ 20・誤差 ≤ 1.5 px、かつ source 切替から `planeTracking.liftCooldownFrames`（10）経過したフレームでのみ生成。平面 Pose からは生成しない
+- **Tracking Lost と World Reset の分離**（§12–§16）: 短時間の Lost は最後の正常 Pose を保持（Three.js カメラは更新されない）、`world.holdPoseOnLostMs` 1.5 s → 10 s（デバッグ値）。Map / World のリセットは `lostResetFrames` 150 → 300（10 s）**かつ**再局所化の失敗 ≥ `relocalization.minAttemptsBeforeReset`（10）の両方を満たす場合のみ。WorldAnchor / ARObject は短時間 Lost では維持（従来どおり Map リセット時のみ破棄）
+- **Pose smoothing 既定 OFF**（§22）: `world.smoothing: false`、`?smooth=1` で ON。One Euro のパラメータ自体は変更なし
+- **HUD**（§19–§21）: `Pose source MAP|PLANE|PROPAGATED|LOST` と直近 24 フレームの履歴（M / P / ·）、`Sources map in N  plane in M  Δ cm / °`、`REJECTED <理由>`（例 `plane translation jump 0.42 > 0.08`、`cooldown 3/15`）、`Lost N ms`。`MapPoseOutput` に `mapInlierCount` / `planeInlierCount` / `rejectReason` / `sourceDelta*` / `sourceHistory`
+- **変更しなかったもの**（§29）: `assumedPlaneDistanceMeters`、`longSideFovDeg`、FAST / LK / RANSAC / One Euro の各パラメータ、Three.js 射影、ARObject のスケール
+- テスト: PoseValidation（受理 / 並進ジャンプ / 回転ジャンプ / 対称性）、MapTracker の平面候補（Map と一致する候補はクールダウン後に採用、乖離する候補は拒否されカメラが飛ばない）
+
 ### 修正指示書 v2 対応 — Map 固定・診断強化（2026-10-03、実機 A/B 待ち）
 
 「カメラを動かすと Cube が動く」症状への対処。アーキテクチャは維持（FAST → LK → RANSAC → 二視点 → 三角測量 → Landmark Map → PnP → Plane RANSAC → WorldAnchor → Three.js）。

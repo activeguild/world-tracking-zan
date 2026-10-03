@@ -100,6 +100,10 @@ export class VisionEngine {
   private lastPlaneAnchor: PlaneAnchorOutput | null = null;
   private lastPlanePose: PlanePoseOutput | null = null;
   private lastPoseSource: MapPoseOutput["source"] = "propagated";
+  /** Pose source of the last ~50 frames (debug, v3 §21). */
+  private sourceHistory = "";
+  /** Failed relocalization attempts since the camera was last located (world-reset condition, v3 §16). */
+  private relocAttemptsSinceLost = 0;
 
   // Phase 5: keyframes + relocalization.
   private readonly relocalizer: Relocalizer;
@@ -198,6 +202,8 @@ export class VisionEngine {
     this.lastPlaneAnchor = null;
     this.lastPlanePose = null;
     this.lastPoseSource = "propagated";
+    this.sourceHistory = "";
+    this.relocAttemptsSinceLost = 0;
     this.lastMapPose = null;
     this.lastPlane = null;
     this.packedLandmarkCount = 0;
@@ -378,6 +384,7 @@ export class VisionEngine {
         const tr0 = now();
         const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k);
         this.timing.reloc = now() - tr0;
+        if (!r.success) this.relocAttemptsSinceLost++;
         this.relocStatus.attempt = r.success ? "success" : "fail";
         this.relocStatus.inlierCount = r.inlierCount;
         this.relocStatus.candidatesTried = r.candidatesTried;
@@ -392,29 +399,35 @@ export class VisionEngine {
         }
       }
 
-      // Plane-relative pose (修正指示書 §7): main path once a plane is anchored.
-      // The landmark PnP stays as the fallback when the plane is out of view.
+      // Plane-relative pose (experimental): a *candidate* for the canonical
+      // pose, validated inside MapTracker like the landmark PnP (v3 §1–§6).
       const pt = this.config.planeTracking;
       let planeRes = this.planeTracker.result;
-      let poseOverride = null;
+      let external = null;
       if (pt.enabled && this.planeTracker.anchored) {
         const prior = rotationPrior
           ? { rotation: mat3Multiply(rotationPrior, tracker.pose.rotation), translation: tracker.pose.translation }
           : tracker.pose;
         planeRes = this.planeTracker.update(this.tracks, prior, k);
-        if (planeRes.tracked) poseOverride = planeRes.pose;
+        if (planeRes.tracked && planeRes.pose) {
+          external = { pose: planeRes.pose, inlierCount: planeRes.inlierCount, meanErrorPx: planeRes.meanErrorPx };
+        }
       }
 
-      const res = tracker.update(this.tracks, frameId, k, rotationPrior, poseOverride);
-      this.lastPoseSource = !res.tracked ? "propagated" : poseOverride ? "plane" : "map";
+      const res = tracker.update(this.tracks, frameId, k, rotationPrior, external);
+      const sel = tracker.selection;
+      this.lastPoseSource = res.tracked ? sel.source : "propagated";
       if (res.tracked) {
+        this.relocAttemptsSinceLost = 0;
         if (this.planeTracker.anchored) {
-          // Lift features that are new since the anchor, only from frames
-          // whose pose is well supported (a bad pose would bake its error
-          // into the lifted points).
-          const good = poseOverride
-            ? planeRes.inlierCount >= pt.liftMinInliers && planeRes.meanErrorPx <= pt.liftMaxMeanErrorPx
-            : res.inlierCount >= pt.liftMinInliers && res.meanReprojectionErrorPx <= pt.liftMaxMeanErrorPx;
+          // New plane points only from a trusted *map* pose, never from the
+          // plane pose itself (no pose → point → pose feedback, v3 §8–§11),
+          // and not right after a source switch.
+          const good =
+            sel.source === "map" &&
+            sel.mapInlierCount >= pt.liftMinInliers &&
+            res.meanReprojectionErrorPx <= pt.liftMaxMeanErrorPx &&
+            tracker.framesSinceSourceSwitch >= pt.liftCooldownFrames;
           if (good) this.planeTracker.lift(this.tracks, tracker.pose, k, (t) => this.observesPlaneLandmark(t));
         }
         // Keyframe policy (spec §35).
@@ -423,14 +436,21 @@ export class VisionEngine {
           this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
           this.relocStatus.keyframes = this.relocalizer.count;
         }
-      } else if (tracker.framesSinceTracked > cfg.lostResetFrames) {
-        // Lost for too long and relocalization did not succeed: start over.
+      } else if (
+        tracker.framesSinceTracked > cfg.lostResetFrames &&
+        this.relocAttemptsSinceLost >= this.config.relocalization.minAttemptsBeforeReset
+      ) {
+        // World reset is the last resort (v3 §12, §16): long loss AND enough
+        // failed relocalization attempts. A short loss keeps map, world and
+        // objects; the camera holds its last good pose meanwhile.
         tracker.reset(this.tracks);
         this.planeDetector.reset();
         this.planeTracker.reset(this.tracks);
         this.lastPlaneAnchor = null;
         this.relocalizer.reset();
+        this.relocAttemptsSinceLost = 0;
       }
+      this.sourceHistory = (this.sourceHistory + (res.tracked ? (sel.source === "plane" ? "P" : "M") : "·")).slice(-50);
     }
     this.lastPlanePose = this.planeTracker.anchored ? toPlanePoseOutput(this.planeTracker.result) : null;
 
@@ -450,6 +470,12 @@ export class VisionEngine {
         deltaRotationDeg: r.poseDeltaRotationDeg,
         translationHeld: r.translationHeld,
         jumpRejected: r.jumpRejected,
+        mapInlierCount: tracker.selection.mapInlierCount,
+        planeInlierCount: tracker.selection.planeInlierCount,
+        rejectReason: tracker.selection.planeReject ?? tracker.selection.mapReject,
+        sourceDeltaTranslation: tracker.selection.sourceDeltaTranslation,
+        sourceDeltaRotationDeg: tracker.selection.sourceDeltaRotationDeg,
+        sourceHistory: this.sourceHistory,
         source: this.lastPoseSource,
       };
     } else {

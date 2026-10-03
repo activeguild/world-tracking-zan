@@ -47,7 +47,17 @@ export interface HudStats {
     translationHeld: boolean;
     jumpRejected: boolean;
     source: string;
+    /** Pose-source diagnostics (v3 §19–§21). */
+    mapInliers: number;
+    planeInliers: number;
+    rejectReason: string | null;
+    /** Map vs plane candidate difference in world meters (NaN before the world exists). */
+    sourceDeltaM: number;
+    sourceDeltaDeg: number;
+    history: string;
   } | null;
+  /** How long tracking has been lost (ms). */
+  lostMs?: number;
   plane?: {
     normal: number[];
     inliers: number;
@@ -109,8 +119,14 @@ export class DebugOverlay {
       `=== TRACKING ===`,
       `Features    ${s.featureCount}  tracked ${s.trackedCount}  inliers ${s.inlierCount}`,
       m
-        ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}  [${m.source}]${m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`
+        ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}${m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`
         : `PnP         —`,
+      `Pose source ${m ? `${m.framesSinceTracked > 0 ? "LOST" : m.source.toUpperCase()}  ${m.history.slice(-24)}` : "—"}`,
+      m
+        ? `Sources     map in ${m.mapInliers}  plane in ${m.planeInliers}  Δ ${Number.isFinite(m.sourceDeltaM) ? `${(m.sourceDeltaM * 100).toFixed(1)} cm / ${m.sourceDeltaDeg.toFixed(1)}°` : "—"}`
+        : `Sources     —`,
+      ...(m?.rejectReason ? [`REJECTED    ${m.rejectReason}`] : []),
+      `Lost        ${s.lostMs !== undefined ? `${s.lostMs.toFixed(0)} ms` : "—"}`,
       ...(s.pose
         ? [
             `Pose R      yaw ${fmt(s.pose.yaw)}°  pitch ${fmt(s.pose.pitch)}°  roll ${fmt(s.pose.roll)}°`,

@@ -174,8 +174,14 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4, 修正
       expect(o.planeAnchor?.frameId, `frame ${B} anchor`).toBe(anchorFrame);
       expect(o.state, `frame ${B} state`).toBe(TrackingState.PLANE_FOUND);
     }
+    // The plane candidate is adopted only after the source-switch cooldown
+    // (v3 §7 hysteresis); from then on every frame uses it.
+    const cooldown = resolveConfig().landmarks.sourceSwitchCooldownFrames;
     const planeFrames = r.outs.slice(r.A + 1).filter((o) => o.mapPose!.source === "plane").length;
-    expect(planeFrames).toBeGreaterThanOrEqual((r.outs.length - r.A - 1) * 0.9);
+    expect(planeFrames).toBeGreaterThanOrEqual(r.outs.length - r.A - 1 - cooldown - 1);
+    for (let B = r.A + cooldown + 2; B < r.outs.length; B++) {
+      expect(r.outs[B].mapPose!.source, `frame ${B} source`).toBe("plane");
+    }
     const last = r.outs[r.outs.length - 1];
     expect(last.planePose!.tracked).toBe(true);
     expect(last.planePose!.inlierCount).toBeGreaterThanOrEqual(40);
