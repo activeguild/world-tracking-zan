@@ -55,11 +55,26 @@ describe("PlaneDetector", () => {
     const ids = Array.from({ length: 150 }, (_, i) => i + 1);
     let last = null;
     for (let f = 0; f < 10; f++) last = det.update(wall, ids, 150, new Float64Array([0, 1, 0]));
-    expect(last).not.toBeNull();
-    expect(last!.horizontalness).toBeLessThan(0.1);
-    expect(last!.horizontal).toBe(false);
-    expect(last!.found).toBe(false);
+    // With gravity the fit is height-only: a wall has no dense height cluster
+    // covering a 2D patch, so no horizontal plane is reported at all.
+    expect(last === null || last.found === false).toBe(true);
     expect(det.isFound).toBe(false);
+  });
+
+  it("rejects a horizontal slice through a wall (thin inlier strip)", () => {
+    const det = new PlaneDetector({ ...DEFAULT_CONFIG.plane, minInliers: 10 }, createRng(21));
+    // 40 points on a wall at z = 1.5, all at the same height y = 0.1 (a line).
+    const pts = new Float64Array(40 * 3);
+    const rng = createRng(22);
+    for (let i = 0; i < 40; i++) {
+      pts[i * 3] = (rng() - 0.5) * 1.6;
+      pts[i * 3 + 1] = 0.1 + gauss(rng) * 0.002;
+      pts[i * 3 + 2] = 1.5 + gauss(rng) * 0.002;
+    }
+    const ids = Array.from({ length: 40 }, (_, i) => i + 1);
+    let last = null;
+    for (let f = 0; f < 5; f++) last = det.update(pts, ids, 40, new Float64Array([0, 1, 0]));
+    expect(last).toBeNull();
   });
 
   it("without gravity falls back to the camera −Y axis as up", () => {

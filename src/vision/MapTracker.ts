@@ -234,8 +234,14 @@ export class MapTracker {
           } else {
             lm.outlierCount++;
             if (lm.outlierCount > cfg.maxOutlierCount) {
-              this.map.remove(lm.id);
+              // The track drifted away from the landmark (LK drift) more
+              // often than the landmark is wrong: unlink the track and keep
+              // the landmark for the map / plane; young landmarks (never
+              // confirmed by PnP) are removed instead.
               obsTracks[i].landmarkId = -1;
+              lm.trackId = -1;
+              lm.outlierCount = 0;
+              if (lm.observations <= 2) this.map.remove(lm.id);
             }
           }
         }

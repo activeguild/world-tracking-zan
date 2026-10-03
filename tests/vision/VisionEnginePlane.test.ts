@@ -107,14 +107,14 @@ describe("VisionEngine plane detection (Phase 3)", () => {
     const initIdx = outs.findIndex((o) => o.mapPose !== null);
     expect(initIdx).toBeGreaterThan(0);
     expect(outs.some((o) => o.state === TrackingState.PLANE_FOUND)).toBe(false);
-    const withPlane = outs.filter((o) => o.plane !== null);
-    expect(withPlane.length).toBeGreaterThan(5);
-    for (const o of withPlane) {
-      expect(o.plane!.horizontal).toBe(false);
-      expect(o.plane!.horizontalness).toBeLessThan(0.3);
-      expect(o.plane!.found).toBe(false);
+    // Gravity-constrained fitting reports no horizontal plane on a wall
+    // (no dense height cluster with a 2D extent); nothing is ever `found`.
+    for (const o of outs) {
+      if (o.plane) expect(o.plane.found).toBe(false);
     }
     expect(outs[outs.length - 1].state).toBe(TrackingState.PLANE_DETECTING);
+    // The map itself keeps tracking on the wall.
+    expect(outs[outs.length - 1].mapPose!.landmarkCount).toBeGreaterThan(30);
   });
 
   it("floor straight below (phone looking down): PLANE_FOUND with gravity along +Z", () => {

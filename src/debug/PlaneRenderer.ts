@@ -25,6 +25,8 @@ export class PlaneRenderer {
     landmarks: Float32Array,
     landmarkCount: number,
     k: CameraIntrinsics,
+    /** When the Three.js world exists it draws the plane itself; skip the 2D grid then. */
+    drawGrid = true,
   ): void {
     if (!mapPose) return;
     const ctx = this.ctx;
@@ -50,15 +52,22 @@ export class PlaneRenderer {
       ctx.fillRect(p[0] - s, p[1] - s, 2 * s, 2 * s);
     }
 
-    if (!plane) return;
+    if (!plane || !drawGrid) return;
 
-    // Plane grid: centred on the plane centroid, spanning ~ the inlier extent.
+    // Plane grid: centred on the plane centroid, spanning ~ the inlier
+    // extent, capped by the camera's distance to the plane.
     const n = plane.normal;
     const c = plane.center;
     const ref = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
     const u = normalize(cross(n, ref));
     const v = cross(n, u);
-    const half = Math.max(0.05, Math.sqrt(Math.max(plane.areaEstimate, 1e-6)) / 2);
+    const camC = [
+      -(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]),
+      -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]),
+      -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2]),
+    ];
+    const camDist = Math.abs(n[0] * camC[0] + n[1] * camC[1] + n[2] * camC[2] + plane.d);
+    const half = Math.min(Math.max(0.05, Math.sqrt(Math.max(plane.areaEstimate, 1e-6)) / 2), Math.max(0.05, camDist));
     const cells = 8;
     const step = (2 * half) / cells;
 

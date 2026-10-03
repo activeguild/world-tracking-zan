@@ -1,6 +1,6 @@
 import type { PlaneConfig } from "../ar/ARConfig";
 import { symmetricEigen } from "../math/Decomposition";
-import { horizontalness as planeHorizontalness, ransacPlane, type PlaneModel } from "../math/Plane";
+import { fitHorizontalPlane, horizontalness as planeHorizontalness, ransacPlane, type PlaneModel } from "../math/Plane";
 import { angleBetween } from "../math/Pose";
 import type { Rng } from "./OutlierRejection";
 import type { PlaneOutput } from "./types";
@@ -78,12 +78,17 @@ export class PlaneDetector {
     const scale = Math.max(1e-9, dists[n >> 1]);
     const threshold = cfg.inlierThresholdRatio * scale;
 
-    const res = ransacPlane(points, n, {
-      threshold,
-      confidence: cfg.confidence,
-      maxIterations: cfg.maxIterations,
-      minInliers: cfg.minInliers,
-    }, this.rng);
+    // With gravity the normal is known: fit only the height (robust to the
+    // tilted false planes a free 3-point RANSAC finds in noisy clouds).
+    // Without gravity fall back to the free RANSAC + horizontality test.
+    const res = up
+      ? fitHorizontalPlane(points, n, up, threshold, cfg.minInliers)
+      : ransacPlane(points, n, {
+          threshold,
+          confidence: cfg.confidence,
+          maxIterations: cfg.maxIterations,
+          minInliers: cfg.minInliers,
+        }, this.rng);
     this.lastSearch.threshold = threshold;
     this.lastSearch.bestInliers = res.bestInlierCount;
     if (!res.plane || res.inlierCount < cfg.minInliers) {
@@ -93,7 +98,13 @@ export class PlaneDetector {
     const plane = orientTowardCamera(res.plane);
     const inlierIds: number[] = [];
     for (let i = 0; i < n; i++) if (res.inliers[i]) inlierIds.push(ids[i]);
-    const area = estimateArea(points, res.inliers, n, plane);
+    const ext = inPlaneExtents(points, res.inliers, n, plane);
+    // The inliers must cover a 2D patch, not a line: a horizontal slice through
+    // a wall (or a thin strip of noisy points) has no second extent.
+    if (ext.s2 < Math.max(2 * threshold, 0.15 * ext.s1)) {
+      return this.miss();
+    }
+    const area = 4 * ext.s1 * 4 * ext.s2;
 
     const upVec = up ?? new Float64Array([0, -1, 0]);
     const hz = planeHorizontalness(plane.normal, upVec);
@@ -182,8 +193,8 @@ function orientTowardCamera(p: PlaneModel): PlaneModel {
   return p;
 }
 
-/** Bounding extent of the inliers in the plane's own 2D basis (PCA). */
-function estimateArea(points: Float64Array, inliers: Uint8Array, n: number, plane: PlaneModel): number {
+/** Standard deviations of the inliers along the two in-plane principal axes. */
+function inPlaneExtents(points: Float64Array, inliers: Uint8Array, n: number, plane: PlaneModel): { s1: number; s2: number } {
   const cov = new Float64Array(9);
   let count = 0;
   const c = plane.center;
@@ -196,11 +207,20 @@ function estimateArea(points: Float64Array, inliers: Uint8Array, n: number, plan
     cov[4] += y * y; cov[5] += y * z; cov[8] += z * z;
     count++;
   }
-  if (count < 3) return 0;
+  if (count < 3) return { s1: 0, s2: 0 };
   cov[3] = cov[1]; cov[6] = cov[2]; cov[7] = cov[5];
-  const eig = symmetricEigen(cov, 3);
-  // Two largest eigenvalues span the plane; 2σ extents on each axis.
+  // Project the covariance onto the plane (remove the normal component) so a
+  // thick-but-thin cloud does not fake a second in-plane extent.
+  const nn = plane.normal;
+  const P = new Float64Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) P[i * 3 + j] = (i === j ? 1 : 0) - nn[i] * nn[j];
+  const tmp = new Float64Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) tmp[i * 3 + j] = P[i * 3] * cov[j] + P[i * 3 + 1] * cov[3 + j] + P[i * 3 + 2] * cov[6 + j];
+  const proj = new Float64Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) proj[i * 3 + j] = tmp[i * 3] * P[j] + tmp[i * 3 + 1] * P[3 + j] + tmp[i * 3 + 2] * P[6 + j];
+  const eig = symmetricEigen(proj, 3);
+  // Largest two eigenvalues are the in-plane variances (the normal direction is ~0).
   const s1 = Math.sqrt(Math.max(0, eig.values[2] / count));
   const s2 = Math.sqrt(Math.max(0, eig.values[1] / count));
-  return 4 * s1 * 4 * s2;
+  return { s1, s2 };
 }

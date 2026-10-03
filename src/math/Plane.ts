@@ -197,6 +197,86 @@ export function ransacPlane(
 }
 
 /**
+ * Gravity-constrained plane fit: the normal is fixed to the (unit) up
+ * direction and only the height is estimated robustly. Heights
+ * h_i = up · X_i are scanned with a sliding window of width 2·threshold;
+ * the densest window gives the inliers, then the height is refined as the
+ * inliers' mean and the set re-classified.
+ *
+ * A wall (heights spread over a large range) produces no dense cluster and
+ * is rejected by `minInliers`; a floor or desk collapses to one cluster.
+ */
+export function fitHorizontalPlane(
+  points: Float64Array | Float32Array,
+  n: number,
+  up: ArrayLike<number>,
+  threshold: number,
+  minInliers: number,
+): PlaneRansacResult {
+  const inliers = new Uint8Array(n);
+  const empty = { plane: null, inliers, inlierCount: 0, rmsResidual: 0, iterations: 0, bestInlierCount: 0 };
+  if (n < Math.max(3, minInliers)) return empty;
+  const lu = Math.hypot(up[0], up[1], up[2]);
+  if (lu < 1e-12) return empty;
+  const ux = up[0] / lu, uy = up[1] / lu, uz = up[2] / lu;
+
+  const heights = new Float64Array(n);
+  for (let i = 0; i < n; i++) heights[i] = ux * points[i * 3] + uy * points[i * 3 + 1] + uz * points[i * 3 + 2];
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => heights[a] - heights[b]);
+
+  // Densest window of width 2·threshold.
+  let bestLo = 0, bestCount = 0;
+  let hi = 0;
+  for (let lo = 0; lo < n; lo++) {
+    const hLo = heights[order[lo]];
+    while (hi < n && heights[order[hi]] - hLo <= 2 * threshold) hi++;
+    if (hi - lo > bestCount) {
+      bestCount = hi - lo;
+      bestLo = lo;
+    }
+  }
+  if (bestCount < minInliers) return { ...empty, bestInlierCount: bestCount };
+
+  // Height = mean of the window, then re-classify around it (two passes).
+  let h0 = 0;
+  for (let k = bestLo; k < bestLo + bestCount; k++) h0 += heights[order[k]];
+  h0 /= bestCount;
+  let count = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    let sum = 0;
+    count = 0;
+    for (let i = 0; i < n; i++) {
+      const inl = Math.abs(heights[i] - h0) < threshold ? 1 : 0;
+      inliers[i] = inl;
+      if (inl) {
+        sum += heights[i];
+        count++;
+      }
+    }
+    if (count === 0) return { ...empty, bestInlierCount: bestCount };
+    h0 = sum / count;
+  }
+  if (count < minInliers) return { ...empty, bestInlierCount: Math.max(bestCount, count) };
+
+  // Plane: up · X − h0 = 0  →  normal = up, d = −h0. Centroid of inliers.
+  let cx = 0, cy = 0, cz = 0, err = 0;
+  for (let i = 0; i < n; i++) {
+    if (!inliers[i]) continue;
+    cx += points[i * 3];
+    cy += points[i * 3 + 1];
+    cz += points[i * 3 + 2];
+    const e = heights[i] - h0;
+    err += e * e;
+  }
+  const plane: PlaneModel = {
+    normal: new Float64Array([ux, uy, uz]),
+    d: -h0,
+    center: new Float64Array([cx / count, cy / count, cz / count]),
+  };
+  return { plane, inliers, inlierCount: count, rmsResidual: Math.sqrt(err / count), iterations: 1, bestInlierCount: Math.max(bestCount, count) };
+}
+
+/**
  * |cos| of the angle between the plane normal and the up direction:
  * 1 = perfectly horizontal, 0 = vertical (wall).
  */

@@ -467,7 +467,7 @@ export class ARSession {
     if (this.renderer && this.config.debug.overlay && this.grabber && this.intrinsics) {
       this.renderer.resize();
       this.renderer.draw(r.tracks, r.trackCount, this.grabber.width, this.grabber.height);
-      this.planeRenderer?.draw(r.mapPose, r.plane, r.landmarks, r.landmarkCount, this.intrinsics);
+      this.planeRenderer?.draw(r.mapPose, r.plane, r.landmarks, r.landmarkCount, this.intrinsics, !this.worldAnchor.isReady);
     }
     this.logger.periodic(performance.now(), {
       state: r.state,
