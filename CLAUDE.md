@@ -278,6 +278,11 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - `src/debug/`: HUD、特徴点・モーションベクトル描画、`[AR]` ロガー
 - テスト: `npm test`（Vitest 単体 46 件）、`npm run test:browser`（headless Chromium + 合成カメラ映像）
 
+### 実機検証の状況
+
+- iPhone Safari（Vercel プレビュー）: 床で `PLANE_FOUND` → タップで Cube 配置 → `AR_ACTIVE` を確認。Vision 30 fps / 18 ms、特徴点 263、Landmark 134 / PnP inlier 127。ユーザー確認済み: 平面検出までの挙動と Cube の大きさに違和感なし（2026-10-03）
+- 未確認: 端末を動かしたときの Cube の固定度（ドリフト / ジッタ）、Lost からの復帰の体感、Android Chrome
+
 ### 未実装（Phase 6 以降）
 
-IMU 融合（Madgwick 等）/ Local BA / WASM SIMD 最適化。大きな視点変化からの再局所化（記述子マッチング）は対象外（§2）。実機（iPhone Safari / Android Chrome）での検証は未実施。
+IMU 融合（Madgwick 等）/ Local BA / WASM SIMD 最適化。大きな視点変化からの再局所化（記述子マッチング）は対象外（§2）。
