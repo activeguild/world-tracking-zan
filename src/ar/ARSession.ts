@@ -46,6 +46,12 @@ export interface ARSessionOptions {
    */
   gravitySource?: () => ArrayLike<number> | null;
   /**
+   * Canvas that shows the camera frame the current pose was computed on
+   * (time-aligned with the rendering). When given and
+   * `processing.syncVideoToPose` is on, the live <video> is hidden behind it.
+   */
+  frameCanvas?: HTMLCanvasElement;
+  /**
    * Three.js integration (Phase 4). Either give a transparent `canvas`
    * (the session owns renderer + scene), or an existing `scene` / `camera`
    * that the session drives while the application renders.
@@ -100,6 +106,10 @@ export interface ARStats {
   framesDropped: number;
   processingWidth: number;
   processingHeight: number;
+  /** Focal length in processing pixels. */
+  focalPx: number;
+  /** Frame-synchronized display active. */
+  syncVideo: boolean;
   backend: "worker" | "main";
 }
 
@@ -123,6 +133,12 @@ export class ARSession {
   private readonly externalScene: THREE.Scene | null;
   private lastMapPose: MapPoseOutput | null = null;
   private viewportSize: { width: number; height: number } | null = null;
+
+  // Frame-synchronized display: bitmaps of captured frames keyed by frameId.
+  private readonly frameCanvas: HTMLCanvasElement | null;
+  private frameCtx: CanvasRenderingContext2D | null = null;
+  private readonly pendingBitmaps = new Map<number, Promise<ImageBitmap>>();
+  private syncActive = false;
   private backend: VisionBackend | null = null;
   private backendKind: "worker" | "main" = "worker";
   private grabber: FrameGrabber | null = null;
@@ -171,6 +187,7 @@ export class ARSession {
     this.planeRenderer = options.overlayCanvas ? new PlaneRenderer(options.overlayCanvas) : null;
     this.gravitySource = options.gravitySource ?? null;
     this.logger = new ARLogger(this.config.debug.log, this.config.debug.logIntervalMs);
+    this.frameCanvas = options.frameCanvas ?? null;
 
     const w = this.config.world;
     this.worldAnchor = new WorldAnchor({ assumedPlaneDistanceMeters: w.assumedPlaneDistanceMeters });
@@ -239,7 +256,18 @@ export class ARSession {
       this.config.processing.height,
     );
     this.grabber = new FrameGrabber(size.width, size.height);
-    this.intrinsics = approximateIntrinsics(size.width, size.height);
+    this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
+
+    // Frame-synchronized display needs createImageBitmap(video).
+    this.syncActive =
+      this.config.processing.syncVideoToPose &&
+      this.frameCanvas !== null &&
+      typeof createImageBitmap === "function";
+    if (this.syncActive && this.frameCanvas) {
+      this.frameCtx = this.frameCanvas.getContext("2d");
+      if (!this.frameCtx) this.syncActive = false;
+    }
+    if (this.frameCanvas) this.frameCanvas.style.display = this.syncActive ? "block" : "none";
 
     this.backend = await this.createBackend(size.width, size.height);
     this.backend.onResult = (r) => this.handleResult(r);
@@ -275,6 +303,9 @@ export class ARSession {
     this.renderer?.clear();
     this.worldAnchor.reset();
     this.world.setWorldReady(false);
+    for (const bp of this.pendingBitmaps.values()) bp.then((b) => b.close()).catch(() => undefined);
+    this.pendingBitmaps.clear();
+    this.video.style.opacity = "";
     this.emit("stopped");
   }
 
@@ -370,6 +401,8 @@ export class ARSession {
       framesDropped: this.framesDropped,
       processingWidth: this.grabber?.width ?? 0,
       processingHeight: this.grabber?.height ?? 0,
+      focalPx: this.intrinsics?.fx ?? 0,
+      syncVideo: this.syncActive,
       backend: this.backendKind,
     };
   }
@@ -432,7 +465,49 @@ export class ARSession {
     }
     this.lastGravity = gravity;
     const frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    if (this.syncActive) {
+      // Capture the full-resolution frame for display when its pose arrives.
+      const p = createImageBitmap(this.video);
+      p.catch(() => undefined);
+      this.pendingBitmaps.set(frame.frameId, p);
+    }
     this.backend.processFrame(frame);
+  }
+
+  /** Draw the frame the result belongs to, time-aligned with the pose. */
+  private async presentFrame(frameId: number): Promise<void> {
+    const p = this.pendingBitmaps.get(frameId);
+    // Drop (and close) anything older than this frame.
+    for (const [id, bp] of this.pendingBitmaps) {
+      if (id <= frameId) {
+        this.pendingBitmaps.delete(id);
+        if (id !== frameId) bp.then((b) => b.close()).catch(() => undefined);
+      }
+    }
+    if (!p || !this.frameCtx || !this.frameCanvas) return;
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await p;
+    } catch {
+      return;
+    }
+    const canvas = this.frameCanvas;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const W = Math.max(1, Math.round(rect.width * dpr));
+    const H = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== W || canvas.height !== H) {
+      canvas.width = W;
+      canvas.height = H;
+    }
+    // object-fit: cover
+    const scale = Math.max(W / bitmap.width, H / bitmap.height);
+    const dw = bitmap.width * scale;
+    const dh = bitmap.height * scale;
+    this.frameCtx.drawImage(bitmap, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    bitmap.close();
+    // Hide the live video once a synchronized frame is on screen.
+    if (this.video.style.opacity !== "0") this.video.style.opacity = "0";
   }
 
   private handleResult(r: VisionResult): void {
@@ -452,6 +527,7 @@ export class ARSession {
     this.lastMapPose = r.mapPose;
     this.setState(r.state);
     this.updateWorld(r);
+    if (this.syncActive) void this.presentFrame(r.frameId);
 
     const found = !!r.plane?.found;
     if (found && !this.planeWasFound) {

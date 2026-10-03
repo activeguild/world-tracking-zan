@@ -15,18 +15,26 @@ export interface CameraIntrinsics {
 }
 
 /**
- * Approximate pinhole intrinsics for a typical smartphone rear camera.
- *
- * Spec initial approximation: fx ≈ fy ≈ width, principal point at the center.
- * `focalScale` lets device-specific calibration adjust the focal length
- * without touching call sites.
+ * Default horizontal field of view along the image's long side, degrees.
+ * Smartphone rear cameras in 16:9 video mode cover roughly 63–70° along
+ * the long side (26–28 mm equivalent); 66° is a middle-of-the-road guess.
+ * Spec §8's "fx ≈ width" corresponds to ~53°, too narrow for current phones,
+ * and a wrong focal length distorts the map and makes objects drift.
+ */
+export const DEFAULT_LONG_SIDE_FOV_DEG = 66;
+
+/**
+ * Approximate pinhole intrinsics for a typical smartphone rear camera from
+ * the field of view along the long image side; principal point at the
+ * center. Pass a device-specific FOV when known.
  */
 export function approximateIntrinsics(
   width: number,
   height: number,
-  focalScale = 1.0,
+  longSideFovDeg = DEFAULT_LONG_SIDE_FOV_DEG,
 ): CameraIntrinsics {
-  const f = Math.max(width, height) * focalScale;
+  const long = Math.max(width, height);
+  const f = long / 2 / Math.tan((longSideFovDeg * Math.PI) / 360);
   return {
     fx: f,
     fy: f,

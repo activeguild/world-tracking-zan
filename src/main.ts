@@ -19,6 +19,10 @@ import "./style.css";
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
+ *   ?fov=66           camera field of view along the long side (degrees)
+ *   ?sync=0           show the live video instead of the pose-synchronized frame
+ *   ?smooth=0         disable pose smoothing
+ *   ?dist=0.5         assumed camera→plane distance in meters (scale)
  */
 const params = new URLSearchParams(location.search);
 const debugLog = params.get("debug") === "1";
@@ -28,6 +32,10 @@ const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
+const fovDeg = Number(params.get("fov") ?? "") || undefined;
+const syncVideo = params.get("sync") !== "0";
+const smoothing = params.get("smooth") !== "0";
+const assumedDist = Number(params.get("dist") ?? "") || undefined;
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -39,6 +47,7 @@ if (modelUrl) {
 
 const app = document.getElementById("app") as HTMLElement;
 const video = document.getElementById("video") as HTMLVideoElement;
+const frameCanvas = document.getElementById("frame") as HTMLCanvasElement;
 const threeCanvas = document.getElementById("three") as HTMLCanvasElement;
 const overlay = document.getElementById("overlay") as HTMLCanvasElement;
 const startButton = document.getElementById("start") as HTMLButtonElement;
@@ -51,10 +60,24 @@ console.log(`[AR] build ${typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ 
 const session = new ARSession({
   video,
   overlayCanvas: overlay,
+  frameCanvas,
   threeCanvas,
   config: {
     debug: { log: debugLog, overlay: true },
     useWorker,
+    processing: {
+      ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),
+      syncVideoToPose: syncVideo,
+    },
+    world: {
+      ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
+      ...(smoothing
+        ? {}
+        : {
+            positionSmoothing: { minCutoff: 1000, beta: 0, dCutoff: 1 },
+            rotationSmoothing: { minCutoff: 1000, beta: 0, dCutoff: 1 },
+          }),
+    },
   },
   gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
 });
@@ -168,7 +191,7 @@ function refreshHud(): void {
     state: s.state,
     visionMs: s.visionMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
     backend: s.backend,
     pose: s.pose
       ? {

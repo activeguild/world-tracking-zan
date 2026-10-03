@@ -57,11 +57,13 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4)", () =
     const frames = 60;
     const Hs: Mat3[] = [];
     const outs: VisionOutput[] = [];
+    const centers: number[][] = [];
     for (let f = 0; f < frames; f++) {
       // Lateral + slight forward motion with a small yaw: t = −R C.
       const yaw = 0.002 * f;
       const R: Mat3 = new Float64Array([Math.cos(yaw), 0, Math.sin(yaw), 0, 1, 0, -Math.sin(yaw), 0, Math.cos(yaw)]);
-      const C = [0.004 * f, 0.001 * f, 0.002 * f];
+      const C = [0.008 * f, 0.002 * f, 0.004 * f];
+      centers.push(C);
       const t = [
         -(R[0] * C[0] + R[1] * C[1] + R[2] * C[2]),
         -(R[3] * C[0] + R[4] * C[1] + R[5] * C[2]),
@@ -107,13 +109,16 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4)", () =
     expect(errs[errs.length >> 1]).toBeLessThan(1.5);
     expect(maxErr).toBeLessThan(4);
 
-    // Camera in world: 0.5 m above the plane at creation, height nearly constant
-    // (the simulated motion is parallel-ish to the plane).
+    // Camera in world: 0.5 m above the plane at creation; afterwards the
+    // height follows the simulated motion (distance to the plane nᵀX = 1 is
+    // 1 − n·C), scaled by the world scale fixed at frame A.
     const camA = anchor.cameraPose(outs[A].mapPose!)!;
     expect(camA.position[1]).toBeCloseTo(0.5, 3);
+    const distAt = (f: number) => 1 - (n[0] * centers[f][0] + n[1] * centers[f][1] + n[2] * centers[f][2]);
     for (let B = A + 1; B < frames; B++) {
       const cb = anchor.cameraPose(outs[B].mapPose!)!;
-      expect(Math.abs(cb.position[1] - 0.5)).toBeLessThan(0.03);
+      const expected = (0.5 * distAt(B)) / distAt(A);
+      expect(Math.abs(cb.position[1] - expected), `frame ${B} height`).toBeLessThan(0.02);
     }
   });
 });

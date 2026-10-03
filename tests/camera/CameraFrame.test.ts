@@ -30,12 +30,16 @@ describe("FrameGrabber.fitProcessingSize", () => {
 });
 
 describe("CameraIntrinsics", () => {
-  it("approximates and rescales", () => {
-    const k = approximateIntrinsics(1280, 720);
-    expect(k.fx).toBe(1280);
+  it("approximates from the long-side field of view and rescales", () => {
+    const k = approximateIntrinsics(1280, 720, 66);
+    expect(k.fx).toBeCloseTo(640 / Math.tan((33 * Math.PI) / 180), 6);
+    expect(k.fy).toBe(k.fx);
     expect(k.cx).toBe(640);
+    // Portrait: the long side is the height.
+    const p = approximateIntrinsics(360, 640, 66);
+    expect(p.fx).toBeCloseTo(320 / Math.tan((33 * Math.PI) / 180), 6);
     const s = scaleIntrinsics(k, 640, 360);
-    expect(s.fx).toBe(640);
+    expect(s.fx).toBeCloseTo(k.fx / 2, 6);
     expect(s.cx).toBe(320);
     expect(s.cy).toBe(180);
   });

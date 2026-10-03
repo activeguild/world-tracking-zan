@@ -17,6 +17,18 @@ export interface ProcessingConfig {
    * 15〜30fps. 0 means "as fast as frames arrive".
    */
   maxVisionFps: number;
+  /**
+   * Camera field of view along the long image side (degrees), used to
+   * approximate the focal length (spec §8). A wrong value distorts the map
+   * and makes placed objects drift while the camera moves.
+   */
+  longSideFovDeg: number;
+  /**
+   * Show the camera frame that the pose was computed on instead of the live
+   * video, so rendering and video are time-aligned (the live video would be
+   * ~2 frames ahead of the pose and objects would lag during motion).
+   */
+  syncVideoToPose: boolean;
 }
 
 /** Feature detection configuration (spec §11, §49). */
@@ -278,6 +290,8 @@ export const DEFAULT_CONFIG: ARConfig = {
     width: 640,
     height: 480,
     maxVisionFps: 30,
+    longSideFovDeg: 66,
+    syncVideoToPose: true,
   },
   features: {
     maxFeatures: 300,
@@ -380,8 +394,10 @@ export const DEFAULT_CONFIG: ARConfig = {
   world: {
     assumedPlaneDistanceMeters: 0.5,
     holdPoseOnLostMs: 1500,
-    positionSmoothing: { minCutoff: 1.5, beta: 0.3, dCutoff: 1.0 },
-    rotationSmoothing: { minCutoff: 1.5, beta: 0.5, dCutoff: 1.0 },
+    // Light smoothing: with the displayed frame synchronized to the pose,
+    // any filter lag shows up as the object sliding during motion.
+    positionSmoothing: { minCutoff: 4.0, beta: 1.5, dCutoff: 1.0 },
+    rotationSmoothing: { minCutoff: 4.0, beta: 2.0, dCutoff: 1.0 },
     near: 0.01,
     far: 50,
     cubeSize: 0.1,
