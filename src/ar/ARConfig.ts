@@ -530,7 +530,10 @@ export const DEFAULT_CONFIG: ARConfig = {
     keyframeParallaxPx: 40,
     candidatesPerFrame: 2,
     coarseSearchRadius: 24,
-    coarseMinScore: 0.45,
+    // The PnP acceptance (≥ 25 inliers, ≤ 1.5 px) is the real verifier; the
+    // coarse score only saves work. 0.45 refused views that came back with a
+    // few degrees of rotation.
+    coarseMinScore: 0.25,
     lkMaxDisplacementPx: 40,
     pnpHuberPx: 4,
     pnpInlierPx: 6,

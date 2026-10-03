@@ -39,6 +39,8 @@ export interface RelocalizationResult {
   /** Relocalized observations to turn into live tracks (current-frame positions). */
   tracks: { landmarkId: number; x: number; y: number }[];
   candidatesTried: number;
+  /** Why the attempt failed (best candidate's stage), null on success. */
+  reason: string | null;
 }
 
 export class Relocalizer {
@@ -47,6 +49,8 @@ export class Relocalizer {
   private lastKeyframePose: RigidTransform | null = null;
   private lastKeyframeFrame = -Infinity;
   private readonly tracker: FeatureTracker;
+  /** Round-robin cursor so that successive attempts cover every keyframe, not only the most recent ones. */
+  private candidateCursor = 0;
   private scratchCoarse: { width: number; height: number; data: Uint8Array; mean: number; norm: number } | null = null;
 
   constructor(
@@ -60,6 +64,7 @@ export class Relocalizer {
     this.keyframes.length = 0;
     this.lastKeyframePose = null;
     this.lastKeyframeFrame = -Infinity;
+    this.candidateCursor = 0;
   }
 
   get count(): number {
@@ -114,7 +119,7 @@ export class Relocalizer {
     const cfg = this.config;
     const fail: RelocalizationResult = {
       success: false, keyframeId: -1, pose: null, inlierCount: 0, meanReprojectionErrorPx: 0,
-      shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0,
+      shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0, reason: "no keyframes",
     };
     if (this.keyframes.length === 0) return fail;
 
@@ -123,13 +128,26 @@ export class Relocalizer {
     this.scratchCoarse = curCoarse;
     const coarseScale = current.width / curCoarse.width;
 
-    // Candidates: most recent first.
-    const candidates = [...this.keyframes].reverse().slice(0, cfg.candidatesPerFrame);
+    // Candidates: most recent first, then round-robin through the rest on
+    // the following attempts so that the view the camera returns to is
+    // eventually tried even when it is an old keyframe.
+    const ordered = [...this.keyframes].reverse();
+    const candidates: Keyframe[] = [];
+    for (let i = 0; i < Math.min(cfg.candidatesPerFrame, ordered.length); i++) {
+      candidates.push(ordered[(this.candidateCursor + i) % ordered.length]);
+    }
+    this.candidateCursor = (this.candidateCursor + candidates.length) % Math.max(1, ordered.length);
     let tried = 0;
     let best: RelocalizationResult | null = null;
+    let reason = "";
+    let bestScore = -1;
     for (const kf of candidates) {
       tried++;
       const shift = coarseShift(kf.coarse, curCoarse, cfg.coarseSearchRadius);
+      if (shift.score > bestScore) {
+        bestScore = shift.score;
+        reason = `score ${shift.score.toFixed(2)} < ${cfg.coarseMinScore} (kf ${kf.id})`;
+      }
       if (shift.score < cfg.coarseMinScore) continue;
       const sx = shift.dx * coarseScale;
       const sy = shift.dy * coarseScale;
@@ -137,7 +155,10 @@ export class Relocalizer {
       // LK from keyframe → current with the coarse shift as the initial guess.
       const obs = kf.observations.filter((o) => map.get(o.landmarkId) !== undefined);
       const n = obs.length;
-      if (n < cfg.minInliers) continue;
+      if (n < cfg.minInliers) {
+        reason = `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`;
+        continue;
+      }
       const pts = new Float32Array(n * 2);
       const guesses = new Float32Array(n * 2);
       for (let i = 0; i < n; i++) {
@@ -147,7 +168,10 @@ export class Relocalizer {
         guesses[i * 2 + 1] = obs[i].y + sy;
       }
       const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, cfg.lkMaxDisplacementPx);
-      if (res.okCount < cfg.minInliers) continue;
+      if (res.okCount < cfg.minInliers) {
+        reason = `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (score ${shift.score.toFixed(2)})`;
+        continue;
+      }
 
       // PnP from the keyframe pose.
       const m = res.okCount;
@@ -174,8 +198,14 @@ export class Relocalizer {
         maxIterations: 20,
         epsilon: 1e-7,
       });
-      if (pnp.inlierCount < cfg.minInliers) continue;
-      if (pnp.meanError * f > cfg.maxMeanErrorPx) continue;
+      if (pnp.inlierCount < cfg.minInliers) {
+        reason = `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`;
+        continue;
+      }
+      if (pnp.meanError * f > cfg.maxMeanErrorPx) {
+        reason = `kf ${kf.id}: err ${(pnp.meanError * f).toFixed(2)} > ${cfg.maxMeanErrorPx} px`;
+        continue;
+      }
 
       const tracks: RelocalizationResult["tracks"] = [];
       for (let q = 0; q < m; q++) {
@@ -193,12 +223,13 @@ export class Relocalizer {
         shiftY: sy,
         tracks,
         candidatesTried: tried,
+        reason: null,
       };
       if (!best || result.inlierCount > best.inlierCount) best = result;
       if (result.inlierCount >= cfg.goodInliers) break;
     }
     if (best) return best;
-    return { ...fail, candidatesTried: tried };
+    return { ...fail, candidatesTried: tried, reason };
   }
 
   /** Last coarse image of the current frame (debug). */

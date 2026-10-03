@@ -363,6 +363,7 @@ export class VisionEngine {
       candidatesTried: 0,
       lastSuccessFrame: this.relocLastSuccessFrame,
       successCount: this.relocSuccessCount,
+      reason: null,
     };
 
     if (!tracker.initialized) {
@@ -391,6 +392,7 @@ export class VisionEngine {
         this.relocStatus.attempt = r.success ? "success" : "fail";
         this.relocStatus.inlierCount = r.inlierCount;
         this.relocStatus.candidatesTried = r.candidatesTried;
+        this.relocStatus.reason = r.reason;
         if (r.success && r.pose) {
           tracker.applyRelocalization(r.pose);
           this.injectRelocalizedTracks(r.tracks, frameId, r.pose);
@@ -960,5 +962,5 @@ function toPlanePoseOutput(r: PlaneTracker["result"]): PlanePoseOutput {
 }
 
 function emptyReloc(): RelocalizationOutput {
-  return { keyframes: 0, attempt: "none", inlierCount: 0, candidatesTried: 0, lastSuccessFrame: -1, successCount: 0 };
+  return { keyframes: 0, attempt: "none", inlierCount: 0, candidatesTried: 0, lastSuccessFrame: -1, successCount: 0, reason: null };
 }

@@ -180,6 +180,8 @@ export interface RelocalizationOutput {
   lastSuccessFrame: number;
   /** Total successful relocalizations in this session. */
   successCount: number;
+  /** Why the last attempt failed (best candidate's stage), null when none / success. */
+  reason: string | null;
 }
 
 /**

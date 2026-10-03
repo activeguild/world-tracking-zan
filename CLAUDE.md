@@ -220,6 +220,8 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **実機結果（`370c05a`）**: 床に戻しても `REJECTED map inliers 4 < 24` が続く。再関連付けは効いているが、保持姿勢のずれで 2.5 px 以内に入る Landmark が 4 個しかなく復帰条件に届かない。失探中の処理時間 67 ms（再局所化の試行が支配的）
 - **誘導付き復帰（同一フレーム 2 段階）**: 失探中、少数の紐づけで解いた PnP が `recoverySeedInliers`（6）以上・誤差 `recoverySeedErrorPx`（2 px）以下なら、その仮姿勢で全未紐づけ Landmark を投影して半径 `recoveryReassociateRadiusPx`（4 px）で再関連付けし、拡大した観測で同一フレーム内に PnP をやり直す（ORB-SLAM の TrackLocalMap と同じ考え方）。拒否理由に `(guided from N)`。再局所化の試行間隔を 2 → 3 フレーム（`attemptEveryNFrames`）に広げて失探中のコストを下げる
 - **姿勢に依存しない再関連付けの種**: 失探中は保持 / 予測姿勢での投影が数 px ずれて種がほとんど取れない（合成でも 2 個）。そこで各 Landmark に最後の画像位置（`lastX` / `lastY` / `imageAge`）を持たせ、追跡点を失った後は毎フレームの外れ値除去で既に求めているフレーム間 Homography（`VisionEngine.lastImageMotion`）で位置を伝播する。失探中の再関連付けはこの伝播位置を使う（追跡中は姿勢投影）。合成テスト: 全追跡点が入れ替わり、かつカメラが予測と違う動きをした直後でも、1 フレーム目で 131 本を再紐づけ、2 フレーム目に inlier 132 で復帰（回転誤差 0.5°）。失探中の最小観測数は `recoverySeedInliers`（4）
+- **実機結果（`ca7afda`）**: 床から外して 12 秒後に戻すと `REJECTED map observations 2 < 4`・`reloc fail` のまま。画像位置の記憶は 90 フレームで切れるので長い離脱後は Keyframe 再局所化だけが頼りだが、候補が常に「直近 2 枚」固定で、床を見ていた古い Keyframe（原点ビューを含む）が一度も試されていなかった。粗相関 0.45 の門も視点が数度変わると通らない
+- **再局所化の候補をラウンドロビンに**: 試行ごとにカーソルを進め、数回の試行で 8 枚すべてを試す。粗相関の門を 0.45 → 0.25（`coarseMinScore`。真の検証は PnP inlier 25 以上・誤差 1.5 px 以下）。失敗理由（`score 0.31 < 0.25 (kf 3)` / `lk 12/80 < 25` / `pnp 8/40 < 25` / `err 2.1 > 1.5 px`）を `RelocalizationOutput.reason` に出し、HUD に `Reloc fail <理由>` 行を追加
 - **変更しなかったもの**（§29）: `assumedPlaneDistanceMeters`、`longSideFovDeg`、FAST / LK / RANSAC / One Euro の各パラメータ、Three.js 射影、ARObject のスケール
 - テスト: PoseValidation（受理 / 並進ジャンプ / 回転ジャンプ / 対称性）、MapTracker の平面候補（Map と一致する候補はクールダウン後に採用、乖離する候補は拒否されカメラが飛ばない）
 

@@ -83,7 +83,7 @@ export interface HudStats {
   objects?: { id: number; position: number[] }[];
   /** Frame capture time, pose arrival time, render-time pose age (ms). */
   timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
-  reloc?: { keyframes: number; attempt: string; inliers: number; successes: number } | null;
+  reloc?: { keyframes: number; attempt: string; inliers: number; successes: number; reason: string | null } | null;
   /** Build identifier (phase + commit + time) so testers can confirm the deployed version. */
   build?: string;
 }
@@ -137,6 +137,7 @@ export class DebugOverlay {
           ]
         : [`Pose        —`]),
       `Keyframes   ${s.reloc ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${s.reloc.attempt === "success" ? ` (${s.reloc.inliers})` : ""}  ok×${s.reloc.successes}` : "—"}`,
+      ...(s.reloc?.attempt === "fail" && s.reloc.reason ? [`Reloc fail  ${s.reloc.reason}`] : []),
       `=== CAMERA ===`,
       `map C       ${m ? xyz(m.cameraCenter) : "—"}`,
       `world C     ${s.cameraWorld ? xyz(s.cameraWorld) : "—"}`,

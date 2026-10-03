@@ -282,6 +282,7 @@ function refreshHud(): void {
           attempt: s.relocalization.attempt,
           inliers: s.relocalization.inlierCount,
           successes: s.relocalization.successCount,
+          reason: s.relocalization.reason,
         }
       : null,
     build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",
