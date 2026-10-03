@@ -238,6 +238,7 @@ function refreshHud(): void {
           deltaTranslationM: s.worldReady ? s.mapPose.deltaTranslation * s.worldScale : NaN,
           deltaRotationDeg: s.mapPose.deltaRotationDeg,
           translationHeld: s.mapPose.translationHeld,
+          jumpRejected: s.mapPose.jumpRejected,
           source: s.mapPose.source,
         }
       : null,

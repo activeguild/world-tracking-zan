@@ -112,6 +112,8 @@ export interface MapPoseOutput {
   deltaRotationDeg: number;
   /** PnP failed this frame and the translation was held (v2 §6). */
   translationHeld: boolean;
+  /** PnP found a pose but the jump gate rejected it (v2 §8). */
+  jumpRejected: boolean;
   /**
    * Where this frame's pose came from: "plane" = plane-relative estimate
    * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no

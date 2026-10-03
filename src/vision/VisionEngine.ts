@@ -54,6 +54,7 @@ export class VisionEngine {
   private readonly mask: Uint8Array;
   private readonly cellCounts: Uint16Array;
   private pointBuf: Float32Array;
+  private guessBuf = new Float32Array(0);
   private trackResult: TrackResult;
   private readonly c1x: Float32Array;
   private readonly c1y: Float32Array;
@@ -448,6 +449,7 @@ export class VisionEngine {
         deltaTranslation: r.poseDeltaTranslation,
         deltaRotationDeg: r.poseDeltaRotationDeg,
         translationHeld: r.translationHeld,
+        jumpRejected: r.jumpRejected,
         source: this.lastPoseSource,
       };
     } else {
@@ -646,7 +648,28 @@ export class VisionEngine {
       pts[i * 2] = tracks[i].x;
       pts[i * 2 + 1] = tracks[i].y;
     }
-    const res = this.tracker.track(this.prevPyramid, this.curPyramid, pts, n, this.trackResult);
+    // Constant-velocity prediction as the LK starting point: a track that
+    // moved (dx, dy) last frame is searched around x + dx first, which keeps
+    // fast motion within the pyramid's capture range.
+    let guesses: Float32Array | null = null;
+    if (this.config.tracker.predictMotion) {
+      if (this.guessBuf.length < n * 2) this.guessBuf = new Float32Array(n * 2);
+      guesses = this.guessBuf;
+      const maxD = this.config.tracker.maxDisplacement;
+      for (let i = 0; i < n; i++) {
+        const t = tracks[i];
+        let vx = t.age > 0 ? t.x - t.prevX : 0;
+        let vy = t.age > 0 ? t.y - t.prevY : 0;
+        const v = Math.hypot(vx, vy);
+        if (v > maxD) {
+          vx *= maxD / v;
+          vy *= maxD / v;
+        }
+        guesses[i * 2] = Math.min(this.width - 1, Math.max(0, t.x + vx));
+        guesses[i * 2 + 1] = Math.min(this.height - 1, Math.max(0, t.y + vy));
+      }
+    }
+    const res = this.tracker.track(this.prevPyramid, this.curPyramid, pts, n, this.trackResult, guesses);
 
     const survivors: Track[] = [];
     for (let i = 0; i < n; i++) {

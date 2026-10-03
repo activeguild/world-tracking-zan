@@ -220,6 +220,8 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **実験的: 平面アンカー姿勢（既定 OFF）**: 最初の指示書（Homography 中心）に基づき `PlaneTracker` を実装済み。確定した平面に特徴点を持ち上げ（画素 Ray ∩ 平面）、その 3D 点への PnP で姿勢を解く（= 平面誘導 Homography の n, d 既知分解と等価、奥行き非依存）。平面外の点は probation / 連続外れで除外。v2 §30 に従い主経路にはせず `planeTracking.enabled`（`?planetrack=1`）で比較用に残す。有効時は `VisionOutput.planeAnchor` / `planePose` を出力し、World はそのアンカー平面から生成
 - **Pose smoothing A/B**: `?smooth=0`（§17）。**合格条件は smoothing OFF でも World 固定**
 - **実機で確認すべきこと（§26, §34 Step 2）**: 既定（精錬 OFF）と `?refine=1` で、Cube 配置後に 5 / 10 / 20 / 50 cm 横移動したときの画面ドリフトを比較。HUD の `world C` が移動量相当（10 cm → ≈0.10）変化し、`Object 1` の X Y Z が不変であること
+- **実機結果（Map 固定後）**: ゆっくり動かせば Cube は固定される（ユーザー確認）。少し速く動かすと失探、または別の場所へ飛ぶ
+- **速い動きへの対処**: (1) LK ピラミッドを 3 → 4 段（`tracker.pyramidLevels`。1 フレームの追従範囲が約 28 → 56 px）、(2) 前フレームの変位を初期値にする等速予測（`tracker.predictMotion`）。合成の 32 px/frame パンで追跡維持率 0.76–0.80 → 0.82–0.95。(3) 姿勢ジャンプの拒否（§8、`landmarks.jumpReject*`）: inlier 40 未満または誤差 1.5 px 超の弱い PnP 解で、カメラ中心が max(Landmark 中央奥行きの 8%、前フレーム移動量の 3 倍) を超えて動くか 20° 超回転した場合は採用せず姿勢を保持（HUD の PnP 行に `JUMP`）。多数 inlier で誤差が小さい解は速い動きとして受け入れる
 
 ### 実機チューニング（iPhone Safari、2026-10-03）
 

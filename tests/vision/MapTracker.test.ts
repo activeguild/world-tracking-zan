@@ -108,6 +108,66 @@ describe("MapTracker", () => {
     }
   });
 
+  it("jump gate (v2 §8): rejects an implausible pose from a weak solve, accepts the same motion when well supported", () => {
+    const cfg = DEFAULT_CONFIG.landmarks;
+    const f0 = 8;
+    // The camera suddenly appears 0.4 units (≈ 90 px of image shift) to the side.
+    const jumped = (f: number): RigidTransform => poseFromCenter(rotationAxisAngle([0, 1, 0], 0.004 * f), [0.03 * f + 0.4, 0.005 * f, 0.01 * f]);
+
+    const setup = (seed: number) => {
+      const { rng, points } = makeScene(seed);
+      const tracker = new MapTracker(cfg);
+      const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(seed + 1));
+      const tracks = makeTracks(points, cameraAt(f0), cameraAt(0), 0, rng);
+      const rel = estimator.estimate(
+        Float64Array.from(tracks, (t) => t.refX), Float64Array.from(tracks, (t) => t.refY),
+        Float64Array.from(tracks, (t) => t.x), Float64Array.from(tracks, (t) => t.y),
+        tracks.length, TEST_K,
+      );
+      expect(tracker.tryInitialize(tracks, rel, 0, f0, TEST_K)).toBe(true);
+      const byId = new Map(tracks.map((t) => [t.id, t]));
+      const step = (ids: Iterable<number>, pose: RigidTransform): Track[] => {
+        const next: Track[] = [];
+        for (const id of ids) {
+          const t = byId.get(id);
+          if (!t) continue;
+          const p = project(points, pose, id - 1, 0.3, rng);
+          if (!p) continue;
+          t.prevX = t.x; t.prevY = t.y; t.x = p[0]; t.y = p[1];
+          next.push(t);
+        }
+        return next;
+      };
+      // One normal frame so the tracker has a previous delta.
+      const normal = step(byId.keys(), cameraAt(f0 + 1));
+      const res = tracker.update(normal, f0 + 1, TEST_K, null);
+      expect(res.tracked).toBe(true);
+      expect(res.jumpRejected).toBe(false);
+      return { tracker, byId, step, landmarkIds: normal.filter((t) => t.landmarkId >= 0).map((t) => t.id) };
+    };
+
+    // Weak solve: only 15 landmark tracks see the jumped camera → PnP finds
+    // the jump with few inliers → rejected, pose held.
+    const a = setup(21);
+    expect(a.landmarkIds.length).toBeGreaterThan(60);
+    const centerBefore = Array.from(a.tracker.cameraCenter());
+    const weak = a.step(a.landmarkIds.slice(0, 15), jumped(f0 + 2));
+    const resWeak = a.tracker.update(weak, f0 + 2, TEST_K, null);
+    expect(resWeak.jumpRejected).toBe(true);
+    expect(resWeak.tracked).toBe(false);
+    expect(Array.from(a.tracker.cameraCenter())).toEqual(centerBefore);
+
+    // Trusted solve: every landmark track sees the jumped camera (many
+    // inliers, small error) → accepted as genuine fast motion.
+    const b = setup(31);
+    const all = b.step(b.landmarkIds, jumped(f0 + 2));
+    const resAll = b.tracker.update(all, f0 + 2, TEST_K, null);
+    expect(resAll.tracked).toBe(true);
+    expect(resAll.jumpRejected).toBe(false);
+    expect(resAll.inlierCount).toBeGreaterThanOrEqual(cfg.jumpRejectTrustedInliers);
+    expect(deg(rotationDistance(b.tracker.pose.rotation, jumped(f0 + 2).rotation))).toBeLessThan(0.5);
+  });
+
   it("triangulates new landmarks from anchors once parallax is sufficient", () => {
     const { rng, points } = makeScene(3, 120);
     const cfg = DEFAULT_CONFIG.landmarks;

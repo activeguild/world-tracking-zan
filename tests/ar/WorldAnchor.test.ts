@@ -18,6 +18,7 @@ function mapPose(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     deltaTranslation: 0,
     deltaRotationDeg: 0,
     translationHeld: false,
+    jumpRejected: false,
     source: "map",
   };
 }

@@ -78,6 +78,11 @@ export interface TrackerConfig {
   forwardBackwardThreshold: number;
   /** Maximum displacement a track may move between frames (pixels, at level 0). */
   maxDisplacement: number;
+  /**
+   * Seed LK with a constant-velocity prediction (previous frame's
+   * displacement) so fast motion stays inside the pyramid's capture range.
+   */
+  predictMotion: boolean;
 }
 
 /** RANSAC configuration (spec §14, §15). */
@@ -171,6 +176,20 @@ export interface LandmarkConfig {
    * into the map (pose → landmark → pose). `?refine=1` in the demo for A/B.
    */
   enableLandmarkDepthRefinement: boolean;
+  /**
+   * Pose jump gate (修正指示書 v2 §8). A PnP result is rejected (pose held, frame
+   * counted as lost) when the camera center moves more than
+   * max(jumpRejectDepthRatio × median landmark depth, jumpRejectSpeedFactor ×
+   * previous frame's displacement) or rotates more than jumpRejectRotationDeg,
+   * unless the solve is trusted (≥ jumpRejectTrustedInliers inliers and mean
+   * error ≤ jumpRejectTrustedErrorPx): a well-supported pose is believed even
+   * when the motion is fast.
+   */
+  jumpRejectDepthRatio: number;
+  jumpRejectSpeedFactor: number;
+  jumpRejectRotationDeg: number;
+  jumpRejectTrustedInliers: number;
+  jumpRejectTrustedErrorPx: number;
 }
 
 /** Plane detection (spec §21–§24, §51, Phase 3). */
@@ -358,7 +377,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     borderMargin: 12,
   },
   tracker: {
-    pyramidLevels: 3,
+    // 4 levels (360×640 → 45×80) roughly double the per-frame displacement
+    // LK can follow (~56 px at level 0 with a 15 px window).
+    pyramidLevels: 4,
     windowSize: 15,
     maxIterations: 20,
     epsilon: 0.03,
@@ -366,6 +387,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     minEigenvalue: 0.5,
     forwardBackwardThreshold: 1.0,
     maxDisplacement: 60,
+    predictMotion: true,
   },
   ransac: {
     // Frame-to-frame homography gate. Real rooms are not planar: with the
@@ -409,6 +431,11 @@ export const DEFAULT_CONFIG: ARConfig = {
     lostResetFrames: 150,
     refineParallaxGrowth: 1.3,
     enableLandmarkDepthRefinement: false,
+    jumpRejectDepthRatio: 0.08,
+    jumpRejectSpeedFactor: 3,
+    jumpRejectRotationDeg: 20,
+    jumpRejectTrustedInliers: 40,
+    jumpRejectTrustedErrorPx: 1.5,
   },
   relocalization: {
     maxKeyframes: 8,

@@ -45,6 +45,7 @@ export interface HudStats {
     deltaTranslationM: number;
     deltaRotationDeg: number;
     translationHeld: boolean;
+    jumpRejected: boolean;
     source: string;
   } | null;
   plane?: {
@@ -108,7 +109,7 @@ export class DebugOverlay {
       `=== TRACKING ===`,
       `Features    ${s.featureCount}  tracked ${s.trackedCount}  inliers ${s.inlierCount}`,
       m
-        ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}  [${m.source}]${m.translationHeld ? "  t HELD" : ""}`
+        ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}  [${m.source}]${m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`
         : `PnP         —`,
       ...(s.pose
         ? [

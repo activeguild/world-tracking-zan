@@ -34,6 +34,8 @@ export interface MapTrackingResult {
   poseDeltaRotationDeg: number;
   /** PnP failed: the translation was held and only the rotation prior applied (v2 §6). */
   translationHeld: boolean;
+  /** PnP produced a pose but it was rejected by the jump gate (v2 §8). */
+  jumpRejected: boolean;
 }
 
 const EMPTY_RESULT: MapTrackingResult = {
@@ -44,6 +46,7 @@ const EMPTY_RESULT: MapTrackingResult = {
   poseDeltaTranslation: 0,
   poseDeltaRotationDeg: 0,
   translationHeld: false,
+  jumpRejected: false,
 };
 
 export class MapTracker {
@@ -254,6 +257,7 @@ export class MapTracker {
     let tracked = false;
     let inlierCount = 0;
     let meanErrPx = 0;
+    let jumpRejected = false;
     if (poseOverride) {
       tracked = true;
       this._pose = { rotation: Float64Array.from(poseOverride.rotation), translation: Float64Array.from(poseOverride.translation) };
@@ -272,7 +276,24 @@ export class MapTracker {
         maxIterations: poseOverride ? 0 : cfg.pnpMaxIterations,
         epsilon: 1e-6,
       });
-      if (poseOverride || res.inlierCount >= cfg.minPnPInliers) {
+      let accept = poseOverride !== null || res.inlierCount >= cfg.minPnPInliers;
+      if (accept && !poseOverride) {
+        // Jump gate (v2 §8): a weakly supported solve that moves the camera
+        // implausibly far in one frame is a wrong pose, not fast motion.
+        const trusted = res.inlierCount >= cfg.jumpRejectTrustedInliers && res.meanError * f <= cfg.jumpRejectTrustedErrorPx;
+        if (!trusted) {
+          const c = centerOf(res.pose);
+          const delta = Math.hypot(c[0] - prevCenter[0], c[1] - prevCenter[1], c[2] - prevCenter[2]);
+          const rotDeg = (rotationDistance(prevRotation, res.pose.rotation) * 180) / Math.PI;
+          const depth = this.medianDepth(prior, n);
+          const allowed = Math.max(cfg.jumpRejectDepthRatio * depth, cfg.jumpRejectSpeedFactor * this.lastResult.poseDeltaTranslation);
+          if (delta > allowed || rotDeg > cfg.jumpRejectRotationDeg) {
+            accept = false;
+            jumpRejected = true;
+          }
+        }
+      }
+      if (accept) {
         tracked = true;
         inlierCount = res.inlierCount;
         meanErrPx = res.meanError * f;
@@ -383,6 +404,7 @@ export class MapTracker {
       poseDeltaTranslation: Math.hypot(center[0] - prevCenter[0], center[1] - prevCenter[1], center[2] - prevCenter[2]),
       poseDeltaRotationDeg: (rotationDistance(prevRotation, this._pose.rotation) * 180) / Math.PI,
       translationHeld,
+      jumpRejected,
     };
     return this.lastResult;
   }
@@ -415,6 +437,20 @@ export class MapTracker {
     lm.parallax = this.tri.parallax;
   }
 
+  /** Median depth of the first `n` scratch points under `pose` (map units). */
+  private medianDepth(pose: RigidTransform, n: number): number {
+    const r = pose.rotation;
+    const t = pose.translation;
+    const zs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const z = r[6] * this.pts3[i * 3] + r[7] * this.pts3[i * 3 + 1] + r[8] * this.pts3[i * 3 + 2] + t[2];
+      if (z > 0) zs.push(z);
+    }
+    if (zs.length === 0) return 1;
+    zs.sort((a, b) => a - b);
+    return zs[zs.length >> 1];
+  }
+
   private ensure(n: number): void {
     if (this.pts3.length < n * 3) {
       this.pts3 = new Float64Array(n * 3);
@@ -426,4 +462,15 @@ export class MapTracker {
 
 function identity(): RigidTransform {
   return { rotation: mat3Identity(), translation: new Float64Array(3) };
+}
+
+/** Camera center of a pose: C = −Rᵀ t. */
+function centerOf(pose: RigidTransform): Float64Array {
+  const r = pose.rotation;
+  const t = pose.translation;
+  return new Float64Array([
+    -(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]),
+    -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]),
+    -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2]),
+  ]);
 }

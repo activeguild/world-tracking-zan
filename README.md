@@ -155,6 +155,12 @@ A/B measurable: moving the camera 10 cm must change `world C` by ≈ 0.10 while
 default-off alternative estimator (features lifted onto the fixed plane, PnP
 against them = plane-induced homography with known n, d).
 
+Fast motion: 4 LK pyramid levels and constant-velocity seeding
+(`tracker.pyramidLevels`, `tracker.predictMotion`) roughly double the per-frame
+displacement that stays trackable; a weakly supported PnP solve that jumps the
+camera implausibly far is rejected and the pose held (`landmarks.jumpReject*`,
+`JUMP` on the HUD's PnP row).
+
 ## Tests
 
 ```bash
