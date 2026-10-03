@@ -2,7 +2,7 @@ import type { ARConfig } from "../ar/ARConfig";
 import type { TrackingState } from "../ar/ARState";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import type { TrackingQuality } from "../vision/TrackingQuality";
-import type { PoseOutput } from "../vision/types";
+import type { MapPoseOutput, PlaneOutput, PoseOutput } from "../vision/types";
 
 /**
  * Main thread ⇄ Vision Worker message protocol (spec §40, §41).
@@ -28,6 +28,8 @@ export interface FrameRequest {
   /** Grayscale pixels (width*height bytes). Transferred. */
   gray: ArrayBuffer;
   intrinsics: CameraIntrinsics;
+  /** Gravity direction in the camera frame, if known. */
+  gravity: number[] | null;
 }
 
 export interface ResetRequest {
@@ -45,6 +47,9 @@ export interface EngineTiming {
   track: number;
   ransac: number;
   detect: number;
+  pose: number;
+  map: number;
+  plane: number;
   total: number;
 }
 
@@ -55,6 +60,11 @@ export interface ResultResponse {
   state: TrackingState;
   quality: TrackingQuality;
   pose: PoseOutput | null;
+  mapPose: MapPoseOutput | null;
+  plane: PlaneOutput | null;
+  /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */
+  landmarks: ArrayBuffer;
+  landmarkCount: number;
   /** Float32 packed tracks (see TRACK_STRIDE). Transferred. */
   tracks: ArrayBuffer;
   trackCount: number;

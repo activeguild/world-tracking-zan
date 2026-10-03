@@ -4,10 +4,22 @@ import { FeatureDetector } from "./FeatureDetector";
 import { FeatureTracker, TrackStatus, allocResult, type TrackResult } from "./FeatureTracker";
 import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
+import { MapTracker } from "./MapTracker";
+import { PlaneDetector } from "./PlaneDetector";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
-import { packTracks, type PoseOutput, type Track, type VisionInput, type VisionOutput } from "./types";
+import {
+  LANDMARK_STRIDE,
+  packTracks,
+  type MapPoseOutput,
+  type PlaneOutput,
+  type PoseOutput,
+  type Track,
+  type VisionInput,
+  type VisionOutput,
+} from "./types";
 import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
+import { transpose3 } from "../math/Decomposition";
 import { rotationDistance, rotationToQuaternion } from "../math/Pose";
 
 /**
@@ -62,9 +74,22 @@ export class VisionEngine {
   private readonly r1y: Float32Array;
   private readonly r2x: Float32Array;
   private readonly r2y: Float32Array;
+  /** Last reference↔current relative pose (for map initialization). */
+  private lastRelative: RelativePose | null = null;
+  private lastRelativeRefFrame = -1;
+  /** Rotation of the previous frame relative to its reference (for the PnP prior). */
+  private prevFrameRotation: Mat3 | null = null;
+
+  // Phase 3: landmark map + plane.
+  private readonly mapTracker: MapTracker;
+  private readonly planeDetector: PlaneDetector;
+  private lastMapPose: MapPoseOutput | null = null;
+  private lastPlane: PlaneOutput | null = null;
+  private packedLandmarks = new Float32Array(0);
+  private packedLandmarkCount = 0;
 
   /** Timing breakdown of the last frame (ms). */
-  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, total: 0 };
+  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, total: 0 };
 
   constructor(
     width: number,
@@ -93,6 +118,22 @@ export class VisionEngine {
     this.r2y = new Float32Array(cap);
     this.stateMachine = new TrackingStateMachine(config.state);
     this.poseEstimator = new PoseEstimator(config.pose, config.ransac, rng);
+    this.mapTracker = new MapTracker(config.landmarks);
+    this.planeDetector = new PlaneDetector(config.plane, rng);
+  }
+
+  /** Last camera pose in the map frame (null until the map is initialized). */
+  get mapPose(): MapPoseOutput | null {
+    return this.lastMapPose;
+  }
+
+  /** Last plane candidate. */
+  get plane(): PlaneOutput | null {
+    return this.lastPlane;
+  }
+
+  get landmarkCount(): number {
+    return this.mapTracker.map.size;
   }
 
   get state(): TrackingState {
@@ -118,6 +159,14 @@ export class VisionEngine {
     this.lastAccumulatedRotation = mat3Identity();
     this.lastPlaneNormal = null;
     this.lastPose = null;
+    this.lastRelative = null;
+    this.lastRelativeRefFrame = -1;
+    this.prevFrameRotation = null;
+    this.mapTracker.reset(this.tracks);
+    this.planeDetector.reset();
+    this.lastMapPose = null;
+    this.lastPlane = null;
+    this.packedLandmarkCount = 0;
   }
 
   /** Last pose output (null until a reference frame and enough tracks exist). */
@@ -168,15 +217,23 @@ export class VisionEngine {
     const pose = this.estimatePose(input);
     const t4b = now();
 
-    // 6. Quality + state
+    // 6. Landmark map (Phase 3): initialization, PnP, triangulation
+    this.updateMap(input);
+    const t4c = now();
+
+    // 7. Plane detection (Phase 3)
+    this.updatePlane(input);
+    const t4d = now();
+
+    // 8. Quality + state
     const featureCount = this.tracks.length;
     const quality: TrackingQuality = {
       featureCount,
       trackedCount,
       inlierCount,
-      reprojectionError: this.lastRansacError,
+      reprojectionError: this.lastMapPose ? this.lastMapPose.meanReprojectionErrorPx : this.lastRansacError,
       poseDelta: this.lastPoseDelta,
-      planeConfidence: 0,
+      planeConfidence: this.lastPlane ? this.lastPlane.confidence : 0,
       trackingConfidence: computeTrackingConfidence(
         inlierCount,
         previousCount,
@@ -185,7 +242,12 @@ export class VisionEngine {
       lowFeature: featureCount < cfg.minFeatures,
     };
     this.lastQuality = quality;
-    const state = this.stateMachine.update({ inlierCount, featureCount });
+    const state = this.stateMachine.update({
+      inlierCount,
+      featureCount,
+      mapInitialized: this.mapTracker.initialized,
+      planeFound: this.lastPlane?.found ?? false,
+    });
 
     // Swap pyramids for the next frame.
     const tmp = this.prevPyramid;
@@ -199,6 +261,8 @@ export class VisionEngine {
     this.timing.ransac = t3 - t2;
     this.timing.detect = t4 - t3;
     this.timing.pose = t4b - t4;
+    this.timing.map = t4c - t4b;
+    this.timing.plane = t4d - t4c;
     this.timing.total = t5 - t0;
 
     return {
@@ -207,10 +271,125 @@ export class VisionEngine {
       state,
       quality,
       pose,
+      mapPose: this.lastMapPose,
+      plane: this.lastPlane,
+      landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
+      landmarkCount: this.packedLandmarkCount,
       tracks: packTracks(this.tracks),
       trackCount: this.tracks.length,
       processingMs: t5 - t0,
     };
+  }
+
+  /**
+   * Phase 3: initialize the landmark map from the two-view pose, then track
+   * the camera against the map with PnP and triangulate new landmarks.
+   */
+  private updateMap(input: VisionInput): void {
+    const cfg = this.config.landmarks;
+    const k = input.intrinsics;
+    const frameId = input.frameId;
+    const tracker = this.mapTracker;
+
+    // Frame-to-frame rotation prior from the two-view estimator:
+    // R_cur←prev = R_cur←ref · R_prev←refᵀ when both share the reference.
+    let rotationPrior: Mat3 | null = null;
+    if (this.lastRelative && this.prevFrameRotation && this.lastRelative.model !== "none") {
+      rotationPrior = mat3Multiply(this.lastRelative.rotation, transpose3(this.prevFrameRotation));
+    }
+
+    if (!tracker.initialized) {
+      if (this.lastRelative && this.lastRelativeRefFrame >= 0) {
+        if (tracker.tryInitialize(this.tracks, this.lastRelative, this.lastRelativeRefFrame, frameId, k)) {
+          this.planeDetector.reset();
+        }
+      }
+    } else {
+      const res = tracker.update(this.tracks, frameId, k, rotationPrior);
+      if (!res.tracked && tracker.framesSinceTracked > cfg.lostResetFrames) {
+        // Lost the map for too long: start over (Phase 5 adds relocalization).
+        tracker.reset(this.tracks);
+        this.planeDetector.reset();
+      }
+    }
+
+    if (tracker.initialized) {
+      const p = tracker.pose;
+      const r = tracker.result;
+      this.lastMapPose = {
+        rotation: Array.from(p.rotation),
+        translation: Array.from(p.translation),
+        inlierCount: r.inlierCount,
+        meanReprojectionErrorPx: r.meanReprojectionErrorPx,
+        landmarkCount: tracker.map.size,
+        mapFrameId: tracker.mapFrameId,
+        framesSinceTracked: tracker.framesSinceTracked,
+      };
+    } else {
+      this.lastMapPose = null;
+    }
+    // Remember this frame's relative rotation for the next prior.
+    this.prevFrameRotation = this.lastRelative && this.lastRelative.model !== "none" ? this.lastRelative.rotation : null;
+  }
+
+  /** Phase 3: RANSAC plane on the landmarks, horizontality via gravity when available. */
+  private updatePlane(input: VisionInput): void {
+    const tracker = this.mapTracker;
+    if (!tracker.initialized) {
+      this.lastPlane = null;
+      this.packedLandmarkCount = 0;
+      return;
+    }
+    const cfg = this.config.plane;
+    const { points, ids } = tracker.map.collect(cfg.minLandmarkObservations);
+    const n = ids.length;
+
+    // Gravity (camera frame of the current frame) → map frame: g_map = Rᵀ g_cam.
+    let up: Float64Array | null = null;
+    if (input.gravity && input.gravity.length === 3) {
+      const g = input.gravity;
+      const r = tracker.pose.rotation;
+      up = new Float64Array([
+        r[0] * g[0] + r[3] * g[1] + r[6] * g[2],
+        r[1] * g[0] + r[4] * g[1] + r[7] * g[2],
+        r[2] * g[0] + r[5] * g[1] + r[8] * g[2],
+      ]);
+    }
+    const candidate = this.planeDetector.update(points, ids, n, up);
+    this.lastPlane = candidate
+      ? {
+          normal: candidate.normal,
+          d: candidate.d,
+          center: candidate.center,
+          inlierCount: candidate.inlierCount,
+          rmsResidual: candidate.rmsResidual,
+          areaEstimate: candidate.areaEstimate,
+          horizontalness: candidate.horizontalness,
+          horizontal: candidate.horizontal,
+          confidence: candidate.confidence,
+          stableFrames: candidate.stableFrames,
+          found: candidate.found,
+          usedGravity: candidate.usedGravity,
+        }
+      : null;
+
+    // Pack landmarks for debug rendering, flagging plane inliers.
+    const inlierSet = candidate ? new Set(candidate.inlierIds) : null;
+    for (const lm of tracker.map.values()) lm.planeInlier = inlierSet ? inlierSet.has(lm.id) : false;
+    const total = tracker.map.size;
+    if (this.packedLandmarks.length < total * LANDMARK_STRIDE) {
+      this.packedLandmarks = new Float32Array(Math.max(total, 256) * LANDMARK_STRIDE);
+    }
+    let i = 0;
+    for (const lm of tracker.map.values()) {
+      const o = i * LANDMARK_STRIDE;
+      this.packedLandmarks[o] = lm.position[0];
+      this.packedLandmarks[o + 1] = lm.position[1];
+      this.packedLandmarks[o + 2] = lm.position[2];
+      this.packedLandmarks[o + 3] = lm.planeInlier ? 1 : 0;
+      i++;
+    }
+    this.packedLandmarkCount = i;
   }
 
   /** LK + forward-backward. Mutates `this.tracks` (drops failures). Returns surviving count. */
@@ -293,6 +472,11 @@ export class VisionEngine {
         refX: c.x,
         refY: c.y,
         refFrame: -1,
+        landmarkId: -1,
+        anchorFrame: -1,
+        anchorX: c.x,
+        anchorY: c.y,
+        anchorPose: null,
       });
     }
   }
@@ -307,6 +491,7 @@ export class VisionEngine {
     const cfg = this.config.pose;
     const frameId = input.frameId;
 
+    this.lastRelative = null;
     if (this.referenceFrameId < 0) {
       // First frame with features becomes the reference.
       if (this.tracks.length >= cfg.minCorrespondences) this.renewReference(frameId, mat3Identity());
@@ -341,6 +526,8 @@ export class VisionEngine {
     const rel: RelativePose = this.poseEstimator.estimate(
       r1x, r1y, r2x, r2y, n, input.intrinsics, this.lastPlaneNormal,
     );
+    this.lastRelative = rel;
+    this.lastRelativeRefFrame = this.referenceFrameId;
 
     if (rel.model === "none") {
       // Keep the previous pose (if any) rather than flickering to identity.

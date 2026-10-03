@@ -48,8 +48,10 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           height: msg.height,
           gray: new Uint8Array(msg.gray),
           intrinsics: msg.intrinsics,
+          gravity: msg.gravity,
         });
         const tracksBuf = out.tracks.buffer as ArrayBuffer;
+        const landmarksBuf = out.landmarks.buffer as ArrayBuffer;
         const res: ResultResponse = {
           type: "result",
           frameId: out.frameId,
@@ -57,6 +59,10 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           state: out.state,
           quality: out.quality,
           pose: out.pose,
+          mapPose: out.mapPose,
+          plane: out.plane,
+          landmarks: landmarksBuf,
+          landmarkCount: out.landmarkCount,
           tracks: tracksBuf,
           trackCount: out.trackCount,
           processingMs: out.processingMs,
@@ -64,7 +70,7 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           fastThreshold: engine.fastThreshold,
           gray: msg.gray,
         };
-        post(res, [tracksBuf, msg.gray]);
+        post(res, landmarksBuf === tracksBuf ? [tracksBuf, msg.gray] : [tracksBuf, landmarksBuf, msg.gray]);
       } catch (e) {
         const err: ErrorResponse = {
           type: "error",

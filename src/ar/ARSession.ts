@@ -3,9 +3,10 @@ import { FrameGrabber } from "../camera/CameraFrame";
 import { approximateIntrinsics, type CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
+import { PlaneRenderer } from "../debug/PlaneRenderer";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
-import type { PoseOutput } from "../vision/types";
+import type { MapPoseOutput, PlaneOutput, PoseOutput } from "../vision/types";
 import {
   MainThreadVisionBackend,
   VisionWorkerClient,
@@ -32,10 +33,19 @@ export interface ARSessionOptions {
   overlayCanvas?: HTMLCanvasElement;
   config?: PartialARConfig;
   camera?: CameraOptions;
+  /**
+   * Optional gravity source: returns the gravity direction in the camera
+   * frame (any scale) or null. Used for the plane horizontality test.
+   */
+  gravitySource?: () => ArrayLike<number> | null;
 }
 
 export interface ARSessionEvents {
   trackingStateChanged: (state: TrackingState, previous: TrackingState) => void;
+  /** Fired when a stable horizontal plane is first found (spec §54). */
+  planeFound: (plane: PlaneOutput) => void;
+  /** Fired when the found plane is lost (map reset / plane dropped). */
+  planeLost: () => void;
   frame: (result: VisionResult) => void;
   error: (error: ARError) => void;
   started: () => void;
@@ -48,6 +58,10 @@ export interface ARStats {
   visionMs: number;
   quality: TrackingQuality;
   pose: PoseOutput | null;
+  mapPose: MapPoseOutput | null;
+  plane: PlaneOutput | null;
+  landmarkCount: number;
+  gravityAvailable: boolean;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -65,6 +79,8 @@ export class ARSession {
 
   private readonly video: HTMLVideoElement;
   private readonly renderer: FeatureRenderer | null;
+  private readonly planeRenderer: PlaneRenderer | null;
+  private readonly gravitySource: (() => ArrayLike<number> | null) | null;
   private readonly logger: ARLogger;
   private backend: VisionBackend | null = null;
   private backendKind: "worker" | "main" = "worker";
@@ -79,6 +95,8 @@ export class ARSession {
   private _state: TrackingState = TrackingState.INITIALIZING;
   private readonly listeners: { [K in keyof ARSessionEvents]: Set<Listener<K>> } = {
     trackingStateChanged: new Set(),
+    planeFound: new Set(),
+    planeLost: new Set(),
     frame: new Set(),
     error: new Set(),
     started: new Set(),
@@ -88,6 +106,11 @@ export class ARSession {
   // Stats
   private quality: TrackingQuality = emptyQuality();
   private pose: PoseOutput | null = null;
+  private mapPose: MapPoseOutput | null = null;
+  private plane: PlaneOutput | null = null;
+  private landmarkCount = 0;
+  private planeWasFound = false;
+  private lastGravity: number[] | null = null;
   private visionMs = 0;
   private fastThreshold = 0;
   private framesProcessed = 0;
@@ -100,7 +123,14 @@ export class ARSession {
     this.video = options.video;
     this.camera = new CameraManager(options.video, options.camera);
     this.renderer = options.overlayCanvas ? new FeatureRenderer(options.overlayCanvas) : null;
+    this.planeRenderer = options.overlayCanvas ? new PlaneRenderer(options.overlayCanvas) : null;
+    this.gravitySource = options.gravitySource ?? null;
     this.logger = new ARLogger(this.config.debug.log, this.config.debug.logIntervalMs);
+  }
+
+  /** Current plane (null when none / not yet found). */
+  get currentPlane(): PlaneOutput | null {
+    return this.plane;
   }
 
   get state(): TrackingState {
@@ -193,6 +223,10 @@ export class ARSession {
       visionMs: this.visionMs,
       quality: this.quality,
       pose: this.pose,
+      mapPose: this.mapPose,
+      plane: this.plane,
+      landmarkCount: this.landmarkCount,
+      gravityAvailable: this.lastGravity !== null,
       state: this._state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -254,7 +288,13 @@ export class ARSession {
     if (maxFps > 0 && now - this.lastSentTime < 1000 / maxFps - 1) return;
     this.lastSentTime = now;
 
-    const frame = this.grabber.grab(this.video, now, this.intrinsics);
+    let gravity: number[] | null = null;
+    if (this.gravitySource) {
+      const g = this.gravitySource();
+      if (g && g.length === 3) gravity = [g[0], g[1], g[2]];
+    }
+    this.lastGravity = gravity;
+    const frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
     this.backend.processFrame(frame);
   }
 
@@ -266,12 +306,27 @@ export class ARSession {
     this.visionMs = r.processingMs;
     this.quality = r.quality;
     this.pose = r.pose;
+    this.mapPose = r.mapPose;
+    this.plane = r.plane;
+    this.landmarkCount = r.landmarkCount;
     this.fastThreshold = r.fastThreshold;
     this.setState(r.state);
 
-    if (this.renderer && this.config.debug.overlay && this.grabber) {
+    const found = !!r.plane?.found;
+    if (found && !this.planeWasFound) {
+      this.planeWasFound = true;
+      this.logger.info("plane found");
+      this.emit("planeFound", r.plane!);
+    } else if (!found && this.planeWasFound) {
+      this.planeWasFound = false;
+      this.logger.info("plane lost");
+      this.emit("planeLost");
+    }
+
+    if (this.renderer && this.config.debug.overlay && this.grabber && this.intrinsics) {
       this.renderer.resize();
       this.renderer.draw(r.tracks, r.trackCount, this.grabber.width, this.grabber.height);
+      this.planeRenderer?.draw(r.mapPose, r.plane, r.landmarks, r.landmarkCount, this.intrinsics);
     }
     this.logger.periodic(performance.now(), {
       state: r.state,

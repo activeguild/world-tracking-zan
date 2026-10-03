@@ -29,6 +29,25 @@ export interface HudStats {
     translationConfidence: number;
     correspondences: number;
   } | null;
+  /** Phase 3 map + plane. */
+  map?: {
+    landmarks: number;
+    pnpInliers: number;
+    reprojPx: number;
+    translation: number[];
+    framesSinceTracked: number;
+  } | null;
+  plane?: {
+    normal: number[];
+    inliers: number;
+    horizontalness: number;
+    horizontal: boolean;
+    stableFrames: number;
+    confidence: number;
+    found: boolean;
+    usedGravity: boolean;
+  } | null;
+  gravityAvailable?: boolean;
 }
 
 function fmt(deg: number): string {
@@ -67,6 +86,19 @@ export class DebugOverlay {
             `Pose conf   ${s.pose.confidence.toFixed(2)}  t-conf ${s.pose.translationConfidence.toFixed(2)}`,
           ]
         : [`Pose        —`]),
+      ...(s.map
+        ? [
+            `Map         ${s.map.landmarks} lm  pnp ${s.map.pnpInliers}  err ${s.map.reprojPx.toFixed(2)}px  lost ${s.map.framesSinceTracked}`,
+            `Map t       (${s.map.translation.map((v) => v.toFixed(2)).join(", ")})`,
+          ]
+        : [`Map         —`]),
+      ...(s.plane
+        ? [
+            `Plane n     (${s.plane.normal.map((v) => v.toFixed(2)).join(", ")})  in ${s.plane.inliers}`,
+            `Plane       hz ${s.plane.horizontalness.toFixed(2)} ${s.plane.horizontal ? "H" : "-"}  stable ${s.plane.stableFrames}  conf ${s.plane.confidence.toFixed(2)}  ${s.plane.found ? "FOUND" : ""}`,
+          ]
+        : [`Plane       —`]),
+      `Gravity     ${s.gravityAvailable ? "yes" : "no (fallback up = −Y)"}`,
       `FAST thr    ${s.fastThreshold}`,
       `Proc size   ${s.processingSize}  [${s.backend}]`,
     ];

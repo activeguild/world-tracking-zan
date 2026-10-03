@@ -36,6 +36,8 @@ export interface RelativePose {
   confidence: number;
   /** Plane normal in the reference camera frame, when a homography model was used. */
   planeNormal: Float64Array | null;
+  /** Per-correspondence inlier flags of the chosen model (length n). */
+  inlierMask: Uint8Array;
   /** Diagnostics */
   homographyInliers: number;
   essentialInliers: number;
@@ -129,6 +131,7 @@ export class PoseEstimator {
           translationConfidence: 0,
           confidence: Math.min(1, hIn / cfg.goodInlierCount),
           planeNormal: null,
+          inlierMask: hRes.inliers,
           homographyInliers: hIn,
           essentialInliers: eIn,
         };
@@ -178,6 +181,7 @@ export class PoseEstimator {
       translationConfidence,
       confidence: Math.min(1, eIn / cfg.goodInlierCount) * support,
       planeNormal: null,
+      inlierMask: inliers,
       homographyInliers: hIn,
       essentialInliers: eIn,
     };
@@ -209,6 +213,7 @@ export class PoseEstimator {
         translationConfidence: 0,
         confidence: Math.min(1, hIn / cfg.goodInlierCount),
         planeNormal: null,
+        inlierMask: inliers,
         homographyInliers: hIn,
         essentialInliers: eIn,
       };
@@ -261,6 +266,7 @@ export class PoseEstimator {
       translationConfidence,
       confidence: Math.min(1, hIn / cfg.goodInlierCount) * bestRatio,
       planeNormal: Float64Array.from(sol.normal),
+      inlierMask: inliers,
       homographyInliers: hIn,
       essentialInliers: eIn,
     };
@@ -286,10 +292,10 @@ function noPose(n: number, parallaxPx = 0): RelativePose {
     translationConfidence: 0,
     confidence: 0,
     planeNormal: null,
+    inlierMask: new Uint8Array(Math.max(0, n)),
     homographyInliers: 0,
     essentialInliers: 0,
   };
-  void n;
 }
 
 function clamp01(v: number): number {

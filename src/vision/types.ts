@@ -37,7 +37,63 @@ export interface Track {
   refX: number;
   refY: number;
   refFrame: number;
+  /** Landmark observed by this track (Phase 3), -1 when none. */
+  landmarkId: number;
+  /**
+   * Anchor observation for triangulation: the map-frame camera pose and the
+   * pixel position at the frame where the track started being watched by
+   * the map tracker. anchorFrame = -1 when not set.
+   */
+  anchorFrame: number;
+  anchorX: number;
+  anchorY: number;
+  anchorPose: { rotation: Float64Array; translation: Float64Array } | null;
 }
+
+/** Detected plane (spec §21, Phase 3). All geometry in the map frame. */
+export interface PlaneOutput {
+  /** Unit normal, oriented toward the map-frame camera (i.e. "up" for a floor seen from above). */
+  normal: number[];
+  /** Plane equation n·X + d = 0. */
+  d: number;
+  /** Centroid of the inlier landmarks. */
+  center: number[];
+  inlierCount: number;
+  /** RMS distance of inliers to the plane (map units). */
+  rmsResidual: number;
+  /** Rough area covered by the inliers (map units²). */
+  areaEstimate: number;
+  /** |cos| between the normal and the up direction (1 = horizontal). */
+  horizontalness: number;
+  horizontal: boolean;
+  /** 0–1 (spec §23). */
+  confidence: number;
+  /** Consecutive frames the same plane has been detected. */
+  stableFrames: number;
+  /** PLANE_FOUND criterion satisfied (spec §24). */
+  found: boolean;
+  /** True when the horizontality test used a gravity reading. */
+  usedGravity: boolean;
+}
+
+/** Camera pose in the map frame with consistent (but arbitrary) scale. */
+export interface MapPoseOutput {
+  /** X_cam = R · X_map + t (row-major R). */
+  rotation: number[];
+  translation: number[];
+  /** PnP inliers in this frame (0 when the pose was propagated without PnP). */
+  inlierCount: number;
+  /** Mean PnP reprojection error of inliers (px). */
+  meanReprojectionErrorPx: number;
+  landmarkCount: number;
+  /** Frame id of the map origin. */
+  mapFrameId: number;
+  /** Frames since the last successful PnP. */
+  framesSinceTracked: number;
+}
+
+/** Packed landmark layout (Float32): [x, y, z, planeInlier] in the map frame. */
+export const LANDMARK_STRIDE = 4;
 
 /**
  * Camera pose output (Phase 2, spec §17–§18). Scale-free: the translation is
@@ -87,6 +143,11 @@ export interface VisionInput {
   /** Grayscale pixels, row-major, width*height bytes. */
   gray: Uint8Array;
   intrinsics: CameraIntrinsics;
+  /**
+   * Optional gravity direction in the camera frame (any scale, sign may be
+   * device dependent). Used only for the horizontality test of planes.
+   */
+  gravity?: number[] | null;
 }
 
 /**
@@ -102,6 +163,13 @@ export interface VisionOutput {
   quality: TrackingQuality;
   /** Relative camera pose (Phase 2). Null until enough parallax / tracks exist. */
   pose: PoseOutput | null;
+  /** Camera pose in the landmark map frame (Phase 3). Null until the map is initialized. */
+  mapPose: MapPoseOutput | null;
+  /** Current plane candidate (Phase 3). Null when none. */
+  plane: PlaneOutput | null;
+  /** Packed landmarks for debug rendering: see `LANDMARK_STRIDE`. */
+  landmarks: Float32Array;
+  landmarkCount: number;
   /** Packed track data for cheap transfer: see `TRACK_STRIDE`. */
   tracks: Float32Array;
   trackCount: number;

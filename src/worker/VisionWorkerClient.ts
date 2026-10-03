@@ -2,7 +2,7 @@ import type { ARConfig } from "../ar/ARConfig";
 import type { TrackingState } from "../ar/ARState";
 import type { GrayFrame } from "../camera/CameraFrame";
 import type { TrackingQuality } from "../vision/TrackingQuality";
-import type { PoseOutput } from "../vision/types";
+import type { MapPoseOutput, PlaneOutput, PoseOutput } from "../vision/types";
 import { VisionEngine } from "../vision/VisionEngine";
 import type { EngineTiming, WorkerRequest, WorkerResponse } from "./protocol";
 
@@ -13,6 +13,10 @@ export interface VisionResult {
   state: TrackingState;
   quality: TrackingQuality;
   pose: PoseOutput | null;
+  mapPose: MapPoseOutput | null;
+  plane: PlaneOutput | null;
+  landmarks: Float32Array;
+  landmarkCount: number;
   tracks: Float32Array;
   trackCount: number;
   processingMs: number;
@@ -78,6 +82,10 @@ export class VisionWorkerClient implements VisionBackend {
               state: msg.state,
               quality: msg.quality,
               pose: msg.pose,
+              mapPose: msg.mapPose,
+              plane: msg.plane,
+              landmarks: new Float32Array(msg.landmarks),
+              landmarkCount: msg.landmarkCount,
               tracks: new Float32Array(msg.tracks),
               trackCount: msg.trackCount,
               processingMs: msg.processingMs,
@@ -109,6 +117,7 @@ export class VisionWorkerClient implements VisionBackend {
       height: frame.height,
       gray: buffer,
       intrinsics: frame.intrinsics,
+      gravity: frame.gravity ?? null,
     };
     this.worker.postMessage(req, [buffer]);
   }
@@ -153,6 +162,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         height: frame.height,
         gray: frame.data,
         intrinsics: frame.intrinsics,
+        gravity: frame.gravity ?? null,
       });
       this.onResult?.({
         frameId: out.frameId,
@@ -160,6 +170,10 @@ export class MainThreadVisionBackend implements VisionBackend {
         state: out.state,
         quality: out.quality,
         pose: out.pose,
+        mapPose: out.mapPose,
+        plane: out.plane,
+        landmarks: out.landmarks,
+        landmarkCount: out.landmarkCount,
         tracks: out.tracks,
         trackCount: out.trackCount,
         processingMs: out.processingMs,

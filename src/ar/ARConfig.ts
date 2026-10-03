@@ -115,6 +115,66 @@ export interface PoseConfig {
   maxReferenceParallaxPx: number;
 }
 
+/** Landmark map: two-view initialization, PnP tracking, triangulation (spec §19–§20, §48, Phase 3). */
+export interface LandmarkConfig {
+  /** Median parallax (px) between reference and current frame needed to initialize the map. */
+  initMinParallaxPx: number;
+  /** Translation confidence of the two-view pose needed to initialize. */
+  initMinTranslationConfidence: number;
+  /** Landmarks that must triangulate well for the initialization to be accepted. */
+  initMinLandmarks: number;
+  /** Minimum ray parallax angle (degrees) for a triangulated point. */
+  minTriangulationAngleDeg: number;
+  /** Maximum reprojection error (px, both views summed) for a triangulated point. */
+  maxTriangulationErrorPx: number;
+  /** Pixel displacement from the anchor observation before a track is triangulated. */
+  triangulateMinParallaxPx: number;
+  /** Huber threshold for PnP (px). */
+  pnpHuberPx: number;
+  /** PnP inlier gate (px). */
+  pnpInlierPx: number;
+  pnpMaxIterations: number;
+  /** PnP inliers needed to accept a map-frame pose. */
+  minPnPInliers: number;
+  /** Consecutive PnP-outlier frames before a landmark is removed. */
+  maxOutlierCount: number;
+  /** Upper bound on stored landmarks (spec §48: 500–2000). */
+  maxLandmarks: number;
+  /** Landmarks unseen for this many frames are removed. */
+  maxLandmarkAgeFrames: number;
+  /** Frames without a map pose before the map is reset (Phase 5 relocalization replaces this). */
+  lostResetFrames: number;
+}
+
+/** Plane detection (spec §21–§24, §51, Phase 3). */
+export interface PlaneConfig {
+  /** RANSAC inlier distance as a fraction of the median landmark distance from the map origin. */
+  inlierThresholdRatio: number;
+  minInliers: number;
+  maxIterations: number;
+  confidence: number;
+  /** |cos(normal, up)| above which a plane is horizontal when gravity is known (spec §22: 0.90). */
+  horizontalThreshold: number;
+  /**
+   * Threshold used when no gravity reading is available. The camera −Y axis of
+   * the map frame is then assumed to point up (phone held upright), which
+   * cannot distinguish a wall from a floor when the phone looks straight down.
+   */
+  fallbackHorizontalThreshold: number;
+  /** Normal change (degrees) tolerated between frames for the plane to count as stable. */
+  stableAngleDeg: number;
+  /** Center shift tolerated between frames, as a fraction of the median landmark distance. */
+  stableCenterRatio: number;
+  /** Consecutive stable frames before PLANE_FOUND (spec §24). */
+  stableFramesRequired: number;
+  /** Frames a found plane may go undetected before it is dropped. */
+  lostFrames: number;
+  /** Inlier count that saturates the confidence score. */
+  goodInlierCount: number;
+  /** Landmarks need this many observations to take part in plane fitting. */
+  minLandmarkObservations: number;
+}
+
 /** Tracking state transition thresholds (spec §31, §33). */
 export interface StateConfig {
   /** Tracked inliers needed to enter / remain in TRACKING. */
@@ -140,6 +200,8 @@ export interface ARConfig {
   tracker: TrackerConfig;
   ransac: RansacConfig;
   pose: PoseConfig;
+  landmarks: LandmarkConfig;
+  plane: PlaneConfig;
   state: StateConfig;
   debug: DebugConfig;
   /** Run the vision engine in a Web Worker (false → main thread fallback). */
@@ -194,6 +256,36 @@ export const DEFAULT_CONFIG: ARConfig = {
     minReferenceTracks: 40,
     maxReferenceParallaxPx: 120,
   },
+  landmarks: {
+    initMinParallaxPx: 20,
+    initMinTranslationConfidence: 0.5,
+    initMinLandmarks: 30,
+    minTriangulationAngleDeg: 1.0,
+    maxTriangulationErrorPx: 3.0,
+    triangulateMinParallaxPx: 8,
+    pnpHuberPx: 3.0,
+    pnpInlierPx: 4.0,
+    pnpMaxIterations: 10,
+    minPnPInliers: 15,
+    maxOutlierCount: 3,
+    maxLandmarks: 1000,
+    maxLandmarkAgeFrames: 60,
+    lostResetFrames: 30,
+  },
+  plane: {
+    inlierThresholdRatio: 0.02,
+    minInliers: 30,
+    maxIterations: 200,
+    confidence: 0.99,
+    horizontalThreshold: 0.9,
+    fallbackHorizontalThreshold: 0.5,
+    stableAngleDeg: 5,
+    stableCenterRatio: 0.1,
+    stableFramesRequired: 5,
+    lostFrames: 15,
+    goodInlierCount: 80,
+    minLandmarkObservations: 2,
+  },
   state: {
     minTrackedForTracking: 40,
     lostBelow: 20,
@@ -221,6 +313,8 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     tracker: { ...base.tracker, ...overrides.tracker },
     ransac: { ...base.ransac, ...overrides.ransac },
     pose: { ...base.pose, ...overrides.pose },
+    landmarks: { ...base.landmarks, ...overrides.landmarks },
+    plane: { ...base.plane, ...overrides.plane },
     state: { ...base.state, ...overrides.state },
     debug: { ...base.debug, ...overrides.debug },
     useWorker: overrides.useWorker ?? base.useWorker,
@@ -234,6 +328,8 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     tracker: { ...c.tracker },
     ransac: { ...c.ransac },
     pose: { ...c.pose },
+    landmarks: { ...c.landmarks },
+    plane: { ...c.plane },
     state: { ...c.state },
     debug: { ...c.debug },
     useWorker: c.useWorker,

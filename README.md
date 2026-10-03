@@ -6,8 +6,30 @@ single rear camera, `getUserMedia()`, and our own vision pipeline running in a
 Web Worker.
 
 The full specification lives in [CLAUDE.md](./CLAUDE.md). Development is
-strictly phased; **Phase 1 (feature tracking) and Phase 2 (relative camera
-pose) are implemented**, later phases are not started.
+strictly phased; **Phases 1–3 (feature tracking, relative camera pose,
+landmark map + plane detection) are implemented**, later phases are not
+started.
+
+## Phase 3 — landmark map and plane detection
+
+```
+two-view pose with enough parallax (≥ 20 px, confident translation)
+  → initialize the map: triangulate reference↔current inliers
+    (map frame = reference camera, |t| = 1 → monocular scale)
+  → every frame: PnP (LM + Huber) against landmarks seen by live tracks
+                 → camera pose in the map frame, consistent scale
+                 triangulate new landmarks from each track's anchor observation
+                 cull outliers / stale landmarks (cap 1000)
+  → RANSAC plane on the landmarks → PCA refit
+  → horizontality: |cos(normal, gravity)| ≥ 0.90   (DeviceMotion gravity, camera frame)
+                   fallback without gravity: camera −Y as up, threshold 0.5
+  → temporal stability (5 consecutive frames) → PLANE_FOUND, `planeFound` event
+```
+
+Gravity comes from `DeviceMotion` (`src/sensors/GravityProvider.ts`); iOS asks
+for permission on the Start tap. `?gravity=x,y,z` overrides it for testing.
+Landmarks and the plane grid are projected onto the 2D overlay
+(`PlaneRenderer`); the Three.js version comes with Phase 4.
 
 ## Phase 2 — relative camera pose
 
@@ -65,6 +87,7 @@ Query parameters:
 | `?debug=1`  | `[AR] state=… features=… tracked=…` console log every second |
 | `?worker=0` | run the vision engine on the main thread    |
 | `?hud=0`    | hide the HUD                                |
+| `?gravity=x,y,z` | override the gravity direction (camera frame) |
 
 ## Tests
 
@@ -103,14 +126,16 @@ src/
   camera/    CameraManager (getUserMedia), CameraFrame (resize + grayscale), CameraIntrinsics
   vision/    ImagePyramid, FeatureDetector (FAST-9), FeatureTracker (LK + FB),
              OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
+             LandmarkMap, MapTracker (init / PnP / triangulation), PlaneDetector,
              VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
-             HomographyDecomposition (Faugeras), Triangulation
+             HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)
+  sensors/   GravityProvider (DeviceMotion → camera frame)
   worker/    protocol, VisionWorker (worker entry), VisionWorkerClient (+ main-thread fallback)
-  debug/     DebugOverlay (HUD), FeatureRenderer, Logger
+  debug/     DebugOverlay (HUD), FeatureRenderer, PlaneRenderer, Logger
 tests/
-  math/ vision/ ar/ camera/   unit tests
+  math/ vision/ plane/ ar/ camera/   unit tests
   integration/                browser smoke test (Playwright + Chromium)
   helpers/                    synthetic image generators, y4m writer
 ```

@@ -14,6 +14,8 @@ export interface GrayFrame {
   height: number;
   data: Uint8Array;
   intrinsics: CameraIntrinsics;
+  /** Gravity direction in the camera frame at capture time, if known. */
+  gravity?: number[] | null;
 }
 
 /**
@@ -81,7 +83,12 @@ export class FrameGrabber {
     return { width: w, height: h };
   }
 
-  grab(video: CanvasImageSource, timestamp: number, intrinsics: CameraIntrinsics): GrayFrame {
+  grab(
+    video: CanvasImageSource,
+    timestamp: number,
+    intrinsics: CameraIntrinsics,
+    gravity: number[] | null = null,
+  ): GrayFrame {
     const { width, height } = this;
     this.ctx.drawImage(video, 0, 0, width, height);
     const imageData = this.ctx.getImageData(0, 0, width, height);
@@ -95,6 +102,7 @@ export class FrameGrabber {
       height,
       data: gray,
       intrinsics,
+      gravity,
     };
   }
 

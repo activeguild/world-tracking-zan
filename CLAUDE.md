@@ -207,7 +207,20 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
-### Phase 2 — 実装済み（承認待ち）
+### Phase 3 — 実装済み（承認待ち）
+
+- `src/math/Plane.ts`: 平面モデル、3 点平面、PCA 最小二乗、RANSAC 平面当てはめ（適応反復 + 再フィット）、水平度
+- `src/math/PnP.ts`: 事前姿勢からの motion-only 最適化（LM + Huber、so(3) 更新）。平面上の点群でも安定
+- `src/vision/LandmarkMap.ts`: Landmark（位置 / 観測数 / 最終観測 / 外れ値カウント）、上限・経過フレームによる削除
+- `src/vision/MapTracker.ts`: Phase 2 の ref↔cur 姿勢から二視点初期化（マップ座標 = 参照カメラ、|t| = 1）、毎フレーム PnP でマップ座標系のカメラ姿勢、アンカー観測からの新規三角測量、外れ値 Landmark の除去。スケールはマップ内で一貫
+- `src/vision/PlaneDetector.ts`: Landmark に RANSAC 平面 → 法線をカメラ側へ向ける → 水平判定（重力あり: |cos| ≥ 0.90、なし: カメラ −Y を上と仮定し 0.5）→ 時間安定性（法線角・法線方向の中心移動）→ 信頼度 → `found`（連続 5 フレーム安定、短時間の見失いは猶予）
+- `src/sensors/GravityProvider.ts`: DeviceMotion の重力をカメラ座標へ変換（画面回転考慮、iOS の権限要求はボタン押下時）。水平判定のみに使用（IMU 融合は Phase 6）。`?gravity=x,y,z` でテスト用に上書き可
+- 状態機械: TRACKING → PLANE_DETECTING（マップ初期化）→ PLANE_FOUND（安定水平面）。`ARSession` に `planeFound` / `planeLost` イベント
+- `VisionOutput` に `mapPose`（マップ座標系の R, t、PnP inlier、再投影誤差）、`plane`、`landmarks`（デバッグ描画用）
+- デバッグ: `PlaneRenderer`（Landmark と平面グリッド・法線を 2D オーバーレイに投影描画）、HUD に Map / Plane / Gravity 行
+- テスト: 単体 93 件（RANSAC 平面、PnP 一般/平面/外れ値、PlaneDetector 床/壁/重力なし/見失い、MapTracker 初期化・スケール一貫・新規三角測量、VisionEngine 統合: 45° の机で PLANE_FOUND・壁は不採用・真下の床・重力なしフォールバック・静止）、ブラウザテストで `?gravity=0,0,1` を与え PLANE_FOUND を検証
+
+### Phase 2 — 実装済み
 
 - `src/math/Decomposition.ts`: 対称 Jacobi 固有値分解、3×3 SVD、小行列ユーティリティ
 - `src/math/Pose.ts`: 回転・四元数・オイラー角、SO(3) 射影、剛体変換の合成（CV カメラ座標系）
@@ -230,6 +243,6 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - `src/debug/`: HUD、特徴点・モーションベクトル描画、`[AR]` ロガー
 - テスト: `npm test`（Vitest 単体 46 件）、`npm run test:browser`（headless Chromium + 合成カメラ映像）
 
-### 未実装（Phase 2 以降）
+### 未実装（Phase 4 以降）
 
-Essential Matrix / Pose / Triangulation / Plane Detection / Three.js 配置 / Keyframe / Relocalization / IMU / BA / WASM。
+World Coordinate / Ray-Plane hit test / Three.js 配置 / Pose smoothing / Keyframe / Relocalization / IMU 融合 / BA / WASM。

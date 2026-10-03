@@ -2,20 +2,24 @@ import { ARSession } from "./ar/ARSession";
 import { ARError, TrackingState } from "./ar/ARState";
 import { DebugOverlay } from "./debug/DebugOverlay";
 import { rotationToEulerDeg } from "./math/Pose";
+import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
 import "./style.css";
 
 /**
- * Phase 1 demo: camera → feature tracking → debug overlay.
+ * Demo: camera → feature tracking → relative pose → landmark map → plane.
  *
  * Query parameters:
- *   ?debug=1    enable `[AR]` console logs
- *   ?worker=0   run the vision engine on the main thread
- *   ?hud=0      hide the HUD
+ *   ?debug=1          enable `[AR]` console logs
+ *   ?worker=0         run the vision engine on the main thread
+ *   ?hud=0            hide the HUD
+ *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
  */
 const params = new URLSearchParams(location.search);
 const debugLog = params.get("debug") === "1";
 const useWorker = params.get("worker") !== "0";
 const showHud = params.get("hud") !== "0";
+const gravityOverride = parseGravityOverride(params.get("gravity"));
+const gravityProvider = new GravityProvider();
 
 const app = document.getElementById("app") as HTMLElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -33,10 +37,15 @@ const session = new ARSession({
     debug: { log: debugLog, overlay: true },
     useWorker,
   },
+  gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
 });
 
 session.on("trackingStateChanged", (state) => {
   messageEl.textContent = userMessageFor(state, session.getStats().quality.lowFeature);
+});
+
+session.on("planeFound", () => {
+  messageEl.textContent = userMessageFor(session.state, false);
 });
 
 session.on("frame", (r) => {
@@ -53,6 +62,8 @@ startButton.addEventListener("click", async () => {
   startButton.disabled = true;
   startButton.textContent = "Starting…";
   try {
+    // Gravity needs a user gesture on iOS; start it from the click handler.
+    if (!gravityOverride) await gravityProvider.start();
     await session.start();
     startButton.style.display = "none";
   } catch (e) {
@@ -77,7 +88,11 @@ function userMessageFor(state: TrackingState, lowFeature: boolean): string {
         ? "周囲をゆっくり動かしてください（特徴点が足りません）"
         : "Searching features…";
     case TrackingState.TRACKING:
-      return "";
+      return "ゆっくり横に動かして平面を探しています…";
+    case TrackingState.PLANE_DETECTING:
+      return "平面を検出中…（床・机をゆっくり見回してください）";
+    case TrackingState.PLANE_FOUND:
+      return "平面を検出しました";
     case TrackingState.TRACKING_LOST:
       return "Tracking lost — ゆっくり元の位置に戻してください";
     default:
@@ -111,6 +126,28 @@ function refreshHud(): void {
           correspondences: s.pose.correspondences,
         }
       : null,
+    map: s.mapPose
+      ? {
+          landmarks: s.mapPose.landmarkCount,
+          pnpInliers: s.mapPose.inlierCount,
+          reprojPx: s.mapPose.meanReprojectionErrorPx,
+          translation: s.mapPose.translation,
+          framesSinceTracked: s.mapPose.framesSinceTracked,
+        }
+      : null,
+    plane: s.plane
+      ? {
+          normal: s.plane.normal,
+          inliers: s.plane.inlierCount,
+          horizontalness: s.plane.horizontalness,
+          horizontal: s.plane.horizontal,
+          stableFrames: s.plane.stableFrames,
+          confidence: s.plane.confidence,
+          found: s.plane.found,
+          usedGravity: s.plane.usedGravity,
+        }
+      : null,
+    gravityAvailable: s.gravityAvailable,
   });
   requestAnimationFrame(refreshHud);
 }

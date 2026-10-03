@@ -22,7 +22,9 @@ import { writeGrayY4M } from "../helpers/y4m";
 const ROOT = path.resolve(__dirname, "../..");
 const OUT_DIR = path.join(ROOT, "test-results");
 const PORT = 4173;
-const URL = `https://localhost:${PORT}/?debug=1`;
+// The synthetic camera looks straight at a fronto-parallel plane; pretend the
+// phone looks straight down at a floor by injecting gravity along +Z.
+const URL = `https://localhost:${PORT}/?debug=1&gravity=0,0,1`;
 const W = 640;
 const H = 480;
 
@@ -48,6 +50,25 @@ interface Stats {
     translationConfidence: number;
     correspondences: number;
   } | null;
+  mapPose: {
+    rotation: number[];
+    translation: number[];
+    inlierCount: number;
+    meanReprojectionErrorPx: number;
+    landmarkCount: number;
+    framesSinceTracked: number;
+  } | null;
+  plane: {
+    normal: number[];
+    inlierCount: number;
+    horizontalness: number;
+    horizontal: boolean;
+    confidence: number;
+    stableFrames: number;
+    found: boolean;
+    usedGravity: boolean;
+  } | null;
+  landmarkCount: number;
   state: string;
   framesProcessed: number;
   framesDropped: number;
@@ -179,7 +200,18 @@ describe("Phase 1 browser smoke test", () => {
           rotDeg: ((Math.acos(Math.max(-1, Math.min(1, (s.pose!.rotation[0] + s.pose!.rotation[4] + s.pose!.rotation[8] - 1) / 2))) * 180) / Math.PI).toFixed(2),
         })),
     };
+    const phase3 = samples.map((s) => ({
+      state: s.state,
+      landmarks: s.landmarkCount,
+      pnp: s.mapPose?.inlierCount ?? null,
+      reproj: s.mapPose ? s.mapPose.meanReprojectionErrorPx.toFixed(2) : null,
+      mapT: s.mapPose ? s.mapPose.translation.map((v) => v.toFixed(2)).join(",") : null,
+      plane: s.plane
+        ? `n=(${s.plane.normal.map((v) => v.toFixed(2)).join(",")}) in=${s.plane.inlierCount} hz=${s.plane.horizontalness.toFixed(2)} conf=${s.plane.confidence.toFixed(2)} found=${s.plane.found}`
+        : null,
+    }));
     console.log("[browser-smoke] " + JSON.stringify(report, null, 2));
+    console.log("[browser-smoke] phase3 " + JSON.stringify(phase3, null, 2));
 
     // Phase 2: the synthetic camera translates over a fronto-parallel plane.
     // The crop offset grows by (3, 2) px/frame, so image content moves by
@@ -209,6 +241,21 @@ describe("Phase 1 browser smoke test", () => {
     expect(avg((s) => s.visionFps)).toBeGreaterThan(8);
     expect(max((s) => s.quality.featureCount)).toBeGreaterThanOrEqual(200);
     expect(max((s) => s.quality.trackedCount)).toBeGreaterThanOrEqual(100);
-    expect(states["TRACKING"] ?? 0).toBeGreaterThanOrEqual(samples.length / 2);
+    const trackingLike = (states["TRACKING"] ?? 0) + (states["PLANE_DETECTING"] ?? 0) + (states["PLANE_FOUND"] ?? 0);
+    expect(trackingLike).toBeGreaterThanOrEqual(samples.length / 2);
+
+    // Phase 3: the map initializes, landmarks accumulate, and the (gravity-
+    // injected) floor plane is found with a normal along −Z (toward the camera).
+    const withMap = samples.filter((s) => s.mapPose);
+    expect(withMap.length).toBeGreaterThanOrEqual(samples.length / 2);
+    expect(max((s) => s.landmarkCount)).toBeGreaterThanOrEqual(50);
+    const found = samples.filter((s) => s.plane?.found);
+    expect(found.length).toBeGreaterThanOrEqual(1);
+    for (const s of found) {
+      expect(s.plane!.usedGravity).toBe(true);
+      expect(s.plane!.horizontal).toBe(true);
+      expect(s.plane!.normal[2]).toBeLessThan(-0.95);
+    }
+    expect(states["PLANE_FOUND"] ?? 0).toBeGreaterThanOrEqual(1);
   });
 });

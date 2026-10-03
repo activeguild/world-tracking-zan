@@ -51,6 +51,10 @@ export interface FrameObservation {
   inlierCount: number;
   /** Features present in the current frame (tracked + newly detected). */
   featureCount: number;
+  /** Landmark map initialized and plane search running (Phase 3). */
+  mapInitialized?: boolean;
+  /** A stable horizontal plane is available (Phase 3). */
+  planeFound?: boolean;
 }
 
 /**
@@ -109,8 +113,18 @@ export class TrackingStateMachine {
             this._state = TrackingState.TRACKING_LOST;
             this.badFrames = 0;
           }
+          return this._state;
+        }
+        this.badFrames = 0;
+        // Phase 3 transitions driven by the landmark map / plane detector.
+        if (this._state === TrackingState.AR_ACTIVE) {
+          if (!obs.mapInitialized) this._state = TrackingState.TRACKING;
+        } else if (obs.planeFound) {
+          this._state = TrackingState.PLANE_FOUND;
+        } else if (obs.mapInitialized) {
+          if (this._state !== TrackingState.PLANE_FOUND) this._state = TrackingState.PLANE_DETECTING;
         } else {
-          this.badFrames = 0;
+          this._state = TrackingState.TRACKING;
         }
         return this._state;
     }
