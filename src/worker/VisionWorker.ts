@@ -56,6 +56,7 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           timestamp: out.timestamp,
           state: out.state,
           quality: out.quality,
+          pose: out.pose,
           tracks: tracksBuf,
           trackCount: out.trackCount,
           processingMs: out.processingMs,

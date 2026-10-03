@@ -2,6 +2,7 @@ import type { ARConfig } from "../ar/ARConfig";
 import type { TrackingState } from "../ar/ARState";
 import type { GrayFrame } from "../camera/CameraFrame";
 import type { TrackingQuality } from "../vision/TrackingQuality";
+import type { PoseOutput } from "../vision/types";
 import { VisionEngine } from "../vision/VisionEngine";
 import type { EngineTiming, WorkerRequest, WorkerResponse } from "./protocol";
 
@@ -11,6 +12,7 @@ export interface VisionResult {
   timestamp: number;
   state: TrackingState;
   quality: TrackingQuality;
+  pose: PoseOutput | null;
   tracks: Float32Array;
   trackCount: number;
   processingMs: number;
@@ -75,6 +77,7 @@ export class VisionWorkerClient implements VisionBackend {
               timestamp: msg.timestamp,
               state: msg.state,
               quality: msg.quality,
+              pose: msg.pose,
               tracks: new Float32Array(msg.tracks),
               trackCount: msg.trackCount,
               processingMs: msg.processingMs,
@@ -156,6 +159,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         timestamp: out.timestamp,
         state: out.state,
         quality: out.quality,
+        pose: out.pose,
         tracks: out.tracks,
         trackCount: out.trackCount,
         processingMs: out.processingMs,

@@ -80,6 +80,41 @@ export interface RansacConfig {
   minCorrespondences: number;
 }
 
+/** Two-view relative pose estimation (spec §15–§18, Phase 2). */
+export interface PoseConfig {
+  /** Minimum reference↔current correspondences to attempt a pose. */
+  minCorrespondences: number;
+  /** RANSAC inlier threshold in pixels (Sampson for E, transfer error for H). */
+  ransacThresholdPx: number;
+  /** Hard cap on RANSAC iterations for E. */
+  maxIterations: number;
+  /**
+   * Choose the homography model when H_inliers / (H_inliers + E_inliers)
+   * exceeds this (planar scene or pure rotation; ORB-SLAM uses 0.45).
+   */
+  homographyRatioThreshold: number;
+  /** Below this median parallax (px) only the rotation is estimated. */
+  minParallaxPx: number;
+  /** Parallax (px) at which the translation direction gets full confidence. */
+  fullConfidenceParallaxPx: number;
+  /** Triangulation reprojection tolerance (px) for the cheirality test. */
+  maxTriangulationErrorPx: number;
+  /** Minimum fraction of inliers that must pass the positive-depth test. */
+  minCheiralityRatio: number;
+  /** Inlier count that saturates the confidence score. */
+  goodInlierCount: number;
+  /**
+   * Renew the reference frame when fewer than this many tracks still link
+   * to it. The accumulated rotation is composed across renewals.
+   */
+  minReferenceTracks: number;
+  /**
+   * Renew the reference frame when the median parallax exceeds this (px),
+   * keeping the two-view problem well conditioned and bounded in time.
+   */
+  maxReferenceParallaxPx: number;
+}
+
 /** Tracking state transition thresholds (spec §31, §33). */
 export interface StateConfig {
   /** Tracked inliers needed to enter / remain in TRACKING. */
@@ -104,6 +139,7 @@ export interface ARConfig {
   features: FeatureConfig;
   tracker: TrackerConfig;
   ransac: RansacConfig;
+  pose: PoseConfig;
   state: StateConfig;
   debug: DebugConfig;
   /** Run the vision engine in a Web Worker (false → main thread fallback). */
@@ -145,6 +181,19 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxIterations: 200,
     minCorrespondences: 12,
   },
+  pose: {
+    minCorrespondences: 20,
+    ransacThresholdPx: 1.5,
+    maxIterations: 300,
+    homographyRatioThreshold: 0.45,
+    minParallaxPx: 2.0,
+    fullConfidenceParallaxPx: 25,
+    maxTriangulationErrorPx: 4.0,
+    minCheiralityRatio: 0.7,
+    goodInlierCount: 60,
+    minReferenceTracks: 40,
+    maxReferenceParallaxPx: 120,
+  },
   state: {
     minTrackedForTracking: 40,
     lostBelow: 20,
@@ -171,6 +220,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     features: { ...base.features, ...overrides.features },
     tracker: { ...base.tracker, ...overrides.tracker },
     ransac: { ...base.ransac, ...overrides.ransac },
+    pose: { ...base.pose, ...overrides.pose },
     state: { ...base.state, ...overrides.state },
     debug: { ...base.debug, ...overrides.debug },
     useWorker: overrides.useWorker ?? base.useWorker,
@@ -183,6 +233,7 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     features: { ...c.features },
     tracker: { ...c.tracker },
     ransac: { ...c.ransac },
+    pose: { ...c.pose },
     state: { ...c.state },
     debug: { ...c.debug },
     useWorker: c.useWorker,

@@ -28,6 +28,54 @@ export interface Track {
   score: number;
   /** Survived RANSAC in the current frame. New tracks start as inliers. */
   inlier: boolean;
+  /**
+   * Position in the current reference frame (Phase 2 two-view geometry).
+   * Only meaningful when `refFrame` equals the engine's reference frame id;
+   * tracks born after the reference was set have refFrame = -1 until the
+   * next renewal.
+   */
+  refX: number;
+  refY: number;
+  refFrame: number;
+}
+
+/**
+ * Camera pose output (Phase 2, spec §17–§18). Scale-free: the translation is
+ * a unit direction. All quantities are in the CV camera frame
+ * (X right, Y down, Z forward); conversion to Three.js happens in Phase 4.
+ */
+export interface PoseOutput {
+  /**
+   * Accumulated rotation R_cur←origin (row-major 3×3): maps directions in
+   * the first reference frame of the session into the current camera frame.
+   */
+  rotation: number[];
+  /** Same rotation as a quaternion [x, y, z, w]. */
+  quaternion: number[];
+  /**
+   * Unit translation direction of the current camera relative to the
+   * current reference frame, expressed in the current camera frame
+   * (X_cur = R·X_ref + t). Zero when not observable.
+   */
+  translationDirection: number[];
+  /** Rotation relative to the current reference frame only (row-major). */
+  relativeRotation: number[];
+  /** Median parallax (px) between reference and current frame. */
+  parallaxPx: number;
+  /** Geometric model that produced the estimate. */
+  model: "essential" | "homography" | "rotation" | "none";
+  /** 0–1 confidence of the estimate. */
+  confidence: number;
+  /** 0–1 confidence of the translation direction. */
+  translationConfidence: number;
+  /** Correspondences used (reference ↔ current). */
+  correspondences: number;
+  /** Inliers of the chosen model. */
+  inlierCount: number;
+  /** Frame id of the current reference frame. */
+  referenceFrameId: number;
+  /** Plane normal in the current reference camera frame when known. */
+  planeNormal: number[] | null;
 }
 
 /** Input to the vision engine for one frame (spec §40). */
@@ -52,6 +100,8 @@ export interface VisionOutput {
   timestamp: number;
   state: TrackingState;
   quality: TrackingQuality;
+  /** Relative camera pose (Phase 2). Null until enough parallax / tracks exist. */
+  pose: PoseOutput | null;
   /** Packed track data for cheap transfer: see `TRACK_STRIDE`. */
   tracks: Float32Array;
   trackCount: number;

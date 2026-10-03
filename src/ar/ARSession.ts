@@ -5,6 +5,7 @@ import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
+import type { PoseOutput } from "../vision/types";
 import {
   MainThreadVisionBackend,
   VisionWorkerClient,
@@ -46,6 +47,7 @@ export interface ARStats {
   visionFps: number;
   visionMs: number;
   quality: TrackingQuality;
+  pose: PoseOutput | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -85,6 +87,7 @@ export class ARSession {
 
   // Stats
   private quality: TrackingQuality = emptyQuality();
+  private pose: PoseOutput | null = null;
   private visionMs = 0;
   private fastThreshold = 0;
   private framesProcessed = 0;
@@ -189,6 +192,7 @@ export class ARSession {
       visionFps: this.visionFpsCounter.fps,
       visionMs: this.visionMs,
       quality: this.quality,
+      pose: this.pose,
       state: this._state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -261,6 +265,7 @@ export class ARSession {
     this.visionFpsCounter.tick(performance.now());
     this.visionMs = r.processingMs;
     this.quality = r.quality;
+    this.pose = r.pose;
     this.fastThreshold = r.fastThreshold;
     this.setState(r.state);
 

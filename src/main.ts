@@ -1,6 +1,7 @@
 import { ARSession } from "./ar/ARSession";
 import { ARError, TrackingState } from "./ar/ARState";
 import { DebugOverlay } from "./debug/DebugOverlay";
+import { rotationToEulerDeg } from "./math/Pose";
 import "./style.css";
 
 /**
@@ -99,6 +100,17 @@ function refreshHud(): void {
     fastThreshold: s.fastThreshold,
     processingSize: `${s.processingWidth}x${s.processingHeight}`,
     backend: s.backend,
+    pose: s.pose
+      ? {
+          ...rotationToEulerDeg(Float64Array.from(s.pose.rotation)),
+          translationDirection: s.pose.translationDirection,
+          model: s.pose.model,
+          parallaxPx: s.pose.parallaxPx,
+          confidence: s.pose.confidence,
+          translationConfidence: s.pose.translationConfidence,
+          correspondences: s.pose.correspondences,
+        }
+      : null,
   });
   requestAnimationFrame(refreshHud);
 }

@@ -207,7 +207,20 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
-### Phase 1 — 実装済み（承認待ち）
+### Phase 2 — 実装済み（承認待ち）
+
+- `src/math/Decomposition.ts`: 対称 Jacobi 固有値分解、3×3 SVD、小行列ユーティリティ
+- `src/math/Pose.ts`: 回転・四元数・オイラー角、SO(3) 射影、剛体変換の合成（CV カメラ座標系）
+- `src/math/EssentialMatrix.ts`: 正規化 8 点法、Sampson 距離、RANSAC、E 分解、recoverPose（cheirality）
+- `src/math/HomographyDecomposition.ts`: Faugeras 法による H → (R, t/d, n) 分解、純回転判定、正深度サポート
+- `src/math/Triangulation.ts`: 線形三角測量（cheirality 判定用。Landmark 化は Phase 3）
+- `src/vision/PoseEstimator.ts`: H と E を両方 RANSAC で当てはめ、inlier 比でモデル選択（ORB-SLAM 流 0.45）。視差不足時は回転のみ。前フレームの法線で H の双対解を解消
+- `VisionEngine`: 参照フレーム管理（追跡が参照フレームに結びつく点で ref→cur の二視点幾何を解き、点数不足または視差過大で参照を更新・回転を合成）。`VisionOutput.pose`（累積回転 / 四元数 / 単位並進方向 / モデル / 信頼度）
+- HUD に Pose（yaw/pitch/roll、t 方向、モデル、視差、信頼度）を表示。`quality.poseDelta` を計算
+- Pose smoothing（§34）は Three.js カメラへ反映する Phase 4 で導入する
+- テスト: 単体 73 件（純回転 / 平面上の並進 / 参照更新 / 静止 / 非平面 E 経路 / 前進）、ブラウザテストで t 方向と回転を検証
+
+### Phase 1 — 実装済み
 
 - 純 TypeScript 実装（OpenCV.js 不使用、TypedArray ベース。後で WASM に置換可能な粒度でモジュール化）
 - `src/camera/`: getUserMedia ラッパ（エラーコード対応）、処理解像度への縮小 + グレースケール、バッファプール

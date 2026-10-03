@@ -17,6 +17,22 @@ export interface HudStats {
   processingSize: string;
   backend: string;
   message?: string;
+  /** Phase 2 pose (null until available). */
+  pose?: {
+    yaw: number;
+    pitch: number;
+    roll: number;
+    translationDirection: number[];
+    model: string;
+    parallaxPx: number;
+    confidence: number;
+    translationConfidence: number;
+    correspondences: number;
+  } | null;
+}
+
+function fmt(deg: number): string {
+  return (deg >= 0 ? "+" : "") + deg.toFixed(1);
 }
 
 export class DebugOverlay {
@@ -43,7 +59,14 @@ export class DebugOverlay {
       `Inliers     ${s.inlierCount}`,
       `Plane conf  ${s.planeConfidence.toFixed(2)}`,
       `State       ${s.state}`,
-      `Pose        (phase 2)`,
+      ...(s.pose
+        ? [
+            `Pose R      yaw ${fmt(s.pose.yaw)}°  pitch ${fmt(s.pose.pitch)}°  roll ${fmt(s.pose.roll)}°`,
+            `Pose t      (${s.pose.translationDirection.map((v) => v.toFixed(2)).join(", ")})`,
+            `Pose model  ${s.pose.model}  parallax ${s.pose.parallaxPx.toFixed(1)}px  n=${s.pose.correspondences}`,
+            `Pose conf   ${s.pose.confidence.toFixed(2)}  t-conf ${s.pose.translationConfidence.toFixed(2)}`,
+          ]
+        : [`Pose        —`]),
       `FAST thr    ${s.fastThreshold}`,
       `Proc size   ${s.processingSize}  [${s.backend}]`,
     ];

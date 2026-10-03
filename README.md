@@ -6,10 +6,30 @@ single rear camera, `getUserMedia()`, and our own vision pipeline running in a
 Web Worker.
 
 The full specification lives in [CLAUDE.md](./CLAUDE.md). Development is
-strictly phased; **Phase 1 (feature tracking) is implemented**, later phases
-are not started.
+strictly phased; **Phase 1 (feature tracking) and Phase 2 (relative camera
+pose) are implemented**, later phases are not started.
 
-## Phase 1 — what works today
+## Phase 2 — relative camera pose
+
+On top of the tracked features the engine solves two-view geometry between a
+*reference frame* and the current frame:
+
+```
+reference ↔ current correspondences (tracks that survived since the reference)
+  → Homography RANSAC (pixels)      → H
+  → Essential RANSAC (normalized)   → E   (normalized 8-point, Sampson gate)
+  → model selection: H_inliers / (H_inliers + E_inliers) > 0.45 → planar / pure rotation
+      homography → Faugeras decomposition (R, t/d, n), positive-depth test, twin disambiguation
+      essential  → recoverPose (4 candidates, cheirality by triangulation)
+      parallax < 2 px → rotation only (translation unobservable)
+  → VisionOutput.pose: accumulated R (origin → current), unit t direction, model, confidences
+```
+
+The reference frame is renewed when too few tracks still link to it or when
+the parallax grows large; rotations are composed across renewals. Translation
+is scale-free (unit direction); scale is fixed by the plane in Phase 3/4.
+
+## Phase 1 — feature tracking
 
 ```
 Camera (getUserMedia, 1280×720 ideal)
@@ -82,8 +102,11 @@ src/
   ar/        ARSession (public API), ARState (state machine, error codes), ARConfig
   camera/    CameraManager (getUserMedia), CameraFrame (resize + grayscale), CameraIntrinsics
   vision/    ImagePyramid, FeatureDetector (FAST-9), FeatureTracker (LK + FB),
-             OutlierRejection (Homography RANSAC), VisionEngine, TrackingQuality, types
-  math/      Matrix (3×3, linear solve), Homography (normalized DLT)
+             OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
+             VisionEngine, TrackingQuality, types
+  math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
+             Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
+             HomographyDecomposition (Faugeras), Triangulation
   worker/    protocol, VisionWorker (worker entry), VisionWorkerClient (+ main-thread fallback)
   debug/     DebugOverlay (HUD), FeatureRenderer, Logger
 tests/

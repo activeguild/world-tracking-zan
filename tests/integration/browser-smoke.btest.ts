@@ -39,6 +39,15 @@ interface Stats {
   visionFps: number;
   visionMs: number;
   quality: { featureCount: number; trackedCount: number; inlierCount: number; lowFeature: boolean };
+  pose: {
+    rotation: number[];
+    translationDirection: number[];
+    model: string;
+    parallaxPx: number;
+    confidence: number;
+    translationConfidence: number;
+    correspondences: number;
+  } | null;
   state: string;
   framesProcessed: number;
   framesDropped: number;
@@ -160,8 +169,36 @@ describe("Phase 1 browser smoke test", () => {
       trackedCount: `${avg((s) => s.quality.trackedCount).toFixed(0)} avg / ${max((s) => s.quality.trackedCount)} max`,
       inlierCount: `${avg((s) => s.quality.inlierCount).toFixed(0)} avg / ${max((s) => s.quality.inlierCount)} max`,
       states,
+      pose: samples
+        .filter((s) => s.pose)
+        .map((s) => ({
+          model: s.pose!.model,
+          t: s.pose!.translationDirection.map((v) => v.toFixed(2)).join(","),
+          parallax: s.pose!.parallaxPx.toFixed(1),
+          tConf: s.pose!.translationConfidence.toFixed(2),
+          rotDeg: ((Math.acos(Math.max(-1, Math.min(1, (s.pose!.rotation[0] + s.pose!.rotation[4] + s.pose!.rotation[8] - 1) / 2))) * 180) / Math.PI).toFixed(2),
+        })),
     };
     console.log("[browser-smoke] " + JSON.stringify(report, null, 2));
+
+    // Phase 2: the synthetic camera translates over a fronto-parallel plane.
+    // The crop offset grows by (3, 2) px/frame, so image content moves by
+    // (−3, −2) px/frame: the camera moved toward (+X, +Y) in the CV frame,
+    // C = (+, +, 0) and t = −R·C ∝ (−3, −2, 0).
+    const poses = samples.map((s) => s.pose).filter((p): p is NonNullable<Stats["pose"]> => !!p);
+    expect(poses.length).toBeGreaterThanOrEqual(samples.length / 2);
+    for (const p of poses) {
+      const rotDeg = (Math.acos(Math.max(-1, Math.min(1, (p.rotation[0] + p.rotation[4] + p.rotation[8] - 1) / 2))) * 180) / Math.PI;
+      expect(rotDeg, "rotation should stay near identity for a pure translation").toBeLessThan(3);
+    }
+    const confident = poses.filter((p) => p.translationConfidence > 0.3);
+    expect(confident.length).toBeGreaterThanOrEqual(1);
+    for (const p of confident) {
+      const [tx, ty] = p.translationDirection;
+      const len = Math.hypot(tx, ty);
+      const cos = (tx * -3 + ty * -2) / (len * Math.hypot(3, 2));
+      expect(cos, `t direction ${p.translationDirection}`).toBeGreaterThan(Math.cos((20 * Math.PI) / 180));
+    }
     console.log("[browser-smoke] console:\n" + logs.slice(0, 12).join("\n"));
 
     const errors = logs.filter((l) => l.startsWith("pageerror") || /error/i.test(l) && !l.startsWith("[AR]"));

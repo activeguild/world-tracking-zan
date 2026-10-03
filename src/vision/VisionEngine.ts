@@ -4,8 +4,11 @@ import { FeatureDetector } from "./FeatureDetector";
 import { FeatureTracker, TrackStatus, allocResult, type TrackResult } from "./FeatureTracker";
 import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
+import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
-import { packTracks, type Track, type VisionInput, type VisionOutput } from "./types";
+import { packTracks, type PoseOutput, type Track, type VisionInput, type VisionOutput } from "./types";
+import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
+import { rotationDistance, rotationToQuaternion } from "../math/Pose";
 
 /**
  * Phase 1 vision pipeline (spec §55):
@@ -45,8 +48,23 @@ export class VisionEngine {
   private lastHomographyInliers = 0;
   private lastRansacError = 0;
 
+  // Phase 2: two-view pose relative to a reference frame.
+  private readonly poseEstimator: PoseEstimator;
+  private referenceFrameId = -1;
+  /** R_ref←origin: rotation accumulated across reference renewals. */
+  private referenceRotation: Mat3 = mat3Identity();
+  /** Last R_cur←ref, used when the reference is renewed. */
+  private lastRelativeRotation: Mat3 = mat3Identity();
+  private lastAccumulatedRotation: Mat3 = mat3Identity();
+  private lastPlaneNormal: Float64Array | null = null;
+  private lastPose: PoseOutput | null = null;
+  private readonly r1x: Float32Array;
+  private readonly r1y: Float32Array;
+  private readonly r2x: Float32Array;
+  private readonly r2y: Float32Array;
+
   /** Timing breakdown of the last frame (ms). */
-  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, total: 0 };
+  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, total: 0 };
 
   constructor(
     width: number,
@@ -69,7 +87,12 @@ export class VisionEngine {
     this.c1y = new Float32Array(cap);
     this.c2x = new Float32Array(cap);
     this.c2y = new Float32Array(cap);
+    this.r1x = new Float32Array(cap);
+    this.r1y = new Float32Array(cap);
+    this.r2x = new Float32Array(cap);
+    this.r2y = new Float32Array(cap);
     this.stateMachine = new TrackingStateMachine(config.state);
+    this.poseEstimator = new PoseEstimator(config.pose, config.ransac, rng);
   }
 
   get state(): TrackingState {
@@ -89,6 +112,17 @@ export class VisionEngine {
     this.hasPrev = false;
     this.stateMachine.reset();
     this.lastQuality = emptyQuality();
+    this.referenceFrameId = -1;
+    this.referenceRotation = mat3Identity();
+    this.lastRelativeRotation = mat3Identity();
+    this.lastAccumulatedRotation = mat3Identity();
+    this.lastPlaneNormal = null;
+    this.lastPose = null;
+  }
+
+  /** Last pose output (null until a reference frame and enough tracks exist). */
+  get pose(): PoseOutput | null {
+    return this.lastPose;
   }
 
   process(input: VisionInput): VisionOutput {
@@ -130,14 +164,18 @@ export class VisionEngine {
     }
     const t4 = now();
 
-    // 5. Quality + state
+    // 5. Two-view pose against the reference frame (Phase 2)
+    const pose = this.estimatePose(input);
+    const t4b = now();
+
+    // 6. Quality + state
     const featureCount = this.tracks.length;
     const quality: TrackingQuality = {
       featureCount,
       trackedCount,
       inlierCount,
       reprojectionError: this.lastRansacError,
-      poseDelta: 0,
+      poseDelta: this.lastPoseDelta,
       planeConfidence: 0,
       trackingConfidence: computeTrackingConfidence(
         inlierCount,
@@ -160,6 +198,7 @@ export class VisionEngine {
     this.timing.track = t2 - t1;
     this.timing.ransac = t3 - t2;
     this.timing.detect = t4 - t3;
+    this.timing.pose = t4b - t4;
     this.timing.total = t5 - t0;
 
     return {
@@ -167,6 +206,7 @@ export class VisionEngine {
       timestamp: input.timestamp,
       state,
       quality,
+      pose,
       tracks: packTracks(this.tracks),
       trackCount: this.tracks.length,
       processingMs: t5 - t0,
@@ -250,7 +290,112 @@ export class VisionEngine {
         age: 0,
         score: c.score,
         inlier: true,
+        refX: c.x,
+        refY: c.y,
+        refFrame: -1,
       });
+    }
+  }
+
+  private lastPoseDelta = 0;
+
+  /**
+   * Phase 2: estimate the camera pose relative to the reference frame from
+   * the tracks that still link to it, and renew the reference when needed.
+   */
+  private estimatePose(input: VisionInput): PoseOutput | null {
+    const cfg = this.config.pose;
+    const frameId = input.frameId;
+
+    if (this.referenceFrameId < 0) {
+      // First frame with features becomes the reference.
+      if (this.tracks.length >= cfg.minCorrespondences) this.renewReference(frameId, mat3Identity());
+      this.lastPose = null;
+      return null;
+    }
+
+    // Gather reference ↔ current correspondences.
+    const { r1x, r1y, r2x, r2y } = this;
+    let n = 0;
+    for (const t of this.tracks) {
+      if (t.refFrame !== this.referenceFrameId) continue;
+      if (n >= r1x.length) break;
+      r1x[n] = t.refX;
+      r1y[n] = t.refY;
+      r2x[n] = t.x;
+      r2y[n] = t.y;
+      n++;
+    }
+
+    if (n < cfg.minReferenceTracks || n < cfg.minCorrespondences) {
+      // Lost the link to the reference: start a new reference, carrying the
+      // last relative rotation into the accumulated rotation.
+      if (this.tracks.length >= cfg.minCorrespondences) {
+        this.renewReference(frameId, this.lastRelativeRotation);
+      } else {
+        this.lastPose = null;
+      }
+      return this.lastPose;
+    }
+
+    const rel: RelativePose = this.poseEstimator.estimate(
+      r1x, r1y, r2x, r2y, n, input.intrinsics, this.lastPlaneNormal,
+    );
+
+    if (rel.model === "none") {
+      // Keep the previous pose (if any) rather than flickering to identity.
+      return this.lastPose;
+    }
+
+    const accumulated = mat3Multiply(rel.rotation, this.referenceRotation);
+    this.lastPoseDelta = (rotationDistance(this.lastAccumulatedRotation, accumulated) * 180) / Math.PI;
+    this.lastAccumulatedRotation = accumulated;
+    this.lastRelativeRotation = rel.rotation;
+    if (rel.planeNormal) this.lastPlaneNormal = rel.planeNormal;
+
+    const q = rotationToQuaternion(accumulated);
+    this.lastPose = {
+      rotation: Array.from(accumulated),
+      quaternion: Array.from(q),
+      translationDirection: Array.from(rel.translationDirection),
+      relativeRotation: Array.from(rel.rotation),
+      parallaxPx: rel.parallaxPx,
+      model: rel.model,
+      confidence: rel.confidence,
+      translationConfidence: rel.translationConfidence,
+      correspondences: n,
+      inlierCount: rel.inlierCount,
+      referenceFrameId: this.referenceFrameId,
+      planeNormal: rel.planeNormal ? Array.from(rel.planeNormal) : null,
+    };
+
+    // Renew the reference once the baseline is large (keeps the two-view
+    // problem bounded; Phase 3 will turn these into keyframes).
+    if (rel.parallaxPx > cfg.maxReferenceParallaxPx && rel.confidence > 0.5) {
+      this.renewReference(frameId, rel.rotation);
+    }
+    return this.lastPose;
+  }
+
+  /** Make the current frame the reference for all live tracks. */
+  private renewReference(frameId: number, relativeRotation: Mat3): void {
+    this.referenceRotation = mat3Multiply(relativeRotation, this.referenceRotation);
+    this.lastRelativeRotation = mat3Identity();
+    this.referenceFrameId = frameId;
+    for (const t of this.tracks) {
+      t.refX = t.x;
+      t.refY = t.y;
+      t.refFrame = frameId;
+    }
+    // The plane normal is expressed in the reference frame: rotate it.
+    if (this.lastPlaneNormal) {
+      const r = relativeRotation;
+      const nrm = this.lastPlaneNormal;
+      this.lastPlaneNormal = new Float64Array([
+        r[0] * nrm[0] + r[1] * nrm[1] + r[2] * nrm[2],
+        r[3] * nrm[0] + r[4] * nrm[1] + r[5] * nrm[2],
+        r[6] * nrm[0] + r[7] * nrm[1] + r[8] * nrm[2],
+      ]);
     }
   }
 

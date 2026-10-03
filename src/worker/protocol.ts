@@ -2,6 +2,7 @@ import type { ARConfig } from "../ar/ARConfig";
 import type { TrackingState } from "../ar/ARState";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import type { TrackingQuality } from "../vision/TrackingQuality";
+import type { PoseOutput } from "../vision/types";
 
 /**
  * Main thread ⇄ Vision Worker message protocol (spec §40, §41).
@@ -53,6 +54,7 @@ export interface ResultResponse {
   timestamp: number;
   state: TrackingState;
   quality: TrackingQuality;
+  pose: PoseOutput | null;
   /** Float32 packed tracks (see TRACK_STRIDE). Transferred. */
   tracks: ArrayBuffer;
   trackCount: number;
