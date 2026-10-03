@@ -18,6 +18,7 @@ body {
 }
 
 #video,
+#three,
 #overlay {
   position: absolute;
   inset: 0;
@@ -30,6 +31,7 @@ body {
   background: #111;
 }
 
+#three,
 #overlay {
   pointer-events: none;
 }

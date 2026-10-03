@@ -2,6 +2,7 @@ import { ARSession } from "./ar/ARSession";
 import { ARError, TrackingState } from "./ar/ARState";
 import { DebugOverlay } from "./debug/DebugOverlay";
 import { rotationToEulerDeg } from "./math/Pose";
+import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
 import "./style.css";
 
@@ -23,6 +24,7 @@ const gravityProvider = new GravityProvider();
 
 const app = document.getElementById("app") as HTMLElement;
 const video = document.getElementById("video") as HTMLVideoElement;
+const threeCanvas = document.getElementById("three") as HTMLCanvasElement;
 const overlay = document.getElementById("overlay") as HTMLCanvasElement;
 const startButton = document.getElementById("start") as HTMLButtonElement;
 const messageEl = document.getElementById("message") as HTMLElement;
@@ -33,6 +35,7 @@ hud.visible = showHud;
 const session = new ARSession({
   video,
   overlayCanvas: overlay,
+  threeCanvas,
   config: {
     debug: { log: debugLog, overlay: true },
     useWorker,
@@ -46,6 +49,25 @@ session.on("trackingStateChanged", (state) => {
 
 session.on("planeFound", () => {
   messageEl.textContent = userMessageFor(session.state, false);
+});
+
+// Phase 4: tap → hit test → place / move the cube (spec §27, §68).
+let cube: ARObject | undefined;
+session.on("worldReady", () => {
+  messageEl.textContent = "平面をタップして Cube を置いてください";
+});
+session.on("worldLost", () => {
+  cube = undefined;
+  messageEl.textContent = "トラッキングを失いました。平面を探し直しています…";
+});
+app.addEventListener("pointerup", (ev) => {
+  if ((ev.target as HTMLElement).tagName === "BUTTON") return;
+  if (!session.isRunning) return;
+  const rect = video.getBoundingClientRect();
+  const hit = session.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
+  if (!hit) return;
+  cube = session.placeCube(hit, cube);
+  messageEl.textContent = "";
 });
 
 session.on("frame", (r) => {
@@ -92,7 +114,9 @@ function userMessageFor(state: TrackingState, lowFeature: boolean): string {
     case TrackingState.PLANE_DETECTING:
       return "平面を検出中…（床・机をゆっくり見回してください）";
     case TrackingState.PLANE_FOUND:
-      return "平面を検出しました";
+      return "平面をタップして Cube を置いてください";
+    case TrackingState.AR_ACTIVE:
+      return "";
     case TrackingState.TRACKING_LOST:
       return "Tracking lost — ゆっくり元の位置に戻してください";
     default:
@@ -148,6 +172,7 @@ function refreshHud(): void {
         }
       : null,
     gravityAvailable: s.gravityAvailable,
+    world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
   });
   requestAnimationFrame(refreshHud);
 }

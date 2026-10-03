@@ -6,9 +6,36 @@ single rear camera, `getUserMedia()`, and our own vision pipeline running in a
 Web Worker.
 
 The full specification lives in [CLAUDE.md](./CLAUDE.md). Development is
-strictly phased; **Phases 1–3 (feature tracking, relative camera pose,
-landmark map + plane detection) are implemented**, later phases are not
-started.
+strictly phased; **Phases 1–4 (feature tracking, relative camera pose,
+landmark map + plane detection, world coordinate + Three.js placement) are
+implemented**, later phases are not started.
+
+## Phase 4 — world coordinate, hit test, Three.js placement
+
+```
+first PLANE_FOUND
+  → world frame fixed once: origin = plane center, +Y = plane normal,
+    −Z ≈ camera view projected onto the plane, scale from an assumed
+    camera→plane distance (0.5 m, `world.assumedPlaneDistanceMeters`)
+  → every frame: map-frame camera pose → Three.js camera (CoordinateSystem.ts),
+    One Euro smoothing on position / rotation, projection from intrinsics
+  → tap: CSS px → processing px → camera ray → map ray → ∩ plane Y = 0 → world point
+  → cube placed at the hit stays fixed in world space; only the camera moves
+  → tracking lost: objects hold their pose for 1.5 s, then hide until tracking returns
+  → map reset: world dropped (`worldLost`), objects removed
+```
+
+```ts
+const ar = new ARSession({ video, overlayCanvas, threeCanvas });
+await ar.start();
+ar.on("worldReady", () => {});
+const hit = ar.hitTest(x, y);          // CSS px on the video element
+if (hit) ar.placeCube(hit);            // or ar.placeObject(gltf.scene, hit)
+```
+
+`threeScene` / `threeCamera` can be passed instead of `threeCanvas` to drive
+an application-owned scene. All frame conversions live in
+`src/math/CoordinateSystem.ts`.
 
 ## Phase 3 — landmark map and plane detection
 
@@ -131,6 +158,9 @@ src/
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
              HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)
+             CoordinateSystem (map ↔ world ↔ Three.js, projection), Ray, OneEuroFilter
+  ar/        WorldAnchor (world frame from the first plane, hit test)
+  rendering/ ARCamera, ARWorld, ARObject, ARRenderer (Three.js)
   sensors/   GravityProvider (DeviceMotion → camera frame)
   worker/    protocol, VisionWorker (worker entry), VisionWorkerClient (+ main-thread fallback)
   debug/     DebugOverlay (HUD), FeatureRenderer, PlaneRenderer, Logger

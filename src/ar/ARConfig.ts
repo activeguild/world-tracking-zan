@@ -175,6 +175,25 @@ export interface PlaneConfig {
   minLandmarkObservations: number;
 }
 
+/** World anchoring, hit test and rendering (spec §25–§30, §33–§34, Phase 4). */
+export interface WorldConfig {
+  /** Assumed camera→plane distance (m) when the world is created; fixes the monocular scale. */
+  assumedPlaneDistanceMeters: number;
+  /** Keep rendering objects at the last pose for this long after tracking is lost (ms, spec §33). */
+  holdPoseOnLostMs: number;
+  /** Pose smoothing (One Euro) for the rendered camera position. */
+  positionSmoothing: { minCutoff: number; beta: number; dCutoff: number };
+  /** Pose smoothing for the rendered camera rotation. */
+  rotationSmoothing: { minCutoff: number; beta: number; dCutoff: number };
+  /** Three.js camera near / far planes (m). */
+  near: number;
+  far: number;
+  /** Edge length of the demo cube (m). */
+  cubeSize: number;
+  /** Show the plane grid in the Three.js scene. */
+  showPlaneGrid: boolean;
+}
+
 /** Tracking state transition thresholds (spec §31, §33). */
 export interface StateConfig {
   /** Tracked inliers needed to enter / remain in TRACKING. */
@@ -202,6 +221,7 @@ export interface ARConfig {
   pose: PoseConfig;
   landmarks: LandmarkConfig;
   plane: PlaneConfig;
+  world: WorldConfig;
   state: StateConfig;
   debug: DebugConfig;
   /** Run the vision engine in a Web Worker (false → main thread fallback). */
@@ -286,6 +306,16 @@ export const DEFAULT_CONFIG: ARConfig = {
     goodInlierCount: 80,
     minLandmarkObservations: 2,
   },
+  world: {
+    assumedPlaneDistanceMeters: 0.5,
+    holdPoseOnLostMs: 1500,
+    positionSmoothing: { minCutoff: 1.5, beta: 0.3, dCutoff: 1.0 },
+    rotationSmoothing: { minCutoff: 1.5, beta: 0.5, dCutoff: 1.0 },
+    near: 0.01,
+    far: 50,
+    cubeSize: 0.1,
+    showPlaneGrid: true,
+  },
   state: {
     minTrackedForTracking: 40,
     lostBelow: 20,
@@ -315,6 +345,12 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     pose: { ...base.pose, ...overrides.pose },
     landmarks: { ...base.landmarks, ...overrides.landmarks },
     plane: { ...base.plane, ...overrides.plane },
+    world: {
+      ...base.world,
+      ...overrides.world,
+      positionSmoothing: { ...base.world.positionSmoothing, ...overrides.world?.positionSmoothing },
+      rotationSmoothing: { ...base.world.rotationSmoothing, ...overrides.world?.rotationSmoothing },
+    },
     state: { ...base.state, ...overrides.state },
     debug: { ...base.debug, ...overrides.debug },
     useWorker: overrides.useWorker ?? base.useWorker,
@@ -330,6 +366,7 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     pose: { ...c.pose },
     landmarks: { ...c.landmarks },
     plane: { ...c.plane },
+    world: { ...c.world, positionSmoothing: { ...c.world.positionSmoothing }, rotationSmoothing: { ...c.world.rotationSmoothing } },
     state: { ...c.state },
     debug: { ...c.debug },
     useWorker: c.useWorker,

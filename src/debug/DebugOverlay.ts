@@ -48,6 +48,7 @@ export interface HudStats {
     usedGravity: boolean;
   } | null;
   gravityAvailable?: boolean;
+  world?: { ready: boolean; scale: number; placed: number } | null;
 }
 
 function fmt(deg: number): string {
@@ -99,6 +100,7 @@ export class DebugOverlay {
           ]
         : [`Plane       —`]),
       `Gravity     ${s.gravityAvailable ? "yes" : "no (fallback up = −Y)"}`,
+      `World       ${s.world?.ready ? `ready  scale ${s.world.scale.toFixed(3)} m/unit  objects ${s.world.placed}` : "—"}`,
       `FAST thr    ${s.fastThreshold}`,
       `Proc size   ${s.processingSize}  [${s.backend}]`,
     ];

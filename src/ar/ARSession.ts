@@ -1,12 +1,19 @@
+import * as THREE from "three";
 import { CameraManager, type CameraOptions } from "../camera/CameraManager";
 import { FrameGrabber } from "../camera/CameraFrame";
 import { approximateIntrinsics, type CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
 import { PlaneRenderer } from "../debug/PlaneRenderer";
+import { viewportIntrinsics } from "../math/CoordinateSystem";
+import { ARCamera } from "../rendering/ARCamera";
+import type { ARObject } from "../rendering/ARObject";
+import { ARRenderer } from "../rendering/ARRenderer";
+import { ARWorld } from "../rendering/ARWorld";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
 import type { MapPoseOutput, PlaneOutput, PoseOutput } from "../vision/types";
+import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
   VisionWorkerClient,
@@ -38,6 +45,21 @@ export interface ARSessionOptions {
    * frame (any scale) or null. Used for the plane horizontality test.
    */
   gravitySource?: () => ArrayLike<number> | null;
+  /**
+   * Three.js integration (Phase 4). Either give a transparent `canvas`
+   * (the session owns renderer + scene), or an existing `scene` / `camera`
+   * that the session drives while the application renders.
+   */
+  threeCanvas?: HTMLCanvasElement;
+  threeScene?: THREE.Scene;
+  threeCamera?: THREE.PerspectiveCamera;
+}
+
+/** Result of `ARSession.hitTest` (spec §27, §54). World frame, meters. */
+export interface ARHitResult {
+  position: THREE.Vector3;
+  normal: THREE.Vector3;
+  distance: number;
 }
 
 export interface ARSessionEvents {
@@ -46,6 +68,10 @@ export interface ARSessionEvents {
   planeFound: (plane: PlaneOutput) => void;
   /** Fired when the found plane is lost (map reset / plane dropped). */
   planeLost: () => void;
+  /** World frame created on the first found plane; hit tests work from now on. */
+  worldReady: () => void;
+  /** World frame dropped (map reset); placed objects were removed. */
+  worldLost: () => void;
   frame: (result: VisionResult) => void;
   error: (error: ARError) => void;
   started: () => void;
@@ -62,6 +88,10 @@ export interface ARStats {
   plane: PlaneOutput | null;
   landmarkCount: number;
   gravityAvailable: boolean;
+  worldReady: boolean;
+  /** Map units → meters (0 when no world). */
+  worldScale: number;
+  placedObjects: number;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -82,6 +112,15 @@ export class ARSession {
   private readonly planeRenderer: PlaneRenderer | null;
   private readonly gravitySource: (() => ArrayLike<number> | null) | null;
   private readonly logger: ARLogger;
+
+  // Phase 4: world anchor + Three.js
+  private readonly worldAnchor: WorldAnchor;
+  private readonly arCamera: ARCamera;
+  readonly world: ARWorld;
+  private readonly arRenderer: ARRenderer | null;
+  private readonly externalScene: THREE.Scene | null;
+  private lastMapPose: MapPoseOutput | null = null;
+  private viewportSize: { width: number; height: number } | null = null;
   private backend: VisionBackend | null = null;
   private backendKind: "worker" | "main" = "worker";
   private grabber: FrameGrabber | null = null;
@@ -97,6 +136,8 @@ export class ARSession {
     trackingStateChanged: new Set(),
     planeFound: new Set(),
     planeLost: new Set(),
+    worldReady: new Set(),
+    worldLost: new Set(),
     frame: new Set(),
     error: new Set(),
     started: new Set(),
@@ -126,6 +167,25 @@ export class ARSession {
     this.planeRenderer = options.overlayCanvas ? new PlaneRenderer(options.overlayCanvas) : null;
     this.gravitySource = options.gravitySource ?? null;
     this.logger = new ARLogger(this.config.debug.log, this.config.debug.logIntervalMs);
+
+    const w = this.config.world;
+    this.worldAnchor = new WorldAnchor({ assumedPlaneDistanceMeters: w.assumedPlaneDistanceMeters });
+    this.arCamera = new ARCamera(w.near, w.far, w.positionSmoothing, w.rotationSmoothing, options.threeCamera);
+    this.world = new ARWorld(w.holdPoseOnLostMs);
+    this.externalScene = options.threeScene ?? null;
+    this.arRenderer = options.threeCanvas ? new ARRenderer(options.threeCanvas, options.threeScene) : null;
+    const scene = this.arRenderer?.scene ?? this.externalScene;
+    if (scene) this.world.attach(scene);
+  }
+
+  /** The Three.js camera driven by the session. */
+  get threeCamera(): THREE.PerspectiveCamera {
+    return this.arCamera.camera;
+  }
+
+  /** True once the world frame exists (plane found). */
+  get isWorldReady(): boolean {
+    return this.worldAnchor.isReady;
   }
 
   /** Current plane (null when none / not yet found). */
@@ -133,7 +193,9 @@ export class ARSession {
     return this.plane;
   }
 
+  /** Engine state, promoted to AR_ACTIVE once an object is placed on a found plane. */
   get state(): TrackingState {
+    if (this._state === TrackingState.PLANE_FOUND && this.world.placedCount > 0) return TrackingState.AR_ACTIVE;
     return this._state;
   }
 
@@ -207,7 +269,63 @@ export class ARSession {
     this.backend = null;
     this.camera.stop();
     this.renderer?.clear();
+    this.worldAnchor.reset();
+    this.world.setWorldReady(false);
     this.emit("stopped");
+  }
+
+  /**
+   * Hit test (spec §27–§28, §54): `x, y` in CSS pixels relative to the video
+   * element. Returns the point on the detected plane, or null when there is
+   * no world yet / the ray misses the plane.
+   */
+  hitTest(x: number, y: number): ARHitResult | null {
+    if (!this.worldAnchor.isReady || !this.lastMapPose || !this.intrinsics) return null;
+    const rect = this.video.getBoundingClientRect();
+    const vp = viewportIntrinsics(this.intrinsics, rect.width, rect.height);
+    // CSS → processing pixels (inverse of the object-fit: cover mapping).
+    const u = (x - vp.offsetX) / vp.scale;
+    const v = (y - vp.offsetY) / vp.scale;
+    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose);
+    if (!hit) return null;
+    return {
+      position: new THREE.Vector3(hit.position[0], hit.position[1], hit.position[2]),
+      normal: new THREE.Vector3(hit.normal[0], hit.normal[1], hit.normal[2]),
+      distance: hit.distance,
+    };
+  }
+
+  /** Place the demo cube at a hit (creates it on first use, moves it afterwards). */
+  placeCube(hit: ARHitResult, existing?: ARObject): ARObject {
+    const obj = existing ?? this.world.createCube(this.config.world.cubeSize);
+    obj.place([hit.position.x, hit.position.y, hit.position.z]);
+    this.renderNow();
+    return obj;
+  }
+
+  /** Place an arbitrary Three.js object (e.g. a loaded GLB) at a hit. */
+  placeObject(object3d: THREE.Object3D, hit: ARHitResult): ARObject {
+    const obj = this.world.add(object3d);
+    obj.place([hit.position.x, hit.position.y, hit.position.z]);
+    this.renderNow();
+    return obj;
+  }
+
+  private renderNow(): void {
+    if (!this.arRenderer) return;
+    this.arRenderer.render(this.arCamera.camera);
+  }
+
+  /** Keep the Three.js projection in sync with the video viewport. */
+  private updateViewport(): void {
+    if (!this.intrinsics) return;
+    const rect = this.video.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width));
+    const h = Math.max(1, Math.round(rect.height));
+    if (this.viewportSize && this.viewportSize.width === w && this.viewportSize.height === h) return;
+    this.viewportSize = { width: w, height: h };
+    this.arRenderer?.resize();
+    this.arCamera.updateProjection(this.intrinsics, w, h);
   }
 
   /** Forget all tracks and restart from INITIALIZING (keeps the camera running). */
@@ -227,7 +345,10 @@ export class ARSession {
       plane: this.plane,
       landmarkCount: this.landmarkCount,
       gravityAvailable: this.lastGravity !== null,
-      state: this._state,
+      worldReady: this.worldAnchor.isReady,
+      worldScale: this.worldAnchor.frame?.scale ?? 0,
+      placedObjects: this.world.placedCount,
+      state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
       framesDropped: this.framesDropped,
@@ -310,7 +431,9 @@ export class ARSession {
     this.plane = r.plane;
     this.landmarkCount = r.landmarkCount;
     this.fastThreshold = r.fastThreshold;
+    this.lastMapPose = r.mapPose;
     this.setState(r.state);
+    this.updateWorld(r);
 
     const found = !!r.plane?.found;
     if (found && !this.planeWasFound) {
@@ -346,6 +469,43 @@ export class ARSession {
     this._state = next;
     this.logger.info(`state ${prev} → ${next}`);
     this.emit("trackingStateChanged", next, prev);
+  }
+
+  /**
+   * Phase 4: create / drop the world frame, drive the Three.js camera,
+   * apply the lost-tracking hold, render.
+   */
+  private updateWorld(r: VisionResult): void {
+    // World invalid when the landmark map was reset.
+    if (this.worldAnchor.checkMap(r.mapPose)) {
+      this.world.setWorldReady(false);
+      this.arCamera.resetSmoothing();
+      this.logger.info("world lost (map reset)");
+      this.emit("worldLost");
+    }
+    // Create the world on the first found plane.
+    if (!this.worldAnchor.isReady && r.plane?.found && r.mapPose) {
+      if (this.worldAnchor.create(r.plane, r.mapPose)) {
+        const scale = this.worldAnchor.frame!.scale;
+        const extent = Math.max(0.4, Math.min(3, Math.sqrt(Math.max(r.plane.areaEstimate, 1e-6)) * scale * 1.5));
+        this.world.setWorldReady(true);
+        this.world.showPlaneGrid(extent, this.config.debug.overlay && this.config.world.showPlaneGrid);
+        this.arCamera.resetSmoothing();
+        this.logger.info(`world ready scale=${scale.toFixed(3)} m/unit grid=${extent.toFixed(2)} m`);
+        this.emit("worldReady");
+      }
+    }
+    if (!this.worldAnchor.isReady || !r.mapPose) return;
+
+    this.updateViewport();
+    const pose = this.worldAnchor.cameraPose(r.mapPose);
+    const tracking =
+      r.mapPose.framesSinceTracked === 0 &&
+      this._state !== TrackingState.TRACKING_LOST &&
+      this._state !== TrackingState.SEARCHING_FEATURES;
+    if (pose && tracking) this.arCamera.setPose(pose, r.timestamp / 1000);
+    this.world.updateTracking(tracking, performance.now());
+    this.renderNow();
   }
 }
 

@@ -207,7 +207,19 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
-### Phase 3 — 実装済み（承認待ち）
+### Phase 4 — 実装済み（承認待ち）
+
+- `src/math/CoordinateSystem.ts`: 座標変換を集約（マップ座標 = 初期化カメラの CV 座標、World = Three.js Y-up）。平面から World フレーム生成（原点 = 平面中心、+Y = 法線、−Z ≈ カメラ視線の平面射影）、map↔world 変換、CV カメラ姿勢 → Three.js カメラ姿勢（とその逆）、内部パラメータ → OpenGL 射影行列、`object-fit: cover` のビューポート内部パラメータ
+- `src/math/Ray.ts`: ピクセル → カメラ Ray、Ray の剛体変換、Ray ∩ Plane（`t = −(n·o + d)/(n·r)`、平行・後方は null）
+- `src/math/OneEuroFilter.ts`: One Euro フィルタ（スカラー / ベクトル）と速度適応 slerp による四元数平滑化（§34）
+- `src/ar/WorldAnchor.ts`: 最初に `found` になった平面で World を一度だけ確定（以後の平面再推定では動かさない）。スケールは `assumedPlaneDistanceMeters`（既定 0.5 m、机想定）でカメラ–平面距離を固定。`hitTest`（処理画像ピクセル → World 平面上の点）、`cameraPose`、マップ再初期化で World 破棄
+- `src/rendering/`: `ARCamera`（内部パラメータから射影、Pose smoothing）、`ARWorld`（World ルート、平面グリッド、Tracking Lost 時は 1.5 s 保持してから非表示）、`ARObject`（Cube ファクトリ、GLB 用の汎用 Object3D ラッパ）、`ARRenderer`（透過 WebGL、DPR 上限 2）
+- `ARSession`: `threeCanvas`（セッションがレンダラ所有）または `threeScene` / `threeCamera`（既存シーンに接続）、`hitTest(x, y)`（CSS px → `ARHitResult { position: Vector3, normal, distance }`）、`placeCube` / `placeObject`、イベント `worldReady` / `worldLost`、`state` は配置後 `AR_ACTIVE`
+- デモ: タップで Cube（10 cm）を配置・移動。HUD に World 行（scale, objects）
+- GLB は `ARObject` 経由で `placeObject(object3d, hit)` に渡せる構造（ローダ導入は Cube 成立後）
+- テスト: 単体 111 件（World フレームの直交性 / 往復変換 / Three.js カメラ姿勢の往復 / 射影行列とピンホールの一致 / cover マッピング、Ray-Plane、One Euro、WorldAnchor の hitTest 不変性・スケール・マップ破棄、**VisionEngine + WorldAnchor 統合: 合成の机シーケンスで hit test 配置点が 24 フレームのカメラ移動後も同じ机ピクセルへ再投影（中央値 0.01 px、最大 0.02 px）**）、ブラウザテストで hitTest → placeCube → `AR_ACTIVE`、Three.js カメラ高さ ≈ 0.5 m
+
+### Phase 3 — 実装済み
 
 - `src/math/Plane.ts`: 平面モデル、3 点平面、PCA 最小二乗、RANSAC 平面当てはめ（適応反復 + 再フィット）、水平度
 - `src/math/PnP.ts`: 事前姿勢からの motion-only 最適化（LM + Huber、so(3) 更新）。平面上の点群でも安定
@@ -243,6 +255,6 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - `src/debug/`: HUD、特徴点・モーションベクトル描画、`[AR]` ロガー
 - テスト: `npm test`（Vitest 単体 46 件）、`npm run test:browser`（headless Chromium + 合成カメラ映像）
 
-### 未実装（Phase 4 以降）
+### 未実装（Phase 5 以降）
 
-World Coordinate / Ray-Plane hit test / Three.js 配置 / Pose smoothing / Keyframe / Relocalization / IMU 融合 / BA / WASM。
+GLB ローダ（Cube 置換）/ Keyframe / Relocalization / IMU 融合 / BA / WASM。実機（iPhone Safari / Android Chrome）での検証は未実施。

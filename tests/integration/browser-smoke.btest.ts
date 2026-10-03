@@ -69,6 +69,9 @@ interface Stats {
     usedGravity: boolean;
   } | null;
   landmarkCount: number;
+  worldReady: boolean;
+  worldScale: number;
+  placedObjects: number;
   state: string;
   framesProcessed: number;
   framesDropped: number;
@@ -170,6 +173,28 @@ describe("Phase 1 browser smoke test", () => {
       samples.push((await page.evaluate(() => window.__ar.stats())) as Stats);
       await page.waitForTimeout(500);
     }
+
+    // Phase 4: once the world exists, a tap on the plane places the cube and
+    // the session reports AR_ACTIVE. Wait for a moment where the world is ready.
+    await page.waitForFunction(() => window.__ar.stats().worldReady, null, { timeout: 30_000 });
+    const placement = (await page.evaluate(() => {
+      const s = window.__ar.session;
+      const rect = document.getElementById("video")!.getBoundingClientRect();
+      const hit = s.hitTest(rect.width / 2, rect.height * 0.6);
+      if (!hit) return { hit: null };
+      s.placeCube(hit);
+      const st = window.__ar.stats();
+      const canvas = document.getElementById("three") as HTMLCanvasElement;
+      return {
+        hit: { x: hit.position.x, y: hit.position.y, z: hit.position.z, distance: hit.distance },
+        placed: st.placedObjects,
+        state: st.state,
+        worldScale: st.worldScale,
+        threeCanvas: canvas.width > 0 && canvas.height > 0,
+        cameraY: s.threeCamera.position.y,
+      };
+    })) as { hit: { x: number; y: number; z: number; distance: number } | null; placed?: number; state?: string; worldScale?: number; threeCanvas?: boolean; cameraY?: number };
+    console.log("[browser-smoke] placement " + JSON.stringify(placement));
     await context.close();
 
     const avg = (f: (s: Stats) => number) => samples.reduce((a, s) => a + f(s), 0) / samples.length;
@@ -257,5 +282,17 @@ describe("Phase 1 browser smoke test", () => {
       expect(s.plane!.normal[2]).toBeLessThan(-0.95);
     }
     expect(states["PLANE_FOUND"] ?? 0).toBeGreaterThanOrEqual(1);
+
+    // Phase 4
+    expect(placement.hit, "hit test on the found plane").not.toBeNull();
+    expect(Math.abs(placement.hit!.y)).toBeLessThan(1e-6);
+    expect(placement.hit!.distance).toBeGreaterThan(0.1);
+    expect(placement.placed).toBe(1);
+    expect(placement.state).toBe("AR_ACTIVE");
+    expect(placement.worldScale).toBeGreaterThan(0);
+    expect(placement.threeCanvas).toBe(true);
+    // The synthetic camera looks straight down at the plane 0.5 m away.
+    expect(placement.cameraY).toBeGreaterThan(0.3);
+    expect(placement.cameraY).toBeLessThan(0.7);
   });
 });
