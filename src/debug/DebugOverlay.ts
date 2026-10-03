@@ -13,6 +13,8 @@ export interface HudStats {
   planeConfidence: number;
   state: string;
   visionMs: number;
+  /** Camera frames skipped because the vision backend was still busy. */
+  framesDropped?: number;
   fastThreshold: number;
   processingSize: string;
   backend: string;
@@ -77,7 +79,7 @@ export class DebugOverlay {
   update(s: HudStats): void {
     const rows: string[] = [
       `FPS         ${s.renderFps.toFixed(0)}`,
-      `Vision FPS  ${s.visionFps.toFixed(0)}  (${s.visionMs.toFixed(1)} ms)`,
+      `Vision FPS  ${s.visionFps.toFixed(0)}  (${s.visionMs.toFixed(1)} ms)${s.framesDropped !== undefined ? `  drop ${s.framesDropped}` : ""}`,
       `Features    ${s.featureCount}`,
       `Tracked     ${s.trackedCount}`,
       `Inliers     ${s.inlierCount}`,

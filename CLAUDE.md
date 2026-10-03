@@ -217,6 +217,8 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **平面**: 重力あり → 法線を重力に固定して高さだけをロバスト推定（最密クラスタ）、inlier から最小二乗で法線を微調整（重力から 10° 以内）、inlier が 2 次元に広がることを要求（壁の水平スライスを除外）。閾値は距離の 2 → 5%、最低 inlier 30 → 20、使用 Landmark は PnP で確認済み（観測 ≥ 3）。重力なしは従来の RANSAC + 水平判定。重力 EMA を 0.2 → 0.06（手ぶれ加速度の影響低減）
 - **再局所化**: 採用条件を inlier 25 以上・誤差 1.5 px 以下・粗相関 0.45 以上に厳格化、候補 2 枚を 2 フレームに 1 回（Vision 30 fps 維持）
 - **結果**: Vision 30 fps（18 ms）、特徴点 263 全追跡、Landmark 134 / PnP inlier 127、再局所化なしで `AR_ACTIVE` 到達（Cube 配置）。スケールは机想定 0.5 m のため床では小さめに見える（`world.assumedPlaneDistanceMeters`）
+- **Cube の流れ対策**: 焦点距離を長辺画角 66° から算出（`processing.longSideFovDeg`、`?fov=`。従来の fx ≈ 長辺は約 53° 相当で長すぎた）。表示をポーズに同期（処理したフレームをポーズ到着時に描画、`processing.syncVideoToPose`、`?sync=0`）。One Euro を軽く（minCutoff 1.5 → 4）
+- **失探の頻発（同期表示導入後）**: 同期表示を `createImageBitmap(video)` から同期的なキャンバスのリングバッファ（`FramePresenter`、4 枚、表示解像度・長辺 1440 px 上限）に変更。iOS Safari では `createImageBitmap` が全解像度の読み戻しで数十 ms かかり、非同期コピーが溜まってメインスレッドを塞ぎ、キャプチャがフレーム落ち → LK が追えず失探していた。あわせて PnP 失敗 1 フレームで `RELOCALIZING` に落ちていた状態機械に猶予 3 フレーム（`state.mapLostFrameTolerance`。再局所化の試行自体は従来どおり 1 フレーム後から）。HUD の Vision FPS 行に `drop N`（バックエンド処理中に捨てたカメラフレーム数）
 
 ### Phase 5 — 実装済み（承認待ち）
 

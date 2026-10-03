@@ -264,7 +264,8 @@ export class VisionEngine {
       featureCount,
       mapInitialized: this.mapTracker.initialized,
       planeFound: this.lastPlane?.found ?? false,
-      mapLost: this.mapTracker.initialized && this.mapTracker.framesSinceTracked > 0,
+      mapLost:
+        this.mapTracker.initialized && this.mapTracker.framesSinceTracked > this.config.state.mapLostFrameTolerance,
     });
 
     // Swap pyramids for the next frame.

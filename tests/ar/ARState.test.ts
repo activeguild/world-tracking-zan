@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ARError, ARErrorCode, TrackingState, TrackingStateMachine } from "../../src/ar/ARState";
 import { DEFAULT_CONFIG, resolveConfig } from "../../src/ar/ARConfig";
 
-const thresholds = { minTrackedForTracking: 40, lostBelow: 20, lostFrameTolerance: 3 };
+const thresholds = { minTrackedForTracking: 40, lostBelow: 20, lostFrameTolerance: 3, mapLostFrameTolerance: 3 };
 
 describe("TrackingStateMachine", () => {
   it("starts in INITIALIZING and moves to SEARCHING_FEATURES on the first frame", () => {

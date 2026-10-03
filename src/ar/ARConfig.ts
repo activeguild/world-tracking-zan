@@ -258,6 +258,13 @@ export interface StateConfig {
   lostBelow: number;
   /** Consecutive bad frames tolerated before declaring TRACKING_LOST. */
   lostFrameTolerance: number;
+  /**
+   * Consecutive frames without a map pose (PnP failed) tolerated before
+   * declaring RELOCALIZING. Relocalization attempts start earlier
+   * (`relocalization.startAfterLostFrames`); this only keeps a single bad
+   * PnP frame from flipping the state and hiding the content.
+   */
+  mapLostFrameTolerance: number;
 }
 
 export interface DebugConfig {
@@ -407,6 +414,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     minTrackedForTracking: 40,
     lostBelow: 20,
     lostFrameTolerance: 3,
+    mapLostFrameTolerance: 3,
   },
   debug: {
     log: false,

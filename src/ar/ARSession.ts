@@ -10,6 +10,7 @@ import { ARCamera } from "../rendering/ARCamera";
 import type { ARObject } from "../rendering/ARObject";
 import { ARRenderer } from "../rendering/ARRenderer";
 import { ARWorld } from "../rendering/ARWorld";
+import { FramePresenter } from "../rendering/FramePresenter";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
 import type { MapPoseOutput, PlaneOutput, PlaneSearchOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
@@ -134,10 +135,9 @@ export class ARSession {
   private lastMapPose: MapPoseOutput | null = null;
   private viewportSize: { width: number; height: number } | null = null;
 
-  // Frame-synchronized display: bitmaps of captured frames keyed by frameId.
+  // Frame-synchronized display (ring of canvases, see FramePresenter).
   private readonly frameCanvas: HTMLCanvasElement | null;
-  private frameCtx: CanvasRenderingContext2D | null = null;
-  private readonly pendingBitmaps = new Map<number, Promise<ImageBitmap>>();
+  private presenter: FramePresenter | null = null;
   private syncActive = false;
   private backend: VisionBackend | null = null;
   private backendKind: "worker" | "main" = "worker";
@@ -258,14 +258,11 @@ export class ARSession {
     this.grabber = new FrameGrabber(size.width, size.height);
     this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
 
-    // Frame-synchronized display needs createImageBitmap(video).
-    this.syncActive =
-      this.config.processing.syncVideoToPose &&
-      this.frameCanvas !== null &&
-      typeof createImageBitmap === "function";
-    if (this.syncActive && this.frameCanvas) {
-      this.frameCtx = this.frameCanvas.getContext("2d");
-      if (!this.frameCtx) this.syncActive = false;
+    // Frame-synchronized display.
+    this.syncActive = false;
+    if (this.config.processing.syncVideoToPose && this.frameCanvas) {
+      this.presenter ??= new FramePresenter(this.frameCanvas);
+      this.syncActive = this.presenter.available;
     }
     if (this.frameCanvas) this.frameCanvas.style.display = this.syncActive ? "block" : "none";
 
@@ -303,8 +300,7 @@ export class ARSession {
     this.renderer?.clear();
     this.worldAnchor.reset();
     this.world.setWorldReady(false);
-    for (const bp of this.pendingBitmaps.values()) bp.then((b) => b.close()).catch(() => undefined);
-    this.pendingBitmaps.clear();
+    this.presenter?.clear();
     this.video.style.opacity = "";
     this.emit("stopped");
   }
@@ -465,47 +461,14 @@ export class ARSession {
     }
     this.lastGravity = gravity;
     const frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
-    if (this.syncActive) {
-      // Capture the full-resolution frame for display when its pose arrives.
-      const p = createImageBitmap(this.video);
-      p.catch(() => undefined);
-      this.pendingBitmaps.set(frame.frameId, p);
-    }
+    // Keep a display copy of this frame for when its pose arrives (GPU blit).
+    if (this.syncActive) this.presenter!.capture(this.video, frame.frameId);
     this.backend.processFrame(frame);
   }
 
-  /** Draw the frame the result belongs to, time-aligned with the pose. */
-  private async presentFrame(frameId: number): Promise<void> {
-    const p = this.pendingBitmaps.get(frameId);
-    // Drop (and close) anything older than this frame.
-    for (const [id, bp] of this.pendingBitmaps) {
-      if (id <= frameId) {
-        this.pendingBitmaps.delete(id);
-        if (id !== frameId) bp.then((b) => b.close()).catch(() => undefined);
-      }
-    }
-    if (!p || !this.frameCtx || !this.frameCanvas) return;
-    let bitmap: ImageBitmap;
-    try {
-      bitmap = await p;
-    } catch {
-      return;
-    }
-    const canvas = this.frameCanvas;
-    const rect = canvas.getBoundingClientRect();
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const W = Math.max(1, Math.round(rect.width * dpr));
-    const H = Math.max(1, Math.round(rect.height * dpr));
-    if (canvas.width !== W || canvas.height !== H) {
-      canvas.width = W;
-      canvas.height = H;
-    }
-    // object-fit: cover
-    const scale = Math.max(W / bitmap.width, H / bitmap.height);
-    const dw = bitmap.width * scale;
-    const dh = bitmap.height * scale;
-    this.frameCtx.drawImage(bitmap, (W - dw) / 2, (H - dh) / 2, dw, dh);
-    bitmap.close();
+  /** Show the frame the result belongs to, time-aligned with the pose. */
+  private presentFrame(frameId: number): void {
+    if (!this.presenter?.present(frameId)) return;
     // Hide the live video once a synchronized frame is on screen.
     if (this.video.style.opacity !== "0") this.video.style.opacity = "0";
   }
@@ -527,7 +490,7 @@ export class ARSession {
     this.lastMapPose = r.mapPose;
     this.setState(r.state);
     this.updateWorld(r);
-    if (this.syncActive) void this.presentFrame(r.frameId);
+    if (this.syncActive) this.presentFrame(r.frameId);
 
     const found = !!r.plane?.found;
     if (found && !this.planeWasFound) {

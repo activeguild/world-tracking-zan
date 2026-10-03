@@ -190,6 +190,7 @@ function refreshHud(): void {
     planeConfidence: s.quality.planeConfidence,
     state: s.state,
     visionMs: s.visionMs,
+    framesDropped: s.framesDropped,
     fastThreshold: s.fastThreshold,
     processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
     backend: s.backend,
