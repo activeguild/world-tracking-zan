@@ -41,8 +41,12 @@ export interface MapTrackingResult {
   poseDeltaRotationDeg: number;
   /** PnP failed: the translation was held and only the rotation prior applied (v2 §6). */
   translationHeld: boolean;
+  /** PnP failed: the camera center was predicted with the last tracked velocity. */
+  translationPredicted: boolean;
   /** PnP produced a pose but it was rejected by the jump gate (v2 §8). */
   jumpRejected: boolean;
+  /** Unlinked landmarks re-associated to tracks this frame (v3 §15). */
+  reassociated: number;
 }
 
 /** Pose candidate handed in by an external estimator (plane-relative PnP). */
@@ -84,7 +88,9 @@ const EMPTY_RESULT: MapTrackingResult = {
   poseDeltaTranslation: 0,
   poseDeltaRotationDeg: 0,
   translationHeld: false,
+  translationPredicted: false,
   jumpRejected: false,
+  reassociated: 0,
 };
 
 export class MapTracker {
@@ -99,6 +105,8 @@ export class MapTracker {
   /** Source of the current canonical pose and frames since it last changed (hysteresis, v3 §7). */
   private currentSource: PoseSource = "map";
   private framesSinceSwitch = 0;
+  /** Camera-center velocity of the last tracked frame (map units / frame). */
+  private readonly velocity = new Float64Array(3);
 
   // scratch
   private pts3 = new Float64Array(0);
@@ -167,6 +175,7 @@ export class MapTracker {
     this.lastSelection = EMPTY_SELECTION;
     this.currentSource = "map";
     this.framesSinceSwitch = 0;
+    this.velocity.fill(0);
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -353,7 +362,9 @@ export class MapTracker {
         { huber: cfg.pnpHuberPx / f, inlierThreshold: cfg.pnpInlierPx / f, maxIterations: cfg.pnpMaxIterations, epsilon: 1e-6 },
         mask,
       );
-      if (res.inlierCount >= cfg.minPnPInliers) {
+      // Coming back from a lost frame needs stronger evidence than staying tracked.
+      const minInliers = this._framesSinceTracked > 0 ? cfg.minRecoveryInliers : cfg.minPnPInliers;
+      if (res.inlierCount >= minInliers) {
         mapCandidate = { pose: res.pose, source: "map", inlierCount: res.inlierCount, reprojectionErrorPx: res.meanError * f };
         // Jump gate (v2 §8): a weakly supported solve that moves the camera
         // implausibly far in one frame is a wrong pose, not fast motion.
@@ -365,7 +376,7 @@ export class MapTracker {
           }
         }
       } else {
-        mapReject = `map inliers ${res.inlierCount} < ${cfg.minPnPInliers}`;
+        mapReject = `map inliers ${res.inlierCount} < ${minInliers}`;
       }
     } else if (n > 0) {
       mapReject = `map observations ${n} < 6`;
@@ -459,16 +470,38 @@ export class MapTracker {
       }
     }
     let translationHeld = false;
-    if (!tracked) {
+    let translationPredicted = false;
+    if (tracked) {
+      const c = this.cameraCenter();
+      this.velocity[0] = c[0] - prevCenter[0];
+      this.velocity[1] = c[1] - prevCenter[1];
+      this.velocity[2] = c[2] - prevCenter[2];
+    } else {
       this._framesSinceTracked++;
       this.framesSinceSwitch++;
-      if (rotationPrior) {
-        // Propagate the rotation so the pose does not freeze during short
-        // dropouts; the translation is held (a two-view translation is
-        // scale-free and must not enter the map-frame pose, v2 §6).
-        this._pose = { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation };
+      // Propagate so the pose does not freeze during short dropouts: the
+      // rotation from the two-view prior, the camera center from the last
+      // tracked velocity for a few frames (then held). A two-view
+      // translation is scale-free and never enters the map-frame pose (v2 §6).
+      const rot = rotationPrior ? mat3Multiply(rotationPrior, this._pose.rotation) : Float64Array.from(this._pose.rotation);
+      const c = prevCenter;
+      if (this._framesSinceTracked <= cfg.velocityPropagationFrames) {
+        c[0] += this.velocity[0];
+        c[1] += this.velocity[1];
+        c[2] += this.velocity[2];
+        translationPredicted = true;
+      } else {
         translationHeld = true;
       }
+      // t = −R C
+      this._pose = {
+        rotation: rot,
+        translation: new Float64Array([
+          -(rot[0] * c[0] + rot[1] * c[1] + rot[2] * c[2]),
+          -(rot[3] * c[0] + rot[4] * c[1] + rot[5] * c[2]),
+          -(rot[6] * c[0] + rot[7] * c[1] + rot[8] * c[2]),
+        ]),
+      };
     }
     this.lastSelection = {
       source: chosen ? chosen.source : "propagated",
@@ -541,16 +574,27 @@ export class MapTracker {
       }
     }
 
-    this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
+    // ---- Keep the map alive (v3 §15) ----
+    // Landmarks whose tracks died are projected with the canonical pose (or,
+    // for a short loss, the propagated pose) and linked to replenished
+    // tracks sitting on the same corners; the next PnP verifies the links.
+    let reassociated = 0;
+    if (tracked || this._framesSinceTracked <= cfg.reassociateMaxLostFrames) {
+      reassociated = this.reassociate(tracks, k, cfg.reassociateRadiusPx);
+    }
+    // Pruning by age counts only tracked frames: a loss must not erode the map.
+    if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
     const center = this.cameraCenter();
     this.lastResult = {
       tracked,
+      reassociated,
       inlierCount,
       meanReprojectionErrorPx: meanErrPx,
       newLandmarks: created,
       poseDeltaTranslation: Math.hypot(center[0] - prevCenter[0], center[1] - prevCenter[1], center[2] - prevCenter[2]),
       poseDeltaRotationDeg: (rotationDistance(prevRotation, this._pose.rotation) * 180) / Math.PI,
       translationHeld,
+      translationPredicted,
       jumpRejected,
     };
     return this.lastResult;
@@ -582,6 +626,71 @@ export class MapTracker {
     lm.position[1] = r[3] * pa[0] + r[4] * pa[1] + r[5] * pa[2] + tt[1];
     lm.position[2] = r[6] * pa[0] + r[7] * pa[1] + r[8] * pa[2] + tt[2];
     lm.parallax = this.tri.parallax;
+  }
+
+  /**
+   * Link unlinked mature landmarks to unlinked tracks that lie within
+   * `radiusPx` of their projection under the current pose. Returns the
+   * number of links made.
+   */
+  private reassociate(tracks: Track[], k: CameraIntrinsics, radiusPx: number): number {
+    const cfg = this.config;
+    // Spatial hash of unlinked tracks (cell = radius).
+    const cell = Math.max(1, radiusPx);
+    const grid = new Map<number, Track[]>();
+    const key = (cx: number, cy: number) => cy * 100000 + cx;
+    let unlinked = 0;
+    for (const t of tracks) {
+      if (t.landmarkId >= 0) continue;
+      const cx = Math.floor(t.x / cell);
+      const cy = Math.floor(t.y / cell);
+      const kk = key(cx, cy);
+      const bucket = grid.get(kk);
+      if (bucket) bucket.push(t);
+      else grid.set(kk, [t]);
+      unlinked++;
+    }
+    if (unlinked === 0) return 0;
+    const r = this._pose.rotation;
+    const tt = this._pose.translation;
+    const r2 = radiusPx * radiusPx;
+    let linked = 0;
+    for (const lm of this.map.values()) {
+      if (lm.trackId >= 0 || lm.observations < cfg.minObservationsForPose) continue;
+      const p = lm.position;
+      const z = r[6] * p[0] + r[7] * p[1] + r[8] * p[2] + tt[2];
+      if (z <= 1e-6) continue;
+      const u = ((r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + tt[0]) / z) * k.fx + k.cx;
+      const v = ((r[3] * p[0] + r[4] * p[1] + r[5] * p[2] + tt[1]) / z) * k.fy + k.cy;
+      if (u < 0 || v < 0 || u >= k.width || v >= k.height) continue;
+      const cx = Math.floor(u / cell);
+      const cy = Math.floor(v / cell);
+      let best: Track | null = null;
+      let bestD = r2;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const bucket = grid.get(key(cx + dx, cy + dy));
+          if (!bucket) continue;
+          for (const t of bucket) {
+            if (t.landmarkId >= 0) continue;
+            const d = (t.x - u) ** 2 + (t.y - v) ** 2;
+            if (d < bestD) {
+              bestD = d;
+              best = t;
+            }
+          }
+        }
+      }
+      if (best) {
+        best.landmarkId = lm.id;
+        best.anchorFrame = -1;
+        best.anchorPose = null;
+        lm.trackId = best.id;
+        lm.outlierCount = 0;
+        linked++;
+      }
+    }
+    return linked;
   }
 
   /** Inlier classification of the first `n` scratch observations under `pose`. */

@@ -209,6 +209,28 @@ export interface LandmarkConfig {
    * unless the current source has no valid candidate.
    */
   sourceSwitchCooldownFrames: number;
+  /**
+   * Re-association of unlinked landmarks (v3 §15, map kept alive): mature
+   * landmarks whose track died are projected with the current pose and
+   * linked to an unlinked track within this radius (px). FAST re-detects the
+   * same corners, so replenished tracks pick their landmarks back up instead
+   * of leaving PnP without observations.
+   */
+  reassociateRadiusPx: number;
+  /** Also re-associate with the propagated pose while lost for at most this many frames. */
+  reassociateMaxLostFrames: number;
+  /**
+   * PnP inliers required to come back from a lost frame (higher than
+   * minPnPInliers): re-associated links are unverified, and a dozen chance
+   * matches on an unrelated scene must not look like a recovered pose.
+   */
+  minRecoveryInliers: number;
+  /**
+   * While lost, predict the camera center with the last tracked velocity for
+   * this many frames (then hold it). The prediction is what lets landmarks
+   * be re-associated during a short burst of fast motion.
+   */
+  velocityPropagationFrames: number;
 }
 
 /** Plane detection (spec §21–§24, §51, Phase 3). */
@@ -479,6 +501,12 @@ export const DEFAULT_CONFIG: ARConfig = {
     jumpRejectTrustedInliers: 40,
     jumpRejectTrustedErrorPx: 1.5,
     sourceSwitchCooldownFrames: 15,
+    // FAST re-detects a corner within ~1 px; a tight radius keeps chance
+    // matches on unrelated texture rare.
+    reassociateRadiusPx: 2.5,
+    reassociateMaxLostFrames: 90,
+    minRecoveryInliers: 24,
+    velocityPropagationFrames: 10,
   },
   relocalization: {
     maxKeyframes: 8,

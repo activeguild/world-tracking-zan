@@ -234,6 +234,7 @@ function refreshHud(): void {
           deltaTranslationM: s.worldReady ? s.mapPose.deltaTranslation * s.worldScale : NaN,
           deltaRotationDeg: s.mapPose.deltaRotationDeg,
           translationHeld: s.mapPose.translationHeld,
+          translationPredicted: s.mapPose.translationPredicted,
           jumpRejected: s.mapPose.jumpRejected,
           source: s.mapPose.source,
           mapInliers: s.mapPose.mapInlierCount,
@@ -242,6 +243,7 @@ function refreshHud(): void {
           sourceDeltaM: s.worldReady ? s.mapPose.sourceDeltaTranslation * s.worldScale : NaN,
           sourceDeltaDeg: s.mapPose.sourceDeltaRotationDeg,
           history: s.mapPose.sourceHistory,
+          relinked: s.mapPose.reassociated,
         }
       : null,
     lostMs: s.lostMs,

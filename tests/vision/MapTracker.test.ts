@@ -155,7 +155,12 @@ describe("MapTracker", () => {
     const resWeak = a.tracker.update(weak, f0 + 2, TEST_K, null);
     expect(resWeak.jumpRejected).toBe(true);
     expect(resWeak.tracked).toBe(false);
-    expect(Array.from(a.tracker.cameraCenter())).toEqual(centerBefore);
+    // The rejected 0.4-unit jump (≈ 1.5 map units) is not applied; the camera
+    // center only advances by the last tracked velocity (constant-velocity
+    // prediction while lost).
+    expect(resWeak.translationPredicted).toBe(true);
+    const after = Array.from(a.tracker.cameraCenter());
+    expect(Math.hypot(after[0] - centerBefore[0], after[1] - centerBefore[1], after[2] - centerBefore[2])).toBeLessThan(0.3);
 
     // Trusted solve: every landmark track sees the jumped camera (many
     // inliers, small error) → accepted as genuine fast motion.
@@ -231,6 +236,72 @@ describe("MapTracker", () => {
     expect(tracker.selection.planeReject).toMatch(/plane/);
     const after = Array.from(tracker.cameraCenter());
     expect(Math.hypot(after[0] - centerBefore[0], after[1] - centerBefore[1], after[2] - centerBefore[2])).toBeLessThan(0.3);
+  });
+
+  it("re-associates landmarks to replenished tracks and does not prune the map while lost (v3 §15)", () => {
+    const cfg = DEFAULT_CONFIG.landmarks;
+    const f0 = 8;
+    const { rng, points } = makeScene(51);
+    const tracker = new MapTracker(cfg);
+    const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(52));
+    let tracks = makeTracks(points, cameraAt(f0), cameraAt(0), 0, rng);
+    const rel = estimator.estimate(
+      Float64Array.from(tracks, (t) => t.refX), Float64Array.from(tracks, (t) => t.refY),
+      Float64Array.from(tracks, (t) => t.x), Float64Array.from(tracks, (t) => t.y),
+      tracks.length, TEST_K,
+    );
+    expect(tracker.tryInitialize(tracks, rel, 0, f0, TEST_K)).toBe(true);
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    const pointOf = new Map(tracks.map((t) => [t.id, t.id - 1]));
+    const step = (f: number): Track[] => {
+      const next: Track[] = [];
+      for (const t of byId.values()) {
+        const p = project(points, cameraAt(f), pointOf.get(t.id)!, 0.3, rng);
+        if (!p) continue;
+        t.prevX = t.x; t.prevY = t.y; t.x = p[0]; t.y = p[1];
+        next.push(t);
+      }
+      return next;
+    };
+    // A few normal frames so landmarks mature (≥ 3 observations).
+    let f = f0;
+    for (let i = 0; i < 4; i++) {
+      f++;
+      tracks = step(f);
+      expect(tracker.update(tracks, f, TEST_K, null).tracked).toBe(true);
+    }
+    const landmarksBefore = tracker.map.size;
+
+    // Fast motion kills every track: FAST re-detects the same corners as
+    // brand-new tracks (new ids, no landmark). Without re-association PnP
+    // would have no observations at all.
+    f++;
+    let nextId = 10000;
+    const fresh: Track[] = step(f).map((t) => {
+      const copy: Track = { ...t, id: nextId++, landmarkId: -1, age: 0, anchorFrame: -1, anchorPose: null };
+      pointOf.set(copy.id, pointOf.get(t.id)!);
+      return copy;
+    });
+    for (const t of tracks) byId.delete(t.id);
+    fresh.forEach((t) => byId.set(t.id, t));
+    const lost = tracker.update(fresh, f, TEST_K, null);
+    expect(lost.tracked).toBe(false); // nothing linked in this frame…
+    expect(lost.reassociated).toBeGreaterThan(cfg.minPnPInliers); // …but the landmarks were re-linked for the next one
+    expect(tracker.map.size).toBe(landmarksBefore); // and nothing was pruned while lost
+
+    f++;
+    const recovered = tracker.update(step(f), f, TEST_K, null);
+    expect(recovered.tracked).toBe(true);
+    expect(recovered.inlierCount).toBeGreaterThanOrEqual(cfg.minPnPInliers);
+    expect(deg(rotationDistance(tracker.pose.rotation, cameraAt(f).rotation))).toBeLessThan(0.5);
+
+    // Long loss: no observations for many frames keeps every landmark.
+    const emptyFrames: Track[] = [];
+    for (let i = 0; i < 200; i++) {
+      f++;
+      tracker.update(emptyFrames, f, TEST_K, null);
+    }
+    expect(tracker.map.size).toBe(landmarksBefore);
   });
 
   it("triangulates new landmarks from anchors once parallax is sufficient", () => {

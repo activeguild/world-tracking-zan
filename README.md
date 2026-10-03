@@ -162,7 +162,10 @@ a cooldown against map ↔ plane flapping. New plane points are lifted only from
 a trusted map pose. A short tracking loss holds the last good pose (10 s debug
 hold); map and world reset only after 10 s lost *and* ≥ 10 failed
 relocalization attempts. The HUD shows the pose source, its history and the
-rejection reason.
+rejection reason. Landmarks whose tracks died are re-linked every frame to
+replenished tracks sitting on their projection (4 px), so a burst of fast
+motion does not leave PnP without observations; pruning by age counts only
+tracked frames.
 
 Fast motion: 4 LK pyramid levels and constant-velocity seeding
 (`tracker.pyramidLevels`, `tracker.predictMotion`) roughly double the per-frame

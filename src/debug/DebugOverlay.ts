@@ -45,6 +45,7 @@ export interface HudStats {
     deltaTranslationM: number;
     deltaRotationDeg: number;
     translationHeld: boolean;
+    translationPredicted: boolean;
     jumpRejected: boolean;
     source: string;
     /** Pose-source diagnostics (v3 §19–§21). */
@@ -55,6 +56,8 @@ export interface HudStats {
     sourceDeltaM: number;
     sourceDeltaDeg: number;
     history: string;
+    /** Landmarks re-linked to tracks this frame. */
+    relinked: number;
   } | null;
   /** How long tracking has been lost (ms). */
   lostMs?: number;
@@ -119,7 +122,7 @@ export class DebugOverlay {
       `=== TRACKING ===`,
       `Features    ${s.featureCount}  tracked ${s.trackedCount}  inliers ${s.inlierCount}`,
       m
-        ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}${m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`
+        ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}${m.relinked ? `  relink ${m.relinked}` : ""}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`
         : `PnP         —`,
       `Pose source ${m ? `${m.framesSinceTracked > 0 ? "LOST" : m.source.toUpperCase()}  ${m.history.slice(-24)}` : "—"}`,
       m

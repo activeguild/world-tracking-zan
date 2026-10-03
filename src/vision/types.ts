@@ -112,8 +112,12 @@ export interface MapPoseOutput {
   deltaRotationDeg: number;
   /** PnP failed this frame and the translation was held (v2 §6). */
   translationHeld: boolean;
+  /** PnP failed this frame and the camera center was predicted from the last tracked velocity. */
+  translationPredicted: boolean;
   /** PnP found a pose but the jump gate rejected it (v2 §8). */
   jumpRejected: boolean;
+  /** Unlinked landmarks re-linked to tracks this frame (v3 §15). */
+  reassociated: number;
   /** Inliers of the landmark-PnP candidate / the plane candidate this frame (0 when absent). */
   mapInlierCount: number;
   planeInlierCount: number;
