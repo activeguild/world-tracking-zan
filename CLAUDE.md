@@ -207,6 +207,20 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v2 対応 — Map 固定・診断強化（2026-10-03、実機 A/B 待ち）
+
+「カメラを動かすと Cube が動く」症状への対処。アーキテクチャは維持（FAST → LK → RANSAC → 二視点 → 三角測量 → Landmark Map → PnP → Plane RANSAC → WorldAnchor → Three.js）。
+
+- **Map を固定基準にする（最優先）**: `MapTracker.refineLandmark()`（視差が増えるたびに Landmark 位置を再三角測量で書き換え）を `landmarks.enableLandmarkDepthRefinement` で切替可能にし、**既定 OFF**。Pose → Landmark → Pose の正帰還を断つ。デモは `?refine=1` で ON（A/B 用）。注意: この精錬は実機で平面検出を成立させるために入れたものなので、OFF で `PLANE_FOUND` に到達しにくくなる可能性がある（その場合は初期化視差 `initMinParallaxPx` を上げる方向で対処）
+- **PnP テレメトリ**: `MapTrackingResult` / `MapPoseOutput` に `cameraCenter`、`deltaTranslation`（前フレームからのカメラ中心移動、map 単位）、`deltaRotationDeg`、`translationHeld`（PnP 失敗で並進を保持し回転だけ伝播）、`source`（`map` / `plane` / `propagated`）。PnP 失敗・復帰は `[AR]` ログに 1 回ずつ出力。異常ジャンプの拒否はまだ行わず数値を出すだけ（§8）
+- **HUD を §23 構成に**: TRACKING（features / tracked / inliers / PnP）、CAMERA（map C、world C、Δt cm、Δrot）、WORLD（scale、Landmark 数と plane / non-plane 内訳、平面 n・RMS・conf）、OBJECT（配置物の World 座標。カメラ移動で変化しないことを確認する）、TIMING（frame t / pose t / pose age、`debug.poseStaleMs` 超過で `POSE STALE`）
+- **Camera / Object の分離**: 既存どおり `ARObject.place()` のみが位置を決め、`ARCamera` だけが `camera.position / quaternion` を書く（grep で確認）。`ARObject` に World 空間の移動 API（`setPosition` / `moveBy` / `setYaw` / `velocity` / `angularVelocityY` / `update(dt)`）、`ARWorld.update(dt)` / `planeToWorld`（World = 平面座標系なので恒等）。デモ `?walk=1` で Cube が X 方向に 5 cm/s で往復（Test D / E）
+- **テスト**: CoordinateSystem round trip（恒等 → World 原点、X 移動、ランダム 200 姿勢で位置 1.5e-15 / 回転 3e-8 rad）、hitTest round trip（World → 投影 → hitTest で 1e-6 以内）、Camera / Object 分離（§24 Test 1–4: 右 / 左移動で Object World 不変・画面上は逆方向、回転で不変）、Object 移動（Test D / E）、PnP テレメトリ、精錬 ON/OFF の合成ドリフト比較（どちらも中央値 0.03 px: 合成平面では差が出ない）
+- **FOV 感度テスト（§15）**: 同じ合成シーケンスを 60 / 63 / 66 / 69 / 72° で追跡。**平面シーンでは焦点距離の誤りはドリフトにならず**（全条件で中央値 0.03 px）、復元されるカメラ移動量だけがスケールする（Δx 0.151 → 0.163 m）。実機でのドリフトに FOV が効くとすれば非平面部分を通じてであり、合成テストでは順位付けできない
+- **実験的: 平面アンカー姿勢（既定 OFF）**: 最初の指示書（Homography 中心）に基づき `PlaneTracker` を実装済み。確定した平面に特徴点を持ち上げ（画素 Ray ∩ 平面）、その 3D 点への PnP で姿勢を解く（= 平面誘導 Homography の n, d 既知分解と等価、奥行き非依存）。平面外の点は probation / 連続外れで除外。v2 §30 に従い主経路にはせず `planeTracking.enabled`（`?planetrack=1`）で比較用に残す。有効時は `VisionOutput.planeAnchor` / `planePose` を出力し、World はそのアンカー平面から生成
+- **Pose smoothing A/B**: `?smooth=0`（§17）。**合格条件は smoothing OFF でも World 固定**
+- **実機で確認すべきこと（§26, §34 Step 2）**: 既定（精錬 OFF）と `?refine=1` で、Cube 配置後に 5 / 10 / 20 / 50 cm 横移動したときの画面ドリフトを比較。HUD の `world C` が移動量相当（10 cm → ≈0.10）変化し、`Object 1` の X Y Z が不変であること
+
 ### 実機チューニング（iPhone Safari、2026-10-03）
 
 実機の HUD スクリーンショットを元に調整した内容。合成データでは見えなかった実データ特有の問題への対処。

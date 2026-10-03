@@ -50,6 +50,18 @@ export interface Track {
   anchorX: number;
   anchorY: number;
   anchorPose: { rotation: Float64Array; translation: Float64Array } | null;
+  /**
+   * Plane-anchored tracking: the 3D point on the anchored plane (map frame)
+   * this track is assumed to observe (its pixel ray intersected with the
+   * plane). Null until lifted.
+   */
+  planePoint: Float64Array | null;
+  /** Consecutive frames the plane point reprojected within the gate. */
+  planeStreak: number;
+  /** Consecutive frames it did not. */
+  planeOutliers: number;
+  /** Decided to be off the plane: excluded from the plane-relative pose. */
+  offPlane: boolean;
 }
 
 /** Detected plane (spec §21, Phase 3). All geometry in the map frame. */
@@ -92,6 +104,41 @@ export interface MapPoseOutput {
   mapFrameId: number;
   /** Frames since the last successful PnP. */
   framesSinceTracked: number;
+  /** Camera center in the map frame (C = −Rᵀt). */
+  cameraCenter: number[];
+  /** Camera center displacement since the previous frame (map units, 修正指示書 v2 §7). */
+  deltaTranslation: number;
+  /** Camera rotation since the previous frame (degrees). */
+  deltaRotationDeg: number;
+  /** PnP failed this frame and the translation was held (v2 §6). */
+  translationHeld: boolean;
+  /**
+   * Where this frame's pose came from: "plane" = plane-relative estimate
+   * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no
+   * estimate this frame (previous pose rotated by the frame-to-frame rotation).
+   */
+  source: "plane" | "map" | "propagated";
+}
+
+/** The plane the AR world is anchored to (fixed once; map frame). */
+export interface PlaneAnchorOutput {
+  normal: number[];
+  /** n·X + d = 0 */
+  d: number;
+  center: number[];
+  /** Frame in which the plane was fixed. */
+  frameId: number;
+}
+
+/** Quality of the plane-relative pose (修正指示書 §9 HomographyQuality). */
+export interface PlanePoseOutput {
+  tracked: boolean;
+  inlierCount: number;
+  candidateCount: number;
+  confirmedCount: number;
+  inlierRatio: number;
+  reprojectionErrorPx: number;
+  confidence: number;
 }
 
 /** Packed landmark layout (Float32): [x, y, z, planeInlier] in the map frame. */
@@ -193,6 +240,10 @@ export interface VisionOutput {
   plane: PlaneOutput | null;
   /** Plane search diagnostics (null until the map exists). */
   planeSearch: PlaneSearchOutput | null;
+  /** The fixed plane the world is anchored to (null until a plane was found). */
+  planeAnchor: PlaneAnchorOutput | null;
+  /** Plane-relative pose quality (null until anchored). */
+  planePose: PlanePoseOutput | null;
   /** Keyframe / relocalization status (Phase 5). */
   relocalization: RelocalizationOutput;
   /** Packed landmarks for debug rendering: see `LANDMARK_STRIDE`. */

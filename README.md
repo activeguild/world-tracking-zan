@@ -134,6 +134,26 @@ Query parameters:
 | `?hud=0`    | hide the HUD                                |
 | `?gravity=x,y,z` | override the gravity direction (camera frame) |
 | `?model=URL&size=0.15` | place this GLB (footprint in meters) instead of the cube |
+| `?fov=66`   | camera field of view along the long side (degrees) |
+| `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
+| `?sync=0`   | show the live video instead of the pose-synchronized frame |
+| `?smooth=0` | disable pose smoothing (A/B: world fixity must hold without it) |
+| `?refine=1` | re-enable landmark depth refinement (A/B against the fixed map) |
+| `?walk=1`   | the placed object walks back and forth on the plane (object-motion test) |
+| `?planetrack=1` | experimental plane-relative pose instead of landmark PnP |
+
+## Fixed map (drift fix, v2)
+
+Objects slid while the phone moved. The map is the coordinate system the
+world is anchored to, so the camera pose must not rewrite it: landmark depth
+refinement (re-triangulation as the baseline grows) is now off by default
+(`landmarks.enableLandmarkDepthRefinement`). PnP telemetry (`cameraCenter`,
+per-frame Δtranslation / Δrotation, `translationHeld`, pose `source`) and a
+sectioned HUD (TRACKING / CAMERA / WORLD / OBJECT / TIMING) make the on-device
+A/B measurable: moving the camera 10 cm must change `world C` by ≈ 0.10 while
+`Object 1` stays put. `src/vision/PlaneTracker.ts` is an experimental,
+default-off alternative estimator (features lifted onto the fixed plane, PnP
+against them = plane-induced homography with known n, d).
 
 ## Tests
 
@@ -173,13 +193,14 @@ src/
   vision/    ImagePyramid, FeatureDetector (FAST-9), FeatureTracker (LK + FB),
              OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
              LandmarkMap, MapTracker (init / PnP / triangulation), PlaneDetector,
+             PlaneTracker (experimental plane-relative pose),
              Keyframe, Relocalizer (coarse NCC shift + LK + PnP), VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
              HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)
              CoordinateSystem (map ↔ world ↔ Three.js, projection), Ray, OneEuroFilter
   ar/        WorldAnchor (world frame from the first plane, hit test)
-  rendering/ ARCamera, ARWorld, ARObject, ARRenderer (Three.js)
+  rendering/ ARCamera, ARWorld, ARObject (world-space motion API), ARRenderer, FramePresenter (pose-synchronized frame)
   sensors/   GravityProvider (DeviceMotion → camera frame)
   worker/    protocol, VisionWorker (worker entry), VisionWorkerClient (+ main-thread fallback)
   debug/     DebugOverlay (HUD), FeatureRenderer, PlaneRenderer, Logger

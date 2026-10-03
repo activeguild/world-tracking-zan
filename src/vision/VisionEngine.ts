@@ -6,6 +6,7 @@ import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker } from "./MapTracker";
 import { PlaneDetector } from "./PlaneDetector";
+import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { Relocalizer } from "./Relocalizer";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
@@ -13,7 +14,9 @@ import {
   LANDMARK_STRIDE,
   packTracks,
   type MapPoseOutput,
+  type PlaneAnchorOutput,
   type PlaneOutput,
+  type PlanePoseOutput,
   type PoseOutput,
   type RelocalizationOutput,
   type Track,
@@ -90,6 +93,13 @@ export class VisionEngine {
   private packedLandmarks = new Float32Array(0);
   private packedLandmarkCount = 0;
 
+  // Plane-anchored tracking (修正指示書): the first found plane is fixed and
+  // the camera pose is solved relative to it (depth-free).
+  private readonly planeTracker: PlaneTracker;
+  private lastPlaneAnchor: PlaneAnchorOutput | null = null;
+  private lastPlanePose: PlanePoseOutput | null = null;
+  private lastPoseSource: MapPoseOutput["source"] = "propagated";
+
   // Phase 5: keyframes + relocalization.
   private readonly relocalizer: Relocalizer;
   private relocStatus: RelocalizationOutput = emptyReloc();
@@ -128,7 +138,13 @@ export class VisionEngine {
     this.poseEstimator = new PoseEstimator(config.pose, config.ransac, rng);
     this.mapTracker = new MapTracker(config.landmarks);
     this.planeDetector = new PlaneDetector(config.plane, rng);
+    this.planeTracker = new PlaneTracker(config.planeTracking);
     this.relocalizer = new Relocalizer(config.relocalization, config.tracker);
+  }
+
+  /** The fixed plane the world is anchored to (null until a plane was found). */
+  get planeAnchor(): PlaneAnchorOutput | null {
+    return this.lastPlaneAnchor;
   }
 
   get keyframeCount(): number {
@@ -177,6 +193,10 @@ export class VisionEngine {
     this.prevFrameRotation = null;
     this.mapTracker.reset(this.tracks);
     this.planeDetector.reset();
+    this.planeTracker.reset(this.tracks);
+    this.lastPlaneAnchor = null;
+    this.lastPlanePose = null;
+    this.lastPoseSource = "propagated";
     this.lastMapPose = null;
     this.lastPlane = null;
     this.packedLandmarkCount = 0;
@@ -263,7 +283,9 @@ export class VisionEngine {
       inlierCount,
       featureCount,
       mapInitialized: this.mapTracker.initialized,
-      planeFound: this.lastPlane?.found ?? false,
+      // Once anchored, the plane is the fixed world reference: it stays
+      // "found" even when the per-frame detector does not re-detect it.
+      planeFound: this.planeTracker.anchored || (this.lastPlane?.found ?? false),
       mapLost:
         this.mapTracker.initialized && this.mapTracker.framesSinceTracked > this.config.state.mapLostFrameTolerance,
     });
@@ -295,6 +317,8 @@ export class VisionEngine {
       planeSearch: this.mapTracker.initialized
         ? { ...this.planeDetector.lastSearch, minInliers: this.config.plane.minInliers }
         : null,
+      planeAnchor: this.lastPlaneAnchor,
+      planePose: this.lastPlanePose,
       relocalization: this.relocStatus,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
       landmarkCount: this.packedLandmarkCount,
@@ -335,6 +359,8 @@ export class VisionEngine {
       if (this.lastRelative && this.lastRelativeRefFrame >= 0) {
         if (tracker.tryInitialize(this.tracks, this.lastRelative, this.lastRelativeRefFrame, frameId, k)) {
           this.planeDetector.reset();
+          this.planeTracker.reset(this.tracks);
+          this.lastPlaneAnchor = null;
           this.relocalizer.reset();
           // The initialization frame is the first keyframe.
           this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
@@ -365,8 +391,31 @@ export class VisionEngine {
         }
       }
 
-      const res = tracker.update(this.tracks, frameId, k, rotationPrior);
+      // Plane-relative pose (修正指示書 §7): main path once a plane is anchored.
+      // The landmark PnP stays as the fallback when the plane is out of view.
+      const pt = this.config.planeTracking;
+      let planeRes = this.planeTracker.result;
+      let poseOverride = null;
+      if (pt.enabled && this.planeTracker.anchored) {
+        const prior = rotationPrior
+          ? { rotation: mat3Multiply(rotationPrior, tracker.pose.rotation), translation: tracker.pose.translation }
+          : tracker.pose;
+        planeRes = this.planeTracker.update(this.tracks, prior, k);
+        if (planeRes.tracked) poseOverride = planeRes.pose;
+      }
+
+      const res = tracker.update(this.tracks, frameId, k, rotationPrior, poseOverride);
+      this.lastPoseSource = !res.tracked ? "propagated" : poseOverride ? "plane" : "map";
       if (res.tracked) {
+        if (this.planeTracker.anchored) {
+          // Lift features that are new since the anchor, only from frames
+          // whose pose is well supported (a bad pose would bake its error
+          // into the lifted points).
+          const good = poseOverride
+            ? planeRes.inlierCount >= pt.liftMinInliers && planeRes.meanErrorPx <= pt.liftMaxMeanErrorPx
+            : res.inlierCount >= pt.liftMinInliers && res.meanReprojectionErrorPx <= pt.liftMaxMeanErrorPx;
+          if (good) this.planeTracker.lift(this.tracks, tracker.pose, k, (t) => this.observesPlaneLandmark(t));
+        }
         // Keyframe policy (spec §35).
         const par = this.medianParallaxSinceLastKeyframe();
         if (this.relocalizer.shouldCreate(tracker.pose, frameId, res.inlierCount, par)) {
@@ -377,9 +426,12 @@ export class VisionEngine {
         // Lost for too long and relocalization did not succeed: start over.
         tracker.reset(this.tracks);
         this.planeDetector.reset();
+        this.planeTracker.reset(this.tracks);
+        this.lastPlaneAnchor = null;
         this.relocalizer.reset();
       }
     }
+    this.lastPlanePose = this.planeTracker.anchored ? toPlanePoseOutput(this.planeTracker.result) : null;
 
     if (tracker.initialized) {
       const p = tracker.pose;
@@ -392,6 +444,11 @@ export class VisionEngine {
         landmarkCount: tracker.map.size,
         mapFrameId: tracker.mapFrameId,
         framesSinceTracked: tracker.framesSinceTracked,
+        cameraCenter: Array.from(tracker.cameraCenter()),
+        deltaTranslation: r.poseDeltaTranslation,
+        deltaRotationDeg: r.poseDeltaRotationDeg,
+        translationHeld: r.translationHeld,
+        source: this.lastPoseSource,
       };
     } else {
       this.lastMapPose = null;
@@ -464,10 +521,21 @@ export class VisionEngine {
         anchorX: o.x,
         anchorY: o.y,
         anchorPose,
+        planePoint: null,
+        planeStreak: 0,
+        planeOutliers: 0,
+        offPlane: false,
       });
       added++;
     }
     void added;
+  }
+
+  /** True when the track observes a landmark that the plane detector counted as a plane inlier. */
+  private observesPlaneLandmark(t: Track): boolean {
+    if (t.landmarkId < 0) return false;
+    const lm = this.mapTracker.map.get(t.landmarkId);
+    return !!lm && lm.planeInlier;
   }
 
   /** Median pixel displacement of landmark tracks relative to the last keyframe. */
@@ -529,9 +597,28 @@ export class VisionEngine {
         }
       : null;
 
-    // Pack landmarks for debug rendering, flagging plane inliers.
+    // Flag plane inliers (debug rendering + "confirmed on plane" for lifting).
     const inlierSet = candidate ? new Set(candidate.inlierIds) : null;
     for (const lm of tracker.map.values()) lm.planeInlier = inlierSet ? inlierSet.has(lm.id) : false;
+
+    // Anchor the world plane the first time a plane is found (修正指示書 §6):
+    // from here on it is fixed and the camera pose is solved relative to it.
+    if (
+      candidate?.found &&
+      !this.planeTracker.anchored &&
+      this.config.planeTracking.enabled &&
+      tracker.result.tracked
+    ) {
+      this.planeTracker.setAnchor(candidate, tracker.pose, input.frameId);
+      this.planeTracker.lift(this.tracks, tracker.pose, input.intrinsics, (t) => this.observesPlaneLandmark(t));
+      this.lastPlaneAnchor = {
+        normal: Array.from(candidate.normal),
+        d: candidate.d,
+        center: Array.from(candidate.center),
+        frameId: input.frameId,
+      };
+      this.lastPlanePose = toPlanePoseOutput(this.planeTracker.result);
+    }
     const total = tracker.map.size;
     if (this.packedLandmarks.length < total * LANDMARK_STRIDE) {
       this.packedLandmarks = new Float32Array(Math.max(total, 256) * LANDMARK_STRIDE);
@@ -649,6 +736,10 @@ export class VisionEngine {
         anchorX: c.x,
         anchorY: c.y,
         anchorPose: null,
+        planePoint: null,
+        planeStreak: 0,
+        planeOutliers: 0,
+        offPlane: false,
       });
     }
   }
@@ -799,6 +890,18 @@ export class VisionEngine {
 
 function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function toPlanePoseOutput(r: PlaneTracker["result"]): PlanePoseOutput {
+  return {
+    tracked: r.tracked,
+    inlierCount: r.inlierCount,
+    candidateCount: r.candidateCount,
+    confirmedCount: r.confirmedCount,
+    inlierRatio: r.inlierRatio,
+    reprojectionErrorPx: r.meanErrorPx,
+    confidence: r.confidence,
+  };
 }
 
 function emptyReloc(): RelocalizationOutput {

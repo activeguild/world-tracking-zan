@@ -2,7 +2,7 @@ import type { LandmarkConfig } from "../ar/ARConfig";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
 import { refinePosePnP } from "../math/PnP";
-import { composeTransforms, invertTransform, type RigidTransform } from "../math/Pose";
+import { composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
@@ -28,7 +28,23 @@ export interface MapTrackingResult {
   inlierCount: number;
   meanReprojectionErrorPx: number;
   newLandmarks: number;
+  /** Camera center moved this much since the previous frame (map units, 修正指示書 v2 §7–§8). */
+  poseDeltaTranslation: number;
+  /** Camera rotated this much since the previous frame (degrees). */
+  poseDeltaRotationDeg: number;
+  /** PnP failed: the translation was held and only the rotation prior applied (v2 §6). */
+  translationHeld: boolean;
 }
+
+const EMPTY_RESULT: MapTrackingResult = {
+  tracked: false,
+  inlierCount: 0,
+  meanReprojectionErrorPx: 0,
+  newLandmarks: 0,
+  poseDeltaTranslation: 0,
+  poseDeltaRotationDeg: 0,
+  translationHeld: false,
+};
 
 export class MapTracker {
   readonly map = new LandmarkMap();
@@ -37,7 +53,7 @@ export class MapTracker {
   /** X_cam = R X_map + t for the current frame. */
   private _pose: RigidTransform = identity();
   private _framesSinceTracked = 0;
-  private lastResult: MapTrackingResult = { tracked: false, inlierCount: 0, meanReprojectionErrorPx: 0, newLandmarks: 0 };
+  private lastResult: MapTrackingResult = EMPTY_RESULT;
 
   // scratch
   private pts3 = new Float64Array(0);
@@ -76,13 +92,22 @@ export class MapTracker {
     this._framesSinceTracked = 0;
   }
 
+  /**
+   * Phase 2 of 修正指示書: an external (plane-relative) estimator provides the
+   * pose for the current frame; the map bookkeeping below uses it as is.
+   */
+  setPose(pose: RigidTransform): void {
+    this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
+    this._framesSinceTracked = 0;
+  }
+
   reset(tracks: readonly Track[]): void {
     this.map.clear();
     this._initialized = false;
     this._mapFrameId = -1;
     this._pose = identity();
     this._framesSinceTracked = 0;
-    this.lastResult = { tracked: false, inlierCount: 0, meanReprojectionErrorPx: 0, newLandmarks: 0 };
+    this.lastResult = EMPTY_RESULT;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -162,18 +187,40 @@ export class MapTracker {
         t.anchorPose = this._pose;
       }
     }
-    this.lastResult = { tracked: true, inlierCount: created.length, meanReprojectionErrorPx: 0, newLandmarks: created.length };
+    this.lastResult = { ...EMPTY_RESULT, tracked: true, inlierCount: created.length, newLandmarks: created.length };
     return true;
+  }
+
+  /** Camera center in the map frame: C = −Rᵀ t. */
+  cameraCenter(out = new Float64Array(3)): Float64Array {
+    const r = this._pose.rotation;
+    const t = this._pose.translation;
+    out[0] = -(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]);
+    out[1] = -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]);
+    out[2] = -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2]);
+    return out;
   }
 
   /**
    * Per-frame update once initialized: PnP, landmark bookkeeping, new
    * triangulations, pruning.
    * @param rotationPrior R_cur←prev from the two-view estimator (may be null)
+   * @param poseOverride  pose already solved for this frame by the plane-
+   *                      relative estimator: PnP is skipped, the landmarks
+   *                      are only classified against it (inliers / outliers
+   *                      for the bookkeeping), and the frame counts as tracked
    */
-  update(tracks: Track[], frameId: number, k: CameraIntrinsics, rotationPrior: Mat3 | null): MapTrackingResult {
+  update(
+    tracks: Track[],
+    frameId: number,
+    k: CameraIntrinsics,
+    rotationPrior: Mat3 | null,
+    poseOverride: RigidTransform | null = null,
+  ): MapTrackingResult {
     const cfg = this.config;
     const f = (k.fx + k.fy) / 2;
+    const prevCenter = this.cameraCenter();
+    const prevRotation: Mat3 = Float64Array.from(this._pose.rotation);
 
     // Drop landmark links of tracks that died (track list only has survivors).
     const alive = new Set<number>();
@@ -207,17 +254,25 @@ export class MapTracker {
     let tracked = false;
     let inlierCount = 0;
     let meanErrPx = 0;
+    if (poseOverride) {
+      tracked = true;
+      this._pose = { rotation: Float64Array.from(poseOverride.rotation), translation: Float64Array.from(poseOverride.translation) };
+      this._framesSinceTracked = 0;
+    }
     if (n >= 6) {
-      const prior: RigidTransform = rotationPrior
-        ? { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation }
-        : this._pose;
+      const prior: RigidTransform = poseOverride
+        ? this._pose
+        : rotationPrior
+          ? { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation }
+          : this._pose;
+      // With an override the optimizer runs zero iterations: classification only.
       const res = refinePosePnP(prior, this.pts3, this.obsX, this.obsY, n, {
         huber: cfg.pnpHuberPx / f,
         inlierThreshold: cfg.pnpInlierPx / f,
-        maxIterations: cfg.pnpMaxIterations,
+        maxIterations: poseOverride ? 0 : cfg.pnpMaxIterations,
         epsilon: 1e-6,
       });
-      if (res.inlierCount >= cfg.minPnPInliers) {
+      if (poseOverride || res.inlierCount >= cfg.minPnPInliers) {
         tracked = true;
         inlierCount = res.inlierCount;
         meanErrPx = res.meanError * f;
@@ -230,7 +285,9 @@ export class MapTracker {
             lm.observations++;
             lm.lastSeenFrame = frameId;
             lm.outlierCount = 0;
-            this.refineLandmark(lm, obsTracks[i], k, maxErr);
+            // The map is the fixed reference the world is anchored to; the
+            // pose must not rewrite it unless explicitly enabled (v2 §3–§5).
+            if (cfg.enableLandmarkDepthRefinement) this.refineLandmark(lm, obsTracks[i], k, maxErr);
           } else {
             lm.outlierCount++;
             if (lm.outlierCount > cfg.maxOutlierCount) {
@@ -247,11 +304,15 @@ export class MapTracker {
         }
       }
     }
+    let translationHeld = false;
     if (!tracked) {
       this._framesSinceTracked++;
       if (rotationPrior) {
-        // Propagate the rotation so the pose does not freeze during short dropouts.
+        // Propagate the rotation so the pose does not freeze during short
+        // dropouts; the translation is held (a two-view translation is
+        // scale-free and must not enter the map-frame pose, v2 §6).
         this._pose = { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation };
+        translationHeld = true;
       }
     }
 
@@ -313,7 +374,16 @@ export class MapTracker {
     }
 
     this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
-    this.lastResult = { tracked, inlierCount, meanReprojectionErrorPx: meanErrPx, newLandmarks: created };
+    const center = this.cameraCenter();
+    this.lastResult = {
+      tracked,
+      inlierCount,
+      meanReprojectionErrorPx: meanErrPx,
+      newLandmarks: created,
+      poseDeltaTranslation: Math.hypot(center[0] - prevCenter[0], center[1] - prevCenter[1], center[2] - prevCenter[2]),
+      poseDeltaRotationDeg: (rotationDistance(prevRotation, this._pose.rotation) * 180) / Math.PI,
+      translationHeld,
+    };
     return this.lastResult;
   }
 

@@ -13,7 +13,14 @@ import { ARWorld } from "../rendering/ARWorld";
 import { FramePresenter } from "../rendering/FramePresenter";
 import type { TrackingQuality } from "../vision/TrackingQuality";
 import { emptyQuality } from "../vision/TrackingQuality";
-import type { MapPoseOutput, PlaneOutput, PlaneSearchOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
+import type {
+  MapPoseOutput,
+  PlaneOutput,
+  PlanePoseOutput,
+  PlaneSearchOutput,
+  PoseOutput,
+  RelocalizationOutput,
+} from "../vision/types";
 import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
@@ -107,6 +114,22 @@ export interface ARStats {
   framesDropped: number;
   processingWidth: number;
   processingHeight: number;
+  /** Plane-relative pose quality (null until a plane is anchored). */
+  planePose: PlanePoseOutput | null;
+  /** The world plane has been fixed. */
+  planeAnchored: boolean;
+  /** Capture time (performance.now ms) of the frame the current pose belongs to. */
+  frameTimestampMs: number;
+  /** Time the pose for that frame arrived from the vision backend. */
+  poseTimestampMs: number;
+  /** Render time − capture time of the frame the current pose belongs to (ms). */
+  poseAgeMs: number;
+  /** poseAgeMs above `debug.poseStaleMs`. */
+  poseStale: boolean;
+  /** Three.js camera position in world meters (null before the world exists). */
+  cameraWorldPosition: number[] | null;
+  /** Placed objects' world poses — must not change when only the camera moves. */
+  objects: { id: number; position: number[]; yaw: number }[];
   /** Focal length in processing pixels. */
   focalPx: number;
   /** Frame-synchronized display active. */
@@ -173,6 +196,13 @@ export class ARSession {
   private planeWasFound = false;
   private lastGravity: number[] | null = null;
   private visionMs = 0;
+  private poseAgeMs = 0;
+  private frameTimestampMs = 0;
+  private poseTimestampMs = 0;
+  private translationHeldLogged = false;
+  private lastWorldUpdateMs = 0;
+  private planePose: PlanePoseOutput | null = null;
+  private planeAnchored = false;
   private fastThreshold = 0;
   private framesProcessed = 0;
   private framesDropped = 0;
@@ -391,6 +421,16 @@ export class ARSession {
       placedObjects: this.world.placedCount,
       relocalization: this.relocalization,
       planeSearch: this.planeSearch,
+      planePose: this.planePose,
+      planeAnchored: this.planeAnchored,
+      frameTimestampMs: this.frameTimestampMs,
+      poseTimestampMs: this.poseTimestampMs,
+      poseAgeMs: this.poseAgeMs,
+      poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
+      cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
+      objects: this.world.objects
+        .filter((o) => o.placed)
+        .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -477,8 +517,21 @@ export class ARSession {
     if (!this.running) return;
     this.grabber?.release(r.grayBuffer);
     this.framesProcessed++;
-    this.visionFpsCounter.tick(performance.now());
+    const arrived = performance.now();
+    this.visionFpsCounter.tick(arrived);
     this.visionMs = r.processingMs;
+    this.frameTimestampMs = r.timestamp;
+    this.poseTimestampMs = arrived;
+    // v2 §6: make the "PnP failed, translation held" episodes visible.
+    if (r.mapPose?.translationHeld) {
+      if (!this.translationHeldLogged) {
+        this.translationHeldLogged = true;
+        this.logger.info(`PnP failed at frame ${r.frameId}: translation held, rotation propagated (lost ${r.mapPose.framesSinceTracked})`);
+      }
+    } else if (this.translationHeldLogged) {
+      this.translationHeldLogged = false;
+      this.logger.info(`PnP recovered at frame ${r.frameId} (${r.mapPose?.source ?? "none"})`);
+    }
     this.quality = r.quality;
     this.pose = r.pose;
     this.mapPose = r.mapPose;
@@ -486,6 +539,8 @@ export class ARSession {
     this.landmarkCount = r.landmarkCount;
     this.relocalization = r.relocalization;
     this.planeSearch = r.planeSearch;
+    this.planePose = r.planePose;
+    this.planeAnchored = r.planeAnchor !== null;
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
     this.setState(r.state);
@@ -516,6 +571,9 @@ export class ARSession {
       planeConfidence: r.quality.planeConfidence,
       visionFPS: this.visionFpsCounter.fps,
       visionMs: r.processingMs,
+      ...(r.mapPose ? { poseSource: r.mapPose.source } : {}),
+      ...(r.planePose ? { planeInliers: r.planePose.inlierCount, planeErrorPx: r.planePose.reprojectionErrorPx } : {}),
+      ...(this.worldAnchor.isReady ? { poseAgeMs: this.poseAgeMs } : {}),
     });
     this.emit("frame", r);
   }
@@ -540,11 +598,16 @@ export class ARSession {
       this.logger.info("world lost (map reset)");
       this.emit("worldLost");
     }
-    // Create the world on the first found plane.
-    if (!this.worldAnchor.isReady && r.plane?.found && r.mapPose) {
-      if (this.worldAnchor.create(r.plane, r.mapPose)) {
+    // Create the world on the anchored plane (the engine fixes it on the
+    // first PLANE_FOUND; the same plane is the reference of the plane-relative
+    // pose, so world and pose share one definition). Without plane tracking
+    // the first found plane is used directly.
+    const anchorPlane = r.planeAnchor ?? (r.plane?.found ? r.plane : null);
+    if (!this.worldAnchor.isReady && anchorPlane && r.mapPose) {
+      if (this.worldAnchor.create(anchorPlane, r.mapPose)) {
         const scale = this.worldAnchor.frame!.scale;
-        const extent = Math.max(0.4, Math.min(3, Math.sqrt(Math.max(r.plane.areaEstimate, 1e-6)) * scale * 1.5));
+        const area = r.plane?.areaEstimate ?? 0;
+        const extent = Math.max(0.4, Math.min(3, Math.sqrt(Math.max(area, 1e-6)) * scale * 1.5));
         this.world.setWorldReady(true);
         this.world.showPlaneGrid(extent, this.config.debug.overlay && this.config.world.showPlaneGrid);
         this.arCamera.resetSmoothing();
@@ -561,8 +624,15 @@ export class ARSession {
       this._state !== TrackingState.TRACKING_LOST &&
       this._state !== TrackingState.RELOCALIZING &&
       this._state !== TrackingState.SEARCHING_FEATURES;
+    // Camera pose → Three.js camera. Objects are not touched here (修正指示書 §11, §16).
     if (pose && tracking) this.arCamera.setPose(pose, r.timestamp / 1000);
-    this.world.updateTracking(tracking, performance.now());
+    const nowMs = performance.now();
+    this.world.updateTracking(tracking, nowMs);
+    // Objects' own animation, world space, independent of the camera (§14, §29).
+    if (this.lastWorldUpdateMs > 0) this.world.update(Math.min(0.1, (nowMs - this.lastWorldUpdateMs) / 1000));
+    this.lastWorldUpdateMs = nowMs;
+    // Pose age (§17–§18): render time − capture time of the frame the pose belongs to.
+    this.poseAgeMs = nowMs - r.timestamp;
     this.renderNow();
   }
 }

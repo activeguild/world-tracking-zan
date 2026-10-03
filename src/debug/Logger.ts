@@ -12,6 +12,12 @@ export interface LogFields {
   planeConfidence: number;
   visionFPS: number;
   visionMs: number;
+  /** Plane-relative pose quality (修正指示書 §9) and pose source, once anchored. */
+  planeInliers?: number;
+  planeErrorPx?: number;
+  poseSource?: string;
+  /** Render time − frame capture time (§17–§18). */
+  poseAgeMs?: number;
 }
 
 export class ARLogger {
@@ -30,7 +36,11 @@ export class ARLogger {
     console.log(
       `[AR]\nstate=${fields.state}\nfeatures=${fields.features}\ntracked=${fields.tracked}\n` +
         `inliers=${fields.inliers}\nplaneConfidence=${fields.planeConfidence.toFixed(2)}\n` +
-        `visionFPS=${fields.visionFPS.toFixed(0)}\nvisionMs=${fields.visionMs.toFixed(1)}`,
+        `visionFPS=${fields.visionFPS.toFixed(0)}\nvisionMs=${fields.visionMs.toFixed(1)}` +
+        (fields.poseSource !== undefined
+          ? `\nposeSource=${fields.poseSource}\nplaneInliers=${fields.planeInliers ?? 0}\nplaneErrorPx=${(fields.planeErrorPx ?? 0).toFixed(2)}`
+          : "") +
+        (fields.poseAgeMs !== undefined ? `\nposeAgeMs=${fields.poseAgeMs.toFixed(0)}` : ""),
     );
   }
 

@@ -1,12 +1,24 @@
 import * as THREE from "three";
 
 /**
- * A placed AR object (spec §29–§30). Lives at a fixed world position; it is
- * never moved to follow the camera — only the camera moves.
+ * A placed AR object (spec §29–§30, 修正指示書 §11–§15, §29).
+ *
+ * Its transform is a *world* pose (`objectWorldPose`): it changes only by
+ * user placement (`place` / `setPosition`), by its own motion (`moveBy`,
+ * `velocity`, `angularVelocityY`, `update`) — never because the camera
+ * moved. The camera pose lives in ARCamera and is never read here.
+ *
+ * The world frame is the plane frame (plane = Y 0, origin = plane center),
+ * so "plane-local" coordinates are simply world (x, z).
  */
 export class ARObject {
   readonly root = new THREE.Group();
   private _placed = false;
+
+  /** Own motion in world units per second (plane-local when y = 0). */
+  readonly velocity = new THREE.Vector3();
+  /** Own rotation about the world Y axis, radians per second. */
+  angularVelocityY = 0;
 
   constructor(
     readonly id: number,
@@ -20,12 +32,48 @@ export class ARObject {
     return this._placed;
   }
 
+  /** Current world position (copy). */
+  get position(): THREE.Vector3 {
+    return this.root.position.clone();
+  }
+
+  /** Current yaw about world Y (radians). */
+  get yaw(): number {
+    return this.root.rotation.y;
+  }
+
   /** Put the object on the plane at a world position (Y = 0), optionally facing `yawRad`. */
   place(position: ArrayLike<number>, yawRad = 0): void {
     this.root.position.set(position[0], position[1], position[2]);
     this.root.rotation.set(0, yawRad, 0);
     this.root.visible = true;
     this._placed = true;
+  }
+
+  /** Set the world position directly (object motion, not camera motion). */
+  setPosition(x: number, y: number, z: number): void {
+    this.root.position.set(x, y, z);
+  }
+
+  /** Translate in world coordinates. */
+  moveBy(dx: number, dy: number, dz: number): void {
+    this.root.position.x += dx;
+    this.root.position.y += dy;
+    this.root.position.z += dz;
+  }
+
+  setYaw(yawRad: number): void {
+    this.root.rotation.y = yawRad;
+  }
+
+  /**
+   * Advance the object's own animation by `dtSec`. Pure world-space
+   * integration; the camera is not an input.
+   */
+  update(dtSec: number): void {
+    if (!this._placed || dtSec <= 0) return;
+    if (this.velocity.lengthSq() > 0) this.root.position.addScaledVector(this.velocity, dtSec);
+    if (this.angularVelocityY !== 0) this.root.rotation.y += this.angularVelocityY * dtSec;
   }
 
   setVisible(v: boolean): void {

@@ -23,6 +23,9 @@ import "./style.css";
  *   ?sync=0           show the live video instead of the pose-synchronized frame
  *   ?smooth=0         disable pose smoothing
  *   ?dist=0.5         assumed camera→plane distance in meters (scale)
+ *   ?walk=1           the placed object walks back and forth on the plane (object motion test)
+ *   ?refine=1         re-enable landmark depth refinement (A/B against the fixed map, v2 §26)
+ *   ?planetrack=1     experimental plane-relative pose instead of landmark PnP
  */
 const params = new URLSearchParams(location.search);
 const debugLog = params.get("debug") === "1";
@@ -36,6 +39,9 @@ const fovDeg = Number(params.get("fov") ?? "") || undefined;
 const syncVideo = params.get("sync") !== "0";
 const smoothing = params.get("smooth") !== "0";
 const assumedDist = Number(params.get("dist") ?? "") || undefined;
+const walk = params.get("walk") === "1";
+const planeTracking = params.get("planetrack") === "1";
+const refineLandmarks = params.get("refine") === "1";
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -69,6 +75,8 @@ const session = new ARSession({
       ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),
       syncVideoToPose: syncVideo,
     },
+    planeTracking: { enabled: planeTracking },
+    landmarks: { enableLandmarkDepthRefinement: refineLandmarks },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
       ...(smoothing
@@ -119,8 +127,23 @@ app.addEventListener("pointerup", async (ev) => {
   } else {
     placed = session.placeCube(hit);
   }
+  if (walk) startWalking(placed);
   messageEl.textContent = "";
 });
+
+// Object motion test (修正指示書 Test D / E): the object walks along world X
+// at 5 cm/s and turns around every 4 s. Its position is integrated in world
+// space by ARWorld.update(); the camera pose plays no part in it.
+let walkTimer = 0;
+function startWalking(obj: ARObject): void {
+  if (walkTimer) return;
+  obj.velocity.set(0.05, 0, 0);
+  obj.setYaw(Math.PI / 2);
+  walkTimer = window.setInterval(() => {
+    obj.velocity.x = -obj.velocity.x;
+    obj.setYaw(obj.velocity.x > 0 ? Math.PI / 2 : -Math.PI / 2);
+  }, 4000);
+}
 
 session.on("frame", (r) => {
   if (r.quality.lowFeature && session.state !== TrackingState.TRACKING) {
@@ -210,14 +233,19 @@ function refreshHud(): void {
           landmarks: s.mapPose.landmarkCount,
           pnpInliers: s.mapPose.inlierCount,
           reprojPx: s.mapPose.meanReprojectionErrorPx,
-          translation: s.mapPose.translation,
+          cameraCenter: s.mapPose.cameraCenter,
           framesSinceTracked: s.mapPose.framesSinceTracked,
+          deltaTranslationM: s.worldReady ? s.mapPose.deltaTranslation * s.worldScale : NaN,
+          deltaRotationDeg: s.mapPose.deltaRotationDeg,
+          translationHeld: s.mapPose.translationHeld,
+          source: s.mapPose.source,
         }
       : null,
     plane: s.plane
       ? {
           normal: s.plane.normal,
           inliers: s.plane.inlierCount,
+          rms: s.plane.rmsResidual,
           horizontalness: s.plane.horizontalness,
           horizontal: s.plane.horizontal,
           stableFrames: s.plane.stableFrames,
@@ -229,6 +257,19 @@ function refreshHud(): void {
     gravityAvailable: s.gravityAvailable,
     planeSearch: s.planeSearch,
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
+    planePose: s.planePose
+      ? {
+          tracked: s.planePose.tracked,
+          inliers: s.planePose.inlierCount,
+          candidates: s.planePose.candidateCount,
+          ratio: s.planePose.inlierRatio,
+          errorPx: s.planePose.reprojectionErrorPx,
+          confidence: s.planePose.confidence,
+        }
+      : null,
+    cameraWorld: s.cameraWorldPosition,
+    objects: s.objects,
+    timing: s.frameTimestampMs > 0 ? { frameMs: s.frameTimestampMs, poseMs: s.poseTimestampMs, ageMs: s.poseAgeMs, stale: s.poseStale } : null,
     reloc: s.relocalization
       ? {
           keyframes: s.relocalization.keyframes,

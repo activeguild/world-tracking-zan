@@ -58,7 +58,21 @@ interface Stats {
     landmarkCount: number;
     mapFrameId: number;
     framesSinceTracked: number;
+    source: string;
   } | null;
+  planePose: {
+    tracked: boolean;
+    inlierCount: number;
+    candidateCount: number;
+    inlierRatio: number;
+    reprojectionErrorPx: number;
+    confidence: number;
+  } | null;
+  planeAnchored: boolean;
+  poseAgeMs: number;
+  poseStale: boolean;
+  cameraWorldPosition: number[] | null;
+  objects: { id: number; position: number[]; yaw: number }[];
   plane: {
     normal: number[];
     inlierCount: number;
@@ -194,9 +208,40 @@ describe("Phase 1 browser smoke test", () => {
         worldScale: st.worldScale,
         threeCanvas: canvas.width > 0 && canvas.height > 0,
         cameraY: s.threeCamera.position.y,
+        objects: st.objects,
+        poseAgeMs: st.poseAgeMs,
+        planeAnchored: st.planeAnchored,
       };
-    })) as { hit: { x: number; y: number; z: number; distance: number } | null; placed?: number; state?: string; worldScale?: number; threeCanvas?: boolean; cameraY?: number };
+    })) as {
+      hit: { x: number; y: number; z: number; distance: number } | null;
+      placed?: number;
+      state?: string;
+      worldScale?: number;
+      threeCanvas?: boolean;
+      cameraY?: number;
+      objects?: { id: number; position: number[] }[];
+      poseAgeMs?: number;
+      planeAnchored?: boolean;
+    };
     console.log("[browser-smoke] placement " + JSON.stringify(placement));
+    // 修正指示書 §25–§26: while the camera keeps moving, the object's world
+    // position must not change (Case A check) — sample it over a second.
+    const objectTrace = (await page.evaluate(async () => {
+      const out: { pos: number[]; camera: number[] | null; source: string | null; planeIn: number | null; age: number }[] = [];
+      for (let i = 0; i < 10; i++) {
+        const st = window.__ar.stats();
+        out.push({
+          pos: st.objects[0]?.position ?? [],
+          camera: st.cameraWorldPosition,
+          source: st.mapPose?.source ?? null,
+          planeIn: st.planePose?.inlierCount ?? null,
+          age: st.poseAgeMs,
+        });
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return out;
+    })) as { pos: number[]; camera: number[] | null; source: string | null; planeIn: number | null; age: number }[];
+    console.log("[browser-smoke] object trace " + JSON.stringify(objectTrace));
     await context.close();
 
     const avg = (f: (s: Stats) => number) => samples.reduce((a, s) => a + f(s), 0) / samples.length;
@@ -307,5 +352,24 @@ describe("Phase 1 browser smoke test", () => {
     // The synthetic camera looks straight down at the plane 0.5 m away.
     expect(placement.cameraY).toBeGreaterThan(0.3);
     expect(placement.cameraY).toBeLessThan(0.7);
+
+    // 修正指示書 v2: fixed map + PnP is the pose source (the experimental plane
+    // estimator is off by default), the object's world position is constant
+    // while the camera moves, pose age is bounded.
+    expect(placement.planeAnchored).toBe(false);
+    expect(placement.objects?.length).toBe(1);
+    expect(placement.poseAgeMs).toBeGreaterThanOrEqual(0);
+    expect(placement.poseAgeMs).toBeLessThan(1000);
+    const first = objectTrace[0].pos;
+    expect(first.length).toBe(3);
+    for (const s of objectTrace) {
+      expect(s.pos, "object world position must not change with camera motion").toEqual(first);
+    }
+    const cameraMoved = objectTrace.some(
+      (s) => s.camera && objectTrace[0].camera && Math.hypot(s.camera[0] - objectTrace[0].camera![0], s.camera[2] - objectTrace[0].camera![2]) > 1e-4,
+    );
+    expect(cameraMoved, "the camera pose should change over the trace").toBe(true);
+    expect(objectTrace.filter((s) => s.source === "map").length).toBeGreaterThanOrEqual(objectTrace.length / 2);
+    for (const s of objectTrace) expect(["map", "propagated"]).toContain(s.source);
   });
 });

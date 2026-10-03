@@ -101,6 +101,23 @@ export class ARWorld {
   }
 
   /**
+   * Advance the objects' own animations (修正指示書 §14, §29). Called once per
+   * rendered frame with the elapsed seconds; the camera pose is not involved.
+   */
+  update(dtSec: number): void {
+    for (const o of this.objects) o.update(dtSec);
+  }
+
+  /**
+   * Plane-local → world (修正指示書 §15). The world frame *is* the plane frame
+   * (origin = plane center, plane = Y 0), so the transform is the identity:
+   * plane-local (x, z) is world (x, 0, z).
+   */
+  planeToWorld(x: number, z: number): [number, number, number] {
+    return [x, 0, z];
+  }
+
+  /**
    * Tracking status update (spec §33): keep objects at their last pose for
    * `holdPoseOnLostMs`, then hide them until tracking resumes.
    */

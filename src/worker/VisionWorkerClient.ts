@@ -2,7 +2,15 @@ import type { ARConfig } from "../ar/ARConfig";
 import type { TrackingState } from "../ar/ARState";
 import type { GrayFrame } from "../camera/CameraFrame";
 import type { TrackingQuality } from "../vision/TrackingQuality";
-import type { MapPoseOutput, PlaneOutput, PlaneSearchOutput, PoseOutput, RelocalizationOutput } from "../vision/types";
+import type {
+  MapPoseOutput,
+  PlaneAnchorOutput,
+  PlaneOutput,
+  PlanePoseOutput,
+  PlaneSearchOutput,
+  PoseOutput,
+  RelocalizationOutput,
+} from "../vision/types";
 import { VisionEngine } from "../vision/VisionEngine";
 import type { EngineTiming, WorkerRequest, WorkerResponse } from "./protocol";
 
@@ -16,6 +24,8 @@ export interface VisionResult {
   mapPose: MapPoseOutput | null;
   plane: PlaneOutput | null;
   planeSearch: PlaneSearchOutput | null;
+  planeAnchor: PlaneAnchorOutput | null;
+  planePose: PlanePoseOutput | null;
   relocalization: RelocalizationOutput;
   landmarks: Float32Array;
   landmarkCount: number;
@@ -87,6 +97,8 @@ export class VisionWorkerClient implements VisionBackend {
               mapPose: msg.mapPose,
               plane: msg.plane,
               planeSearch: msg.planeSearch,
+              planeAnchor: msg.planeAnchor,
+              planePose: msg.planePose,
               relocalization: msg.relocalization,
               landmarks: new Float32Array(msg.landmarks),
               landmarkCount: msg.landmarkCount,
@@ -177,6 +189,8 @@ export class MainThreadVisionBackend implements VisionBackend {
         mapPose: out.mapPose,
         plane: out.plane,
         planeSearch: out.planeSearch,
+        planeAnchor: out.planeAnchor,
+        planePose: out.planePose,
         relocalization: out.relocalization,
         landmarks: out.landmarks,
         landmarkCount: out.landmarkCount,

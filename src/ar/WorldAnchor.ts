@@ -10,7 +10,14 @@ import {
 import type { RigidTransform } from "../math/Pose";
 import { intersectRayPlane, pixelRay, transformRay } from "../math/Ray";
 import { transpose3 } from "../math/Decomposition";
-import type { MapPoseOutput, PlaneOutput } from "../vision/types";
+import type { MapPoseOutput } from "../vision/types";
+
+/** What the anchor needs from a plane: n·X + d = 0 in the map frame plus a point on it. */
+export interface PlaneLike {
+  normal: ArrayLike<number>;
+  d: number;
+  center: ArrayLike<number>;
+}
 
 /**
  * World anchor (spec §25–§28): fixes the world frame on the first found
@@ -67,7 +74,7 @@ export class WorldAnchor {
    * Create the world from a found plane and the current map-frame camera
    * pose. No-op when already created for this map.
    */
-  create(plane: PlaneOutput, mapPose: MapPoseOutput): boolean {
+  create(plane: PlaneLike, mapPose: MapPoseOutput): boolean {
     if (this.world && this.mapFrameId === mapPose.mapFrameId) return false;
     const cam = toRigid(mapPose);
     // Camera center in map and its distance to the plane (map units).

@@ -164,6 +164,13 @@ export interface LandmarkConfig {
    * (depth refinement as the baseline grows).
    */
   refineParallaxGrowth: number;
+  /**
+   * Re-triangulate landmarks as the baseline grows (修正指示書 v2 §3). Off by
+   * default: the map is the coordinate system the world is anchored to, and
+   * rewriting landmark positions from the current pose feeds pose error back
+   * into the map (pose → landmark → pose). `?refine=1` in the demo for A/B.
+   */
+  enableLandmarkDepthRefinement: boolean;
 }
 
 /** Plane detection (spec §21–§24, §51, Phase 3). */
@@ -274,6 +281,42 @@ export interface DebugConfig {
   logIntervalMs: number;
   /** Draw features / motion vectors / HUD. */
   overlay: boolean;
+  /** Pose age (render time − frame capture time) above which the HUD shows POSE STALE (ms). */
+  poseStaleMs: number;
+}
+
+/**
+ * Plane-anchored camera tracking (修正指示書 §5–§9): once the plane is fixed,
+ * the pose is solved against features lifted onto that plane instead of
+ * triangulated landmark depths.
+ */
+export interface PlaneTrackingConfig {
+  /**
+   * Use the plane-relative pose as the main pose once a plane is anchored.
+   * Experimental alternative to the landmark PnP; off by default.
+   */
+  enabled: boolean;
+  /** Plane inliers required to accept the plane-relative pose (else fall back to the map pose). */
+  minInliers: number;
+  /** Inlier count that yields full confidence. */
+  goodInliers: number;
+  /** Huber threshold of the plane PnP (px). */
+  pnpHuberPx: number;
+  /** Inlier gate of the plane PnP (px). */
+  pnpInlierPx: number;
+  pnpMaxIterations: number;
+  /** Consecutive inlier frames before a lifted feature is trusted for the solve. */
+  probationFrames: number;
+  /** Consecutive outlier frames after which a feature is declared off-plane. */
+  maxOutlierStreak: number;
+  /** Lift new features only in frames whose pose had at least this many inliers … */
+  liftMinInliers: number;
+  /** … and at most this mean reprojection error (px). */
+  liftMaxMeanErrorPx: number;
+  /** Rays closer than this angle to the plane are not lifted (unstable intersection). */
+  minRayAngleDeg: number;
+  /** Do not lift points farther than this × the anchoring camera–plane distance. */
+  maxLiftDistanceRatio: number;
 }
 
 export interface ARConfig {
@@ -284,6 +327,7 @@ export interface ARConfig {
   pose: PoseConfig;
   landmarks: LandmarkConfig;
   plane: PlaneConfig;
+  planeTracking: PlaneTrackingConfig;
   relocalization: RelocalizationConfig;
   world: WorldConfig;
   state: StateConfig;
@@ -364,6 +408,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxLandmarkAgeFrames: 150,
     lostResetFrames: 150,
     refineParallaxGrowth: 1.3,
+    enableLandmarkDepthRefinement: false,
   },
   relocalization: {
     maxKeyframes: 8,
@@ -410,6 +455,22 @@ export const DEFAULT_CONFIG: ARConfig = {
     cubeSize: 0.1,
     showPlaneGrid: true,
   },
+  planeTracking: {
+    // Experimental (修正指示書 v2 §30 keeps PnP + fixed map as the main path);
+    // `?planetrack=1` in the demo for comparison.
+    enabled: false,
+    minInliers: 12,
+    goodInliers: 40,
+    pnpHuberPx: 3,
+    pnpInlierPx: 5,
+    pnpMaxIterations: 10,
+    probationFrames: 3,
+    maxOutlierStreak: 3,
+    liftMinInliers: 20,
+    liftMaxMeanErrorPx: 1.5,
+    minRayAngleDeg: 5,
+    maxLiftDistanceRatio: 4,
+  },
   state: {
     minTrackedForTracking: 40,
     lostBelow: 20,
@@ -420,6 +481,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     log: false,
     logIntervalMs: 1000,
     overlay: true,
+    poseStaleMs: 100,
   },
   useWorker: true,
 };
@@ -440,6 +502,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     pose: { ...base.pose, ...overrides.pose },
     landmarks: { ...base.landmarks, ...overrides.landmarks },
     plane: { ...base.plane, ...overrides.plane },
+    planeTracking: { ...base.planeTracking, ...overrides.planeTracking },
     relocalization: { ...base.relocalization, ...overrides.relocalization },
     world: {
       ...base.world,
@@ -462,6 +525,7 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     pose: { ...c.pose },
     landmarks: { ...c.landmarks },
     plane: { ...c.plane },
+    planeTracking: { ...c.planeTracking },
     relocalization: { ...c.relocalization },
     world: { ...c.world, positionSmoothing: { ...c.world.positionSmoothing }, rotationSmoothing: { ...c.world.rotationSmoothing } },
     state: { ...c.state },
