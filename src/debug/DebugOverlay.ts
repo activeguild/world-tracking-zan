@@ -104,7 +104,7 @@ export class DebugOverlay {
           ]
         : [
             s.planeSearch
-              ? `Plane       — searching: ${s.planeSearch.points} pts, best ${s.planeSearch.bestInliers}/${s.planeSearch.minInliers} in, thr ${s.planeSearch.threshold.toFixed(3)}${s.planeSearch.horizontalness ? `, hz ${s.planeSearch.horizontalness.toFixed(2)}` : ""}`
+              ? `Plane       ${s.world?.ready ? "fixed (world)" : "—"} search: ${s.planeSearch.points} pts, best ${s.planeSearch.bestInliers}/${s.planeSearch.minInliers}, thr ${s.planeSearch.threshold.toFixed(3)}`
               : `Plane       —`,
           ]),
       `Gravity     ${s.gravityAvailable ? "yes" : "no (fallback up = −Y)"}`,

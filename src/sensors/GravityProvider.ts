@@ -23,7 +23,11 @@ export class GravityProvider {
     }
   };
 
-  constructor(private readonly alpha = 0.2) {}
+  /**
+   * @param alpha EMA weight per DeviceMotion sample (~60 Hz). 0.06 ≈ 0.3 s
+   *        time constant: hand accelerations average out, slow tilts follow.
+   */
+  constructor(private readonly alpha = 0.06) {}
 
   static isSupported(): boolean {
     return typeof window !== "undefined" && "DeviceMotionEvent" in window;

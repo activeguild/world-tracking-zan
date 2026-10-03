@@ -207,6 +207,17 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 実機チューニング（iPhone Safari、2026-10-03）
+
+実機の HUD スクリーンショットを元に調整した内容。合成データでは見えなかった実データ特有の問題への対処。
+
+- **ビルド識別**: HUD 最下行に `Build phase5 <commit> <日時>`（`vite.config.ts` の `define`）。古いキャッシュの判別用
+- **フレーム間外れ値除去**: Homography ゲートを 3 → 6 px にし、2 フレーム連続で外れた追跡点のみ削除。実際の部屋は平面ではないため、背景の正しい追跡点が毎フレーム約 8% 削られ、Landmark 化前に消えていた（63 lm → 134 lm、PnP inlier 0 → 127）
+- **Landmark**: 初期化視差 20 → 30 px、PnP ゲート 4 → 6 px、三角測量誤差 3 → 4 px、必要視差 8 → 6 px、最低 PnP inlier 15 → 12。視差が 1.3 倍に増えるたびに再三角測量して奥行きを精錬。PnP 外れ値が続いた場合は Landmark を消さず追跡点との紐付けだけを外す（原因の多くは LK ドリフト）。三角測量アンカーは姿勢が確かなフレームでのみ設定
+- **平面**: 重力あり → 法線を重力に固定して高さだけをロバスト推定（最密クラスタ）、inlier から最小二乗で法線を微調整（重力から 10° 以内）、inlier が 2 次元に広がることを要求（壁の水平スライスを除外）。閾値は距離の 2 → 5%、最低 inlier 30 → 20、使用 Landmark は PnP で確認済み（観測 ≥ 3）。重力なしは従来の RANSAC + 水平判定。重力 EMA を 0.2 → 0.06（手ぶれ加速度の影響低減）
+- **再局所化**: 採用条件を inlier 25 以上・誤差 1.5 px 以下・粗相関 0.45 以上に厳格化、候補 2 枚を 2 フレームに 1 回（Vision 30 fps 維持）
+- **結果**: Vision 30 fps（18 ms）、特徴点 263 全追跡、Landmark 134 / PnP inlier 127、再局所化なしで `AR_ACTIVE` 到達（Cube 配置）。スケールは机想定 0.5 m のため床では小さめに見える（`world.assumedPlaneDistanceMeters`）
+
 ### Phase 5 — 実装済み（承認待ち）
 
 - `src/vision/Keyframe.ts`: Keyframe（姿勢、画像ピラミッドのコピー、粗画像、Landmark 観測）

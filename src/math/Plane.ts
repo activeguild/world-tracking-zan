@@ -212,6 +212,12 @@ export function fitHorizontalPlane(
   up: ArrayLike<number>,
   threshold: number,
   minInliers: number,
+  /**
+   * After the height search, refine the normal by least squares on the
+   * inliers and accept it when within this many degrees of `up` (the
+   * gravity reading is noisy while the phone moves). 0 disables.
+   */
+  maxTiltDeg = 10,
 ): PlaneRansacResult {
   const inliers = new Uint8Array(n);
   const empty = { plane: null, inliers, inlierCount: 0, rmsResidual: 0, iterations: 0, bestInlierCount: 0 };
@@ -259,20 +265,62 @@ export function fitHorizontalPlane(
   if (count < minInliers) return { ...empty, bestInlierCount: Math.max(bestCount, count) };
 
   // Plane: up · X − h0 = 0  →  normal = up, d = −h0. Centroid of inliers.
-  let cx = 0, cy = 0, cz = 0, err = 0;
+  let cx = 0, cy = 0, cz = 0;
   for (let i = 0; i < n; i++) {
     if (!inliers[i]) continue;
     cx += points[i * 3];
     cy += points[i * 3 + 1];
     cz += points[i * 3 + 2];
-    const e = heights[i] - h0;
-    err += e * e;
   }
-  const plane: PlaneModel = {
+  let plane: PlaneModel = {
     normal: new Float64Array([ux, uy, uz]),
     d: -h0,
     center: new Float64Array([cx / count, cy / count, cz / count]),
   };
+
+  // Optional normal refinement: a slightly wrong gravity reading tilts the
+  // height axis and smears a flat floor into a band. Fit the inliers by
+  // least squares and, if the result stays close to gravity, re-classify
+  // against the refined plane (twice).
+  if (maxTiltDeg > 0) {
+    const cosMax = Math.cos((maxTiltDeg * Math.PI) / 180);
+    for (let pass = 0; pass < 2; pass++) {
+      const idx = new Int32Array(count);
+      let k = 0;
+      for (let i = 0; i < n; i++) if (inliers[i]) idx[k++] = i;
+      const refit = fitPlaneLeastSquares(points, idx, count);
+      if (!refit) break;
+      const c = Math.abs(refit.normal[0] * ux + refit.normal[1] * uy + refit.normal[2] * uz);
+      if (c < cosMax) break;
+      // Orient like `up`.
+      if (refit.normal[0] * ux + refit.normal[1] * uy + refit.normal[2] * uz < 0) {
+        refit.normal[0] = -refit.normal[0];
+        refit.normal[1] = -refit.normal[1];
+        refit.normal[2] = -refit.normal[2];
+        refit.d = -refit.d;
+      }
+      let c2 = 0;
+      for (let i = 0; i < n; i++) {
+        const inl = Math.abs(planeDistance(refit, points[i * 3], points[i * 3 + 1], points[i * 3 + 2])) < threshold ? 1 : 0;
+        inliers[i] = inl;
+        c2 += inl;
+      }
+      if (c2 < minInliers) {
+        // Refit lost the support; restore the gravity plane's classification.
+        for (let i = 0; i < n; i++) inliers[i] = Math.abs(heights[i] - h0) < threshold ? 1 : 0;
+        break;
+      }
+      plane = refit;
+      count = c2;
+    }
+  }
+
+  let err = 0;
+  for (let i = 0; i < n; i++) {
+    if (!inliers[i]) continue;
+    const e = planeDistance(plane, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]);
+    err += e * e;
+  }
   return { plane, inliers, inlierCount: count, rmsResidual: Math.sqrt(err / count), iterations: 1, bestInlierCount: Math.max(bestCount, count) };
 }
 
