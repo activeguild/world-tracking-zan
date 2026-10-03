@@ -50,6 +50,8 @@ export interface HudStats {
   gravityAvailable?: boolean;
   world?: { ready: boolean; scale: number; placed: number } | null;
   reloc?: { keyframes: number; attempt: string; inliers: number; successes: number } | null;
+  /** Build identifier (phase + commit + time) so testers can confirm the deployed version. */
+  build?: string;
 }
 
 function fmt(deg: number): string {
@@ -105,6 +107,7 @@ export class DebugOverlay {
       `Keyframes   ${s.reloc ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${s.reloc.attempt === "success" ? ` (${s.reloc.inliers})` : ""}  ok×${s.reloc.successes}` : "—"}`,
       `FAST thr    ${s.fastThreshold}`,
       `Proc size   ${s.processingSize}  [${s.backend}]`,
+      ...(s.build ? [`Build       ${s.build}`] : []),
     ];
     if (s.message) rows.push("", s.message);
     this.setLines(rows);

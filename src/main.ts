@@ -46,6 +46,7 @@ const messageEl = document.getElementById("message") as HTMLElement;
 
 const hud = new DebugOverlay(app);
 hud.visible = showHud;
+console.log(`[AR] build ${typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev"}`);
 
 const session = new ARSession({
   video,
@@ -211,6 +212,7 @@ function refreshHud(): void {
           successes: s.relocalization.successCount,
         }
       : null,
+    build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",
   });
   requestAnimationFrame(refreshHud);
 }
