@@ -28,6 +28,15 @@ export interface Landmark {
   anchorY: number;
   /** Ray parallax angle (radians) of the last triangulation. */
   parallax: number;
+  /**
+   * Last known image position (processing pixels) and how many frames ago it
+   * was observed directly (-1 = unknown). While the landmark has no track the
+   * position is carried along by the frame-to-frame image motion so that it
+   * can be re-linked to a re-detected corner without a camera pose.
+   */
+  lastX: number;
+  lastY: number;
+  imageAge: number;
 }
 
 export class LandmarkMap {
@@ -52,6 +61,9 @@ export class LandmarkMap {
       anchorX: 0,
       anchorY: 0,
       parallax: 0,
+      lastX: 0,
+      lastY: 0,
+      imageAge: -1,
     };
     this.landmarks.set(lm.id, lm);
     return lm;

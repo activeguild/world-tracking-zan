@@ -1,6 +1,6 @@
 import type { LandmarkConfig } from "../ar/ARConfig";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
-import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
+import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
 import { refinePosePnP } from "../math/PnP";
 import { composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
 import {
@@ -284,40 +284,43 @@ export class MapTracker {
     k: CameraIntrinsics,
     rotationPrior: Mat3 | null,
     external: ExternalPoseCandidate | null = null,
+    /** Frame-to-frame pixel homography (prev → cur) from the outlier rejection, when available. */
+    imageMotion: Mat3 | null = null,
   ): MapTrackingResult {
     const cfg = this.config;
     const f = (k.fx + k.fy) / 2;
     const prevCenter = this.cameraCenter();
     const prevRotation: Mat3 = Float64Array.from(this._pose.rotation);
 
-    // Drop landmark links of tracks that died (track list only has survivors).
-    const alive = new Set<number>();
-    for (const t of tracks) if (t.landmarkId >= 0) alive.add(t.landmarkId);
-    for (const lm of this.map.values()) if (!alive.has(lm.trackId) && lm.trackId >= 0) lm.trackId = -1;
-
-    // ---- PnP ----
-    let n = 0;
-    const obsTracks: Track[] = [];
-    for (const t of tracks) {
-      if (t.landmarkId < 0) continue;
-      const lm = this.map.get(t.landmarkId);
-      if (!lm) {
-        t.landmarkId = -1;
+    // Drop landmark links of tracks that died (track list only has survivors)
+    // and carry every landmark's image position forward: linked ones from
+    // their track, unlinked ones through the frame-to-frame image motion
+    // (pose-independent prediction of where the corner is now).
+    const linkedPos = new Map<number, Track>();
+    for (const t of tracks) if (t.landmarkId >= 0) linkedPos.set(t.landmarkId, t);
+    const warped = new Float64Array(2);
+    for (const lm of this.map.values()) {
+      const t = linkedPos.get(lm.id);
+      if (t) {
+        lm.lastX = t.x;
+        lm.lastY = t.y;
+        lm.imageAge = 0;
         continue;
       }
-      obsTracks.push(t);
-      n++;
+      if (lm.trackId >= 0) lm.trackId = -1;
+      if (lm.imageAge < 0) continue;
+      if (imageMotion && mat3TransformPoint(imageMotion, lm.lastX, lm.lastY, warped)) {
+        lm.lastX = warped[0];
+        lm.lastY = warped[1];
+      }
+      lm.imageAge++;
+      if (lm.imageAge > cfg.reassociateMaxLostFrames || lm.lastX < 0 || lm.lastY < 0 || lm.lastX >= k.width || lm.lastY >= k.height) {
+        lm.imageAge = -1;
+      }
     }
-    this.ensure(n);
-    for (let i = 0; i < n; i++) {
-      const t = obsTracks[i];
-      const lm = this.map.get(t.landmarkId)!;
-      this.pts3[i * 3] = lm.position[0];
-      this.pts3[i * 3 + 1] = lm.position[1];
-      this.pts3[i * 3 + 2] = lm.position[2];
-      this.obsX[i] = (t.x - k.cx) / k.fx;
-      this.obsY[i] = (t.y - k.cy) / k.fy;
-    }
+
+    // ---- PnP observations ----
+    let { n, obsTracks } = this.collectObservations(tracks, k);
 
     // ---- Pose candidates → validation → canonical pose (v3 §1–§7) ----
     //
@@ -343,8 +346,11 @@ export class MapTracker {
     // Candidate 1: landmark PnP (mature landmarks only when enough of them, v2 §27).
     let mapCandidate: PoseCandidate | null = null;
     let mapReject: string | null = null;
-    let mask: Uint8Array | null = null;
-    if (n >= 6) {
+    let guidedFrom = 0;
+    let guidedLinks = 0;
+    // Solve PnP on the current observations (mature landmarks only when
+    // enough of them, v2 §27) from a prior.
+    const solve = (from: RigidTransform) => {
       let mature = 0;
       this.ensureMask(n);
       for (let i = 0; i < n; i++) {
@@ -352,9 +358,9 @@ export class MapTracker {
         this.maskBuf[i] = m;
         mature += m;
       }
-      if (mature >= cfg.minMaturePnPPoints) mask = this.maskBuf;
-      const res = refinePosePnP(
-        prior,
+      const mask = mature >= cfg.minMaturePnPPoints ? this.maskBuf : null;
+      return refinePosePnP(
+        from,
         this.pts3,
         this.obsX,
         this.obsY,
@@ -362,8 +368,35 @@ export class MapTracker {
         { huber: cfg.pnpHuberPx / f, inlierThreshold: cfg.pnpInlierPx / f, maxIterations: cfg.pnpMaxIterations, epsilon: 1e-6 },
         mask,
       );
+    };
+    // While lost a handful of re-associated links is enough to seed a solve
+    // (the recovery threshold below still verifies the result).
+    const minObservations = this._framesSinceTracked > 0 ? cfg.recoverySeedInliers : 6;
+    if (n >= minObservations) {
+      let res = solve(prior);
       // Coming back from a lost frame needs stronger evidence than staying tracked.
       const minInliers = this._framesSinceTracked > 0 ? cfg.minRecoveryInliers : cfg.minPnPInliers;
+      if (
+        res.inlierCount < minInliers &&
+        this._framesSinceTracked > 0 &&
+        res.inlierCount >= cfg.recoverySeedInliers &&
+        res.meanError * f <= cfg.recoverySeedErrorPx
+      ) {
+        // Guided recovery: a handful of consistent links already pin the pose
+        // roughly. Project every unlinked landmark with that seed pose,
+        // re-associate within a wider radius, and solve again on the
+        // enlarged set — the same frame instead of waiting for the links to
+        // trickle in (the held pose was too far off for the tight radius).
+        guidedFrom = res.inlierCount;
+        for (let pass = 0; pass < 2; pass++) {
+          const links = this.reassociateWith(tracks, k, cfg.recoveryReassociateRadiusPx, res.pose);
+          if (links === 0) break;
+          guidedLinks += links;
+          ({ n, obsTracks } = this.collectObservations(tracks, k));
+          res = solve(res.pose);
+          if (res.inlierCount >= minInliers) break;
+        }
+      }
       if (res.inlierCount >= minInliers) {
         mapCandidate = { pose: res.pose, source: "map", inlierCount: res.inlierCount, reprojectionErrorPx: res.meanError * f };
         // Jump gate (v2 §8): a weakly supported solve that moves the camera
@@ -376,10 +409,10 @@ export class MapTracker {
           }
         }
       } else {
-        mapReject = `map inliers ${res.inlierCount} < ${minInliers}`;
+        mapReject = `map inliers ${res.inlierCount} < ${minInliers}${guidedFrom ? ` (guided from ${guidedFrom})` : ""}`;
       }
     } else if (n > 0) {
-      mapReject = `map observations ${n} < 6`;
+      mapReject = `map observations ${n} < ${minObservations}`;
     }
 
     // Candidate 2: plane-relative PnP (external). Same gate, plus agreement
@@ -578,9 +611,13 @@ export class MapTracker {
     // Landmarks whose tracks died are projected with the canonical pose (or,
     // for a short loss, the propagated pose) and linked to replenished
     // tracks sitting on the same corners; the next PnP verifies the links.
-    let reassociated = 0;
-    if (tracked || this._framesSinceTracked <= cfg.reassociateMaxLostFrames) {
-      reassociated = this.reassociate(tracks, k, cfg.reassociateRadiusPx);
+    let reassociated = guidedLinks;
+    if (tracked) {
+      reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, this._pose);
+    } else if (this._framesSinceTracked <= cfg.reassociateMaxLostFrames) {
+      // Lost: the image-motion-propagated positions are far more reliable
+      // than a projection through a held / predicted pose.
+      reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, imageMotion ? null : this._pose);
     }
     // Pruning by age counts only tracked frames: a loss must not erode the map.
     if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
@@ -633,7 +670,12 @@ export class MapTracker {
    * `radiusPx` of their projection under the current pose. Returns the
    * number of links made.
    */
-  private reassociate(tracks: Track[], k: CameraIntrinsics, radiusPx: number): number {
+  /**
+   * Link unlinked mature landmarks to unlinked tracks within `radiusPx` of
+   * their predicted image position: the projection under `pose`, or, with
+   * `pose` null, the position carried along by the image motion.
+   */
+  private reassociateWith(tracks: Track[], k: CameraIntrinsics, radiusPx: number, pose: RigidTransform | null): number {
     const cfg = this.config;
     // Spatial hash of unlinked tracks (cell = radius).
     const cell = Math.max(1, radiusPx);
@@ -651,17 +693,25 @@ export class MapTracker {
       unlinked++;
     }
     if (unlinked === 0) return 0;
-    const r = this._pose.rotation;
-    const tt = this._pose.translation;
     const r2 = radiusPx * radiusPx;
     let linked = 0;
     for (const lm of this.map.values()) {
       if (lm.trackId >= 0 || lm.observations < cfg.minObservationsForPose) continue;
-      const p = lm.position;
-      const z = r[6] * p[0] + r[7] * p[1] + r[8] * p[2] + tt[2];
-      if (z <= 1e-6) continue;
-      const u = ((r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + tt[0]) / z) * k.fx + k.cx;
-      const v = ((r[3] * p[0] + r[4] * p[1] + r[5] * p[2] + tt[1]) / z) * k.fy + k.cy;
+      let u: number;
+      let v: number;
+      if (pose) {
+        const r = pose.rotation;
+        const tt = pose.translation;
+        const p = lm.position;
+        const z = r[6] * p[0] + r[7] * p[1] + r[8] * p[2] + tt[2];
+        if (z <= 1e-6) continue;
+        u = ((r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + tt[0]) / z) * k.fx + k.cx;
+        v = ((r[3] * p[0] + r[4] * p[1] + r[5] * p[2] + tt[1]) / z) * k.fy + k.cy;
+      } else {
+        if (lm.imageAge < 0) continue;
+        u = lm.lastX;
+        v = lm.lastY;
+      }
       if (u < 0 || v < 0 || u >= k.width || v >= k.height) continue;
       const cx = Math.floor(u / cell);
       const cy = Math.floor(v / cell);
@@ -687,10 +737,39 @@ export class MapTracker {
         best.anchorPose = null;
         lm.trackId = best.id;
         lm.outlierCount = 0;
+        lm.lastX = best.x;
+        lm.lastY = best.y;
+        lm.imageAge = 0;
         linked++;
       }
     }
     return linked;
+  }
+
+  /** Fill the scratch arrays with the landmark observations of the linked tracks. */
+  private collectObservations(tracks: Track[], k: CameraIntrinsics): { n: number; obsTracks: Track[] } {
+    const obsTracks: Track[] = [];
+    for (const t of tracks) {
+      if (t.landmarkId < 0) continue;
+      const lm = this.map.get(t.landmarkId);
+      if (!lm) {
+        t.landmarkId = -1;
+        continue;
+      }
+      obsTracks.push(t);
+    }
+    const n = obsTracks.length;
+    this.ensure(n);
+    for (let i = 0; i < n; i++) {
+      const t = obsTracks[i];
+      const lm = this.map.get(t.landmarkId)!;
+      this.pts3[i * 3] = lm.position[0];
+      this.pts3[i * 3 + 1] = lm.position[1];
+      this.pts3[i * 3 + 2] = lm.position[2];
+      this.obsX[i] = (t.x - k.cx) / k.fx;
+      this.obsY[i] = (t.y - k.cy) / k.fy;
+    }
+    return { n, obsTracks };
   }
 
   /** Inlier classification of the first `n` scratch observations under `pose`. */

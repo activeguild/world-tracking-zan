@@ -226,6 +226,16 @@ export interface LandmarkConfig {
    */
   minRecoveryInliers: number;
   /**
+   * Guided recovery: when lost and the PnP on the few re-associated links has
+   * at least this many inliers with at most recoverySeedErrorPx mean error,
+   * every unlinked landmark is projected with that seed pose and
+   * re-associated within recoveryReassociateRadiusPx, then PnP runs again
+   * on the enlarged set in the same frame.
+   */
+  recoverySeedInliers: number;
+  recoverySeedErrorPx: number;
+  recoveryReassociateRadiusPx: number;
+  /**
    * While lost, predict the camera center with the last tracked velocity for
    * this many frames (then hold it). The prediction is what lets landmarks
    * be re-associated during a short burst of fast motion.
@@ -506,6 +516,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     reassociateRadiusPx: 2.5,
     reassociateMaxLostFrames: 90,
     minRecoveryInliers: 24,
+    recoverySeedInliers: 4,
+    recoverySeedErrorPx: 2.0,
+    recoveryReassociateRadiusPx: 4,
     velocityPropagationFrames: 10,
   },
   relocalization: {
@@ -526,7 +539,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxMeanErrorPx: 1.5,
     startAfterLostFrames: 1,
     minAttemptsBeforeReset: 10,
-    attemptEveryNFrames: 2,
+    // Every 3rd frame: relocalization attempts dominated the lost-frame cost
+    // (67 ms on iPhone); guided re-association now carries the quick recoveries.
+    attemptEveryNFrames: 3,
   },
   plane: {
     inlierThresholdRatio: 0.05,

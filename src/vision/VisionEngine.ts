@@ -65,6 +65,8 @@ export class VisionEngine {
   private lastQuality: TrackingQuality = emptyQuality();
   private lastHomographyInliers = 0;
   private lastRansacError = 0;
+  /** Frame-to-frame pixel homography (prev → cur) of the last frame, for landmark re-association while lost. */
+  private lastImageMotion: Mat3 | null = null;
 
   // Phase 2: two-view pose relative to a reference frame.
   private readonly poseEstimator: PoseEstimator;
@@ -247,6 +249,7 @@ export class VisionEngine {
     } else {
       this.lastHomographyInliers = 0;
       this.lastRansacError = 0;
+      this.lastImageMotion = null;
     }
     const t3 = now();
 
@@ -414,7 +417,7 @@ export class VisionEngine {
         }
       }
 
-      const res = tracker.update(this.tracks, frameId, k, rotationPrior, external);
+      const res = tracker.update(this.tracks, frameId, k, rotationPrior, external, this.lastImageMotion);
       const sel = tracker.selection;
       this.lastPoseSource = res.tracked ? sel.source : "propagated";
       if (res.tracked) {
@@ -729,6 +732,7 @@ export class VisionEngine {
     const r = ransacHomography(c1x, c1y, c2x, c2y, n, this.config.ransac, this.rng);
     this.lastHomographyInliers = r.inlierCount;
     this.lastRansacError = r.meanError;
+    this.lastImageMotion = r.homography;
     if (r.homography === null && r.inlierCount === n) {
       // Too few correspondences to run RANSAC: keep all.
       return n;

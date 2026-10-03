@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../../src/ar/ARConfig";
 import { angleBetween, rotationAxisAngle, rotationDistance, type RigidTransform } from "../../src/math/Pose";
 import { MapTracker } from "../../src/vision/MapTracker";
+import { ransacHomography } from "../../src/vision/OutlierRejection";
 import { PoseEstimator } from "../../src/vision/PoseEstimator";
 import type { Track } from "../../src/vision/types";
 import { gauss, poseFromCenter, randomBoxPoints, TEST_K } from "../helpers/scene";
@@ -302,6 +303,71 @@ describe("MapTracker", () => {
       tracker.update(emptyFrames, f, TEST_K, null);
     }
     expect(tracker.map.size).toBe(landmarksBefore);
+  });
+
+  it("guided recovery: a few links pin a seed pose, the rest are re-associated and PnP recovers in the same frame", () => {
+    const cfg = DEFAULT_CONFIG.landmarks;
+    const f0 = 8;
+    const { rng, points } = makeScene(41);
+    const tracker = new MapTracker(cfg);
+    const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(42));
+    let tracks = makeTracks(points, cameraAt(f0), cameraAt(0), 0, rng);
+    const rel = estimator.estimate(
+      Float64Array.from(tracks, (t) => t.refX), Float64Array.from(tracks, (t) => t.refY),
+      Float64Array.from(tracks, (t) => t.x), Float64Array.from(tracks, (t) => t.y),
+      tracks.length, TEST_K,
+    );
+    expect(tracker.tryInitialize(tracks, rel, 0, f0, TEST_K)).toBe(true);
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    const pointOf = new Map(tracks.map((t) => [t.id, t.id - 1]));
+    const step = (pose: RigidTransform): Track[] => {
+      const next: Track[] = [];
+      for (const t of byId.values()) {
+        const p = project(points, pose, pointOf.get(t.id)!, 0.3, rng);
+        if (!p) continue;
+        t.prevX = t.x; t.prevY = t.y; t.x = p[0]; t.y = p[1];
+        next.push(t);
+      }
+      return next;
+    };
+    let f = f0;
+    for (let i = 0; i < 4; i++) {
+      f++;
+      tracks = step(cameraAt(f));
+      expect(tracker.update(tracks, f, TEST_K, null).tracked).toBe(true);
+    }
+    // The camera stops (so the velocity prediction is wrong) while every
+    // track is replaced, and the view sits ~0.012 units off the predicted
+    // pose: most landmarks project 2–5 px away from the re-detected corners,
+    // only the nearest few fall inside the 2.5 px re-association radius.
+    f++;
+    const stopped = poseFromCenter(rotationAxisAngle([0, 1, 0], 0.004 * (f - 1)), [0.03 * (f - 1) - 0.012, 0.005 * (f - 1), 0.01 * (f - 1)]);
+    let nextId = 20000;
+    const fresh: Track[] = step(stopped).map((t) => {
+      const copy: Track = { ...t, id: nextId++, landmarkId: -1, age: 0, anchorFrame: -1, anchorPose: null };
+      pointOf.set(copy.id, pointOf.get(t.id)!);
+      return copy;
+    });
+    for (const t of tracks) byId.delete(t.id);
+    fresh.forEach((t) => byId.set(t.id, t));
+    // Frame-to-frame image motion of this frame (what the engine's outlier
+    // rejection computes every frame from the surviving tracks).
+    const motion = (ts: Track[]) =>
+      ransacHomography(
+        Float64Array.from(ts, (t) => t.prevX), Float64Array.from(ts, (t) => t.prevY),
+        Float64Array.from(ts, (t) => t.x), Float64Array.from(ts, (t) => t.y),
+        ts.length, DEFAULT_CONFIG.ransac, createRng(7),
+      ).homography;
+    const r1 = tracker.update(fresh, f, TEST_K, null, null, motion(fresh)); // links made, nothing to solve yet
+    expect(r1.tracked).toBe(false);
+    expect(r1.reassociated).toBeGreaterThanOrEqual(cfg.minRecoveryInliers);
+    f++;
+    const again = step(stopped);
+    const r2 = tracker.update(again, f, TEST_K, null, null, motion(again));
+    console.log(`[guided] links ${r1.reassociated} → recovered ${r2.tracked} inliers ${r2.inlierCount} reject ${tracker.selection.mapReject}`);
+    expect(r2.tracked).toBe(true);
+    expect(r2.inlierCount).toBeGreaterThanOrEqual(cfg.minRecoveryInliers);
+    expect(deg(rotationDistance(tracker.pose.rotation, stopped.rotation))).toBeLessThan(1.0);
   });
 
   it("triangulates new landmarks from anchors once parallax is sufficient", () => {
