@@ -6,6 +6,7 @@ import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker } from "./MapTracker";
 import { PlaneDetector } from "./PlaneDetector";
+import { PlaneRecovery, emptyPlaneRecovery } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { Relocalizer, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
@@ -20,6 +21,7 @@ import {
   type PlaneAnchorOutput,
   type PlaneOutput,
   type PlanePoseOutput,
+  type PlaneRecoveryDiagnostics,
   type PoseOutput,
   type RelocalizationOutput,
   type Track,
@@ -104,6 +106,13 @@ export class VisionEngine {
   private lastPlane: PlaneOutput | null = null;
   private packedLandmarks = new Float32Array(0);
   private packedLandmarkCount = 0;
+  /**
+   * Plane recovery after fast motion (v11): re-seeds the plane detector from
+   * the landmarks in view while the map, pose and world stay untouched.
+   */
+  private readonly planeRecovery = new PlaneRecovery();
+  private lastPlaneRecovery: PlaneRecoveryDiagnostics = emptyPlaneRecovery();
+  private planeRecoveryRequested = false;
 
   // Plane-anchored tracking (修正指示書): the first found plane is fixed and
   // the camera pose is solved relative to it (depth-free).
@@ -231,6 +240,9 @@ export class VisionEngine {
     this.prevFrameRotation = null;
     this.mapTracker.reset(this.tracks);
     this.planeDetector.reset();
+    this.planeRecovery.reset();
+    this.lastPlaneRecovery = emptyPlaneRecovery();
+    this.planeRecoveryRequested = false;
     this.planeTracker.reset(this.tracks);
     this.lastPlaneAnchor = null;
     this.lastPlanePose = null;
@@ -254,6 +266,20 @@ export class VisionEngine {
   /** World tracking established for the current map (v10). */
   get isWorldEstablished(): boolean {
     return this.worldEstablished;
+  }
+
+  /** Plane recovery diagnostics of the last frame (v11 §23). */
+  get planeRecoveryDiagnostics(): PlaneRecoveryDiagnostics {
+    return this.lastPlaneRecovery;
+  }
+
+  /**
+   * Ask for a plane recovery on the next frame (reason `manual`, v11 §23).
+   * Honoured only under the same conditions as the automatic trigger: a
+   * healthy map and no established world.
+   */
+  requestPlaneRecovery(): void {
+    this.planeRecoveryRequested = true;
   }
 
   /** Last pose output (null until a reference frame and enough tracks exist). */
@@ -315,8 +341,27 @@ export class VisionEngine {
     this.updateMap(input);
     const t4c = now();
 
+    // 6b. Plane recovery decision (v11 §5–§6): fast motion with a healthy
+    // map and no world yet → forget the plane-specific state so the plane
+    // is searched in the view the camera has now. Map / pose untouched.
+    const mapHealthy = this.mapHealthyThisFrame();
+    const recoveryStarted = this.planeRecovery.update({
+      motionLevel: this.lastMotion.level,
+      mapInitialized: this.mapTracker.initialized,
+      mapTracked: this.mapTracker.initialized && this.mapTracker.result.tracked && this.mapTracker.framesSinceTracked === 0,
+      mapInliers: this.mapTracker.selection.mapInlierCount,
+      requiredInliers: this.config.landmarks.minPnPInliers,
+      poseFinite: mapHealthy.poseFinite,
+      worldEstablished: this.worldEstablished,
+      manual: this.planeRecoveryRequested,
+      timestamp: input.timestamp,
+    });
+    this.planeRecoveryRequested = false;
+    if (recoveryStarted) this.planeDetector.resetForRecovery();
+
     // 7. Plane detection (Phase 3)
     this.updatePlane(input);
+    this.lastPlaneRecovery = this.planeRecoveryDiagnosticsFor(input, mapHealthy.healthy);
     const t4d = now();
 
     // 8. Quality + state
@@ -384,6 +429,7 @@ export class VisionEngine {
       relocalization: this.relocStatus,
       motion: this.lastMotion,
       worldEstablished: this.worldEstablished,
+      planeRecovery: this.lastPlaneRecovery,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
       landmarkCount: this.packedLandmarkCount,
       tracks: packTracks(this.tracks),
@@ -429,6 +475,7 @@ export class VisionEngine {
       if (this.lastRelative && this.lastRelativeRefFrame >= 0) {
         if (tracker.tryInitialize(this.tracks, this.lastRelative, this.lastRelativeRefFrame, frameId, k)) {
           this.planeDetector.reset();
+          this.planeRecovery.reset();
           this.planeTracker.reset(this.tracks);
           this.lastPlaneAnchor = null;
           this.relocalizer.reset();
@@ -629,6 +676,7 @@ export class VisionEngine {
         // scan re-initializes where the camera looks now.
         tracker.reset(this.tracks);
         this.planeDetector.reset();
+        this.planeRecovery.reset();
         this.planeTracker.reset(this.tracks);
         this.lastPlaneAnchor = null;
         this.relocalizer.reset();
@@ -677,6 +725,7 @@ export class VisionEngine {
         sourceDeltaRotationDeg: tracker.selection.sourceDeltaRotationDeg,
         sourceHistory: this.sourceHistory,
         relocalized: this.lastRelocalized,
+        triangulation: r.triangulation,
         source: this.lastPoseSource,
       };
     } else {
@@ -785,6 +834,55 @@ export class VisionEngine {
     return d[d.length >> 1];
   }
 
+  /** Map health for the plane recovery (v11 §6, §32): located this frame with a finite pose. */
+  private mapHealthyThisFrame(): { healthy: boolean; poseFinite: boolean } {
+    const tracker = this.mapTracker;
+    if (!tracker.initialized) return { healthy: false, poseFinite: false };
+    const p = tracker.pose;
+    let poseFinite = true;
+    for (let i = 0; i < 9; i++) if (!Number.isFinite(p.rotation[i])) poseFinite = false;
+    for (let i = 0; i < 3; i++) if (!Number.isFinite(p.translation[i])) poseFinite = false;
+    const healthy = PlaneRecovery.mapHealthy({
+      mapInitialized: true,
+      mapTracked: tracker.result.tracked && tracker.framesSinceTracked === 0,
+      mapInliers: tracker.selection.mapInlierCount,
+      requiredInliers: this.config.landmarks.minPnPInliers,
+      poseFinite,
+    });
+    return { healthy, poseFinite };
+  }
+
+  /** Numbers for the HUD / tests (v11 §23); formatted only when the debug HUD is shown. */
+  private planeRecoveryDiagnosticsFor(input: VisionInput, mapHealthy: boolean): PlaneRecoveryDiagnostics {
+    const tracker = this.mapTracker;
+    const cfg = this.config.plane;
+    const search = this.planeDetector.lastSearch;
+    const candidate = this.planeDetector.current;
+    const rec = this.planeRecovery;
+    return {
+      active: rec.active,
+      reason: rec.reason,
+      phase: rec.phase(this.lastMotion.level, candidate !== null),
+      mapHealthy,
+      mapInliers: tracker.initialized ? tracker.selection.mapInlierCount : 0,
+      trackedFeatures: this.tracks.length,
+      seedCandidates: tracker.initialized ? tracker.map.countRecent(input.frameId, cfg.recoverySeedMaxAgeFrames) : 0,
+      seededPoints: search.points,
+      searchPoints: search.points,
+      bestInliers: search.bestInliers,
+      requiredInliers: cfg.minInliers,
+      searchStage: search.stage,
+      candidateFound: candidate !== null,
+      // "Committed" = the candidate is horizontal, so the stability streak
+      // counts toward PLANE_FOUND (a non-horizontal candidate never commits).
+      candidateCommitted: candidate !== null && candidate.horizontal,
+      stableFrames: candidate ? candidate.stableFrames : 0,
+      requiredStableFrames: cfg.stableFramesRequired,
+      recoveryElapsedMs: rec.elapsedMs(input.timestamp),
+      recoveries: rec.count,
+    };
+  }
+
   /** Phase 3: RANSAC plane on the landmarks, horizontality via gravity when available. */
   private updatePlane(input: VisionInput): void {
     const tracker = this.mapTracker;
@@ -794,7 +892,13 @@ export class VisionEngine {
       return;
     }
     const cfg = this.config.plane;
-    const { points, ids } = tracker.map.collect(cfg.minLandmarkObservations);
+    // Plane seeds (v11 §9–§10, §40): every mature landmark normally; during a
+    // recovery only those seen as a PnP inlier within the seed window, i.e.
+    // the landmarks of the view the camera has *now*. They come from the map
+    // and the map pose only — never from a plane pose (§11, AC-4).
+    const { points, ids } = this.planeRecovery.active
+      ? tracker.map.collect(cfg.minLandmarkObservations, cfg.recoverySeedMaxAgeFrames, input.frameId)
+      : tracker.map.collect(cfg.minLandmarkObservations);
     const n = ids.length;
 
     // Gravity (camera frame of the current frame) → map frame: g_map = Rᵀ g_cam.
@@ -829,6 +933,8 @@ export class VisionEngine {
     // Flag plane inliers (debug rendering + "confirmed on plane" for lifting).
     const inlierSet = candidate ? new Set(candidate.inlierIds) : null;
     for (const lm of tracker.map.values()) lm.planeInlier = inlierSet ? inlierSet.has(lm.id) : false;
+    // A found plane ends the recovery (v11 §44): the world is established from it.
+    if (candidate?.found) this.planeRecovery.finish();
 
     // Anchor the world plane the first time a plane is found (修正指示書 §6):
     // from here on it is fixed and the camera pose is solved relative to it.

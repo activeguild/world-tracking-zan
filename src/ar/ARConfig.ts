@@ -312,6 +312,15 @@ export interface PlaneConfig {
   goodInlierCount: number;
   /** Landmarks need this many observations to take part in plane fitting. */
   minLandmarkObservations: number;
+  /**
+   * Plane recovery after fast motion (v11 §9–§10, §17): while a recovery is
+   * active the plane search is seeded only with landmarks seen as a PnP
+   * inlier within this many frames, i.e. the part of the map the camera is
+   * looking at *now*; landmarks of the view before the motion stay in the
+   * map (for tracking) but do not vote for the plane. Outside a recovery the
+   * seed set is unchanged (every mature landmark).
+   */
+  recoverySeedMaxAgeFrames: number;
 }
 
 /** Keyframes and relocalization (spec §35–§36, Phase 5). */
@@ -660,6 +669,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     lostFrames: 15,
     goodInlierCount: 80,
     minLandmarkObservations: 3,
+    // Same window as `lostFrames`: a landmark that has not been a PnP inlier
+    // for this long is not part of the current view.
+    recoverySeedMaxAgeFrames: 15,
   },
   world: {
     assumedPlaneDistanceMeters: 0.5,

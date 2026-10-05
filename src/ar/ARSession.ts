@@ -17,6 +17,7 @@ import type {
   MapPoseOutput,
   PlaneOutput,
   PlanePoseOutput,
+  PlaneRecoveryDiagnostics,
   PlaneSearchOutput,
   PoseCandidateReport,
   PoseOutput,
@@ -115,6 +116,8 @@ export interface ARStats {
   /** World tracking established for the current map (v10): RELOCALIZING is reachable only when true. */
   worldEstablished: boolean;
   planeSearch: PlaneSearchOutput | null;
+  /** Plane recovery after fast motion (v11 §23); null before the first frame. */
+  planeRecovery: PlaneRecoveryDiagnostics | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -206,6 +209,9 @@ export class ARSession {
   /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
   private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
+  private planeRecovery: PlaneRecoveryDiagnostics | null = null;
+  private loggedPlaneRecoveries = 0;
+  private loggedPlaneStage: string | null = null;
   private planeWasFound = false;
   private lastGravity: number[] | null = null;
   private visionMs = 0;
@@ -456,6 +462,7 @@ export class ARSession {
       motion: this.motion,
       worldEstablished: this.worldEstablished,
       planeSearch: this.planeSearch,
+      planeRecovery: this.planeRecovery,
       planePose: this.planePose,
       planeAnchored: this.planeAnchored,
       frameTimestampMs: this.frameTimestampMs,
@@ -578,6 +585,8 @@ export class ARSession {
     this.motion = r.motion;
     this.worldEstablished = r.worldEstablished;
     this.planeSearch = r.planeSearch;
+    this.planeRecovery = r.planeRecovery;
+    this.logPlaneRecovery(r);
     this.planePose = r.planePose;
     this.planeAnchored = r.planeAnchor !== null;
     this.fastThreshold = r.fastThreshold;
@@ -689,6 +698,35 @@ export class ARSession {
     };
     logReject("MAP", m.mapCandidate, "map");
     logReject("PLANE", m.planeCandidate, "plane");
+  }
+
+  /**
+   * v11 §22, §26: one line when a plane recovery starts and when the plane
+   * search stage changes while a recovery is active; nothing per frame. The
+   * logger itself is silent unless debug logging is on.
+   */
+  private logPlaneRecovery(r: VisionResult): void {
+    if (!this.logger.enabled) return;
+    const pr = r.planeRecovery;
+    if (pr.recoveries !== this.loggedPlaneRecoveries) {
+      this.loggedPlaneRecoveries = pr.recoveries;
+      if (pr.active) {
+        this.logger.info(
+          `PLANE RECOVERY start at frame ${r.frameId}\nreason = ${pr.reason}\nmap = ${pr.mapInliers}i healthy\nseeds = ${pr.seedCandidates} recent / ${pr.seededPoints} offered`,
+        );
+      }
+    }
+    const stage = pr.active ? `${pr.phase}:${pr.searchStage}:${pr.candidateCommitted ? "commit" : pr.candidateFound ? "cand" : "-"}` : null;
+    if (stage !== this.loggedPlaneStage) {
+      this.loggedPlaneStage = stage;
+      if (stage !== null) {
+        this.logger.info(
+          `PLANE RECOVERY ${pr.phase} at frame ${r.frameId}\nsearch = ${pr.searchPoints}pt best ${pr.bestInliers}/${pr.requiredInliers} stage ${pr.searchStage}\ncandidate = ${pr.candidateFound ? "yes" : "no"} commit = ${pr.candidateCommitted ? "yes" : "no"} stable = ${pr.stableFrames}/${pr.requiredStableFrames}`,
+        );
+      } else if (r.plane?.found) {
+        this.logger.info(`PLANE RECOVERY done at frame ${r.frameId}: plane found (${r.plane.inlierCount} inliers)`);
+      }
+    }
   }
 
   private setState(next: TrackingState): void {

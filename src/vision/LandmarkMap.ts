@@ -110,7 +110,9 @@ export class LandmarkMap {
 
   /**
    * Copy positions into a flat array (x,y,z interleaved) with the matching
-   * ids. Landmarks with fewer than `minObservations` observations are skipped.
+   * ids. Landmarks with fewer than `minObservations` observations, not seen
+   * as a PnP inlier within `maxAgeFrames` of `frameId`, or with a non-finite
+   * position are skipped (plane seed conditions, v11 §10).
    */
   collect(minObservations = 1, maxAgeFrames = Number.POSITIVE_INFINITY, frameId = 0): { points: Float64Array; ids: number[] } {
     const ids: number[] = [];
@@ -118,9 +120,18 @@ export class LandmarkMap {
     for (const lm of this.landmarks.values()) {
       if (lm.observations < minObservations) continue;
       if (frameId - lm.lastSeenFrame > maxAgeFrames) continue;
+      const p = lm.position;
+      if (!Number.isFinite(p[0] + p[1] + p[2])) continue;
       ids.push(lm.id);
-      pts.push(lm.position[0], lm.position[1], lm.position[2]);
+      pts.push(p[0], p[1], p[2]);
     }
     return { points: Float64Array.from(pts), ids };
+  }
+
+  /** Landmarks seen as a PnP inlier within `maxAgeFrames` of `frameId` (any observation count). */
+  countRecent(frameId: number, maxAgeFrames: number): number {
+    let n = 0;
+    for (const lm of this.landmarks.values()) if (frameId - lm.lastSeenFrame <= maxAgeFrames) n++;
+    return n;
   }
 }

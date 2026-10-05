@@ -240,6 +240,30 @@ were" is produced only for an established world lost for longer than
 shows the v10 phase (`INITIAL_SCAN / SURFACE_SCAN / PLANE_CANDIDATE /
 WORLD_TRACKING / WORLD_LOST / RELOCALIZING`) and `World Established YES/NO`.
 
+Plane recovery after fast motion (v11): on device the camera kept tracking
+against the map after a fast move (LK 284/285, PnP 42 inliers / 0.38 px,
+source MAP, lost 0 ms) while `Plane search 42pt best 32/20` never became a
+plane and the world was never established. That HUD line only appears when
+the detector produced *no candidate*; the two stages that swallow a
+32-point height window are the re-classification around the fitted plane
+and the 2D-extent test (a thin strip / compact cluster is not a plane). The
+search now records its stage (`points | support | reclassify | extent |
+candidate`) and the HUD `PLANE` section shows Search → Stage → Cand →
+Commit → Stable plus the triangulation counters (`Tri`: why landmark-less
+tracks did not become landmarks). A fast motion (v7 level `fast`) with a
+healthy map (located this frame, inliers ≥ `landmarks.minPnPInliers`,
+finite pose) and no world yet starts a *plane recovery*
+(`src/vision/PlaneRecovery.ts`): only `PlaneDetector.resetForRecovery()`
+runs (previous candidate, stability streak, miss counter), and while the
+recovery is active the plane search is seeded with the landmarks seen as a
+PnP inlier within `plane.recoverySeedMaxAgeFrames` — the view the camera has
+now. The map, the canonical pose, the keyframes and the world are never
+touched, relocalization is never entered because of a fast motion, and no
+plane / PnP / LK / gate threshold changes. Phases `PLANE_RECOVERY` (still
+fast) → `PLANE_WARMUP` → `PLANE_CANDIDATE` → `PLANE_FOUND`; guidance
+「スマホをゆっくり動かしてください」→「平らな場所をゆっくり映してください」, never
+"go back" before a world exists.
+
 ## Tests
 
 ```bash
@@ -278,7 +302,7 @@ src/
   vision/    ImagePyramid, FeatureDetector (FAST-9), FeatureTracker (LK + FB),
              OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
              LandmarkMap, MapTracker (init / PnP / triangulation), PlaneDetector,
-             PlaneTracker (experimental plane-relative pose),
+             PlaneRecovery (plane re-seed after fast motion), PlaneTracker (experimental plane-relative pose),
              Keyframe, Relocalizer (coarse NCC shift + LK + PnP), VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),

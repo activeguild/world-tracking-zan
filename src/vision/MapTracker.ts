@@ -15,7 +15,7 @@ import {
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
-import type { PoseCandidateReport, Track } from "./types";
+import type { PoseCandidateReport, Track, TriangulationStats } from "./types";
 
 /**
  * SLAM-lite front end (spec §19–§20, Phase 3):
@@ -49,6 +49,12 @@ export interface MapTrackingResult {
   jumpRejected: boolean;
   /** Unlinked landmarks re-associated to tracks this frame (v3 §15). */
   reassociated: number;
+  /** Why landmark-less tracks did / did not become landmarks this frame (v11 diagnostics). */
+  triangulation: TriangulationStats;
+}
+
+export function emptyTriangulationStats(): TriangulationStats {
+  return { candidates: 0, parallaxRejected: 0, cheiralityRejected: 0, angleRejected: 0, errorRejected: 0, depthRejected: 0, added: 0 };
 }
 
 /** Pose candidate handed in by an external estimator (plane-relative PnP). */
@@ -114,6 +120,7 @@ const EMPTY_RESULT: MapTrackingResult = {
   translationPredicted: false,
   jumpRejected: false,
   reassociated: 0,
+  triangulation: emptyTriangulationStats(),
 };
 
 export class MapTracker {
@@ -669,6 +676,7 @@ export class MapTracker {
 
     // ---- Triangulate new landmarks ----
     let created = 0;
+    const tri = emptyTriangulationStats();
     if (tracked) {
       const maxErr = cfg.maxTriangulationErrorPx / f;
       const minAngle = (cfg.minTriangulationAngleDeg * Math.PI) / 180;
@@ -678,7 +686,11 @@ export class MapTracker {
       const medDepth = n > 0 ? this.medianDepth(this._pose, n) : 0;
       for (const t of tracks) {
         if (t.landmarkId >= 0 || !t.anchorPose || t.anchorFrame === frameId) continue;
-        if (Math.hypot(t.x - t.anchorX, t.y - t.anchorY) < minPar) continue;
+        tri.candidates++;
+        if (Math.hypot(t.x - t.anchorX, t.y - t.anchorY) < minPar) {
+          tri.parallaxRejected++;
+          continue;
+        }
         if (this.map.size >= cfg.maxLandmarks) break;
         // Relative pose anchor → current, triangulate in the anchor frame.
         const anchorInv = invertTransform(t.anchorPose);
@@ -688,9 +700,22 @@ export class MapTracker {
         const x2 = (t.x - k.cx) / k.fx;
         const y2 = (t.y - k.cy) / k.fy;
         triangulatePoint(rel, x1, y1, x2, y2, this.tri);
-        if (this.tri.depth1 <= 0 || this.tri.depth2 <= 0) continue;
-        if (this.tri.error > maxErr || this.tri.parallax < minAngle) continue;
-        if (medDepth > 0 && (this.tri.depth2 > cfg.maxDepthRatio * medDepth || this.tri.depth2 < medDepth / cfg.maxDepthRatio)) continue;
+        if (this.tri.depth1 <= 0 || this.tri.depth2 <= 0) {
+          tri.cheiralityRejected++;
+          continue;
+        }
+        if (this.tri.error > maxErr) {
+          tri.errorRejected++;
+          continue;
+        }
+        if (this.tri.parallax < minAngle) {
+          tri.angleRejected++;
+          continue;
+        }
+        if (medDepth > 0 && (this.tri.depth2 > cfg.maxDepthRatio * medDepth || this.tri.depth2 < medDepth / cfg.maxDepthRatio)) {
+          tri.depthRejected++;
+          continue;
+        }
         // To map frame: X_map = anchorInv(X_anchor)
         const pa = this.tri.point;
         const r = anchorInv.rotation;
@@ -708,6 +733,7 @@ export class MapTracker {
         created++;
       }
     }
+    tri.added = created;
 
     // ---- Keep the map alive (v3 §15) ----
     // Landmarks whose tracks died are projected with the canonical pose (or,
@@ -735,6 +761,7 @@ export class MapTracker {
       translationHeld,
       translationPredicted,
       jumpRejected,
+      triangulation: tri,
     };
     return this.lastResult;
   }

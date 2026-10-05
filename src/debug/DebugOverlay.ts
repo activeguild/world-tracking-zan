@@ -1,10 +1,11 @@
 /**
- * On-screen HUD (spec §42, 修正指示書 v2 §23, v4 §25, v5 §18, v6 §11–§16).
+ * On-screen HUD (spec §42, 修正指示書 v2 §23, v4 §25, v5 §18, v6 §11–§16, v11 §24).
  *
  * Laid out for a phone in portrait: one short "Label  value" row per item,
- * sections TRACK / MAP / RELOC / WORLD / OBJECT / TIMING. The RELOC details
- * (stage counters of the last attempt, best candidate) are shown only while
- * the camera is lost or was just relocalized, so normal tracking stays small.
+ * sections TRACK / MAP / RELOC / PLANE / WORLD / OBJECT / TIMING. The RELOC
+ * details (stage counters of the last attempt, best candidate) are shown
+ * only while the camera is lost or was just relocalized, and the PLANE
+ * pipeline only until the world is established, so normal tracking stays small.
  *
  * Every number is the engine's own value under an unambiguous label: `MAP`
  * rows are the map PnP candidate of the current frame, `RELOC` rows are the
@@ -150,7 +151,45 @@ export interface HudStats {
     usedGravity: boolean;
   } | null;
   gravityAvailable?: boolean;
-  planeSearch?: { points: number; bestInliers: number; minInliers: number; threshold: number; horizontalness: number } | null;
+  planeSearch?: {
+    points: number;
+    bestInliers: number;
+    minInliers: number;
+    threshold: number;
+    horizontalness: number;
+    /** Stage the search stopped at (v11 §22) and the 2D-extent test values. */
+    stage: string;
+    inliers: number;
+    extentMajor: number;
+    extentMinor: number;
+    extentRequired: number;
+  } | null;
+  /** Plane recovery after fast motion (v11 §23–§24). */
+  planeRecovery?: {
+    active: boolean;
+    reason: string | null;
+    phase: string;
+    mapHealthy: boolean;
+    mapInliers: number;
+    seedCandidates: number;
+    seededPoints: number;
+    candidateFound: boolean;
+    candidateCommitted: boolean;
+    stableFrames: number;
+    requiredStableFrames: number;
+    elapsedMs: number;
+    recoveries: number;
+  } | null;
+  /** New-landmark triangulation of this frame (why the map does / does not grow). */
+  triangulation?: {
+    candidates: number;
+    parallaxRejected: number;
+    cheiralityRejected: number;
+    angleRejected: number;
+    errorRejected: number;
+    depthRejected: number;
+    added: number;
+  } | null;
   world?: { ready: boolean; scale: number; placed: number } | null;
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
@@ -376,6 +415,57 @@ export class DebugOverlay {
       }
     }
 
+    // ---- PLANE (v11 §22, §24): the detection pipeline stage by stage,
+    // search → best → candidate → commit → stable, plus the recovery state.
+    // Shown while a map exists and no world has been established yet.
+    const ps = s.planeSearch;
+    const pr = s.planeRecovery;
+    if (ps && m && !s.world?.ready) {
+      rows.push(section("PLANE"));
+      if (pr) {
+        rows.push(
+          row(
+            "Recov",
+            pr.active
+              ? `${(pr.reason ?? "").toUpperCase()}  ${pr.phase}  ${(pr.elapsedMs / 1000).toFixed(1)}s${pr.recoveries > 1 ? `  ×${pr.recoveries}` : ""}`
+              : `—${pr.recoveries ? `  (done ×${pr.recoveries})` : ""}`,
+            pr.active ? "hud-warn" : undefined,
+          ),
+        );
+        rows.push(row("Map", `${pr.mapInliers}i  ${pr.mapHealthy ? "healthy" : "not located"}`, pr.mapHealthy ? undefined : "hud-warn"));
+        rows.push(row("Seed", pr.active ? `${pr.seededPoints} of ${pr.seedCandidates} recent (window)` : `${pr.seededPoints}  (${pr.seedCandidates} recent)`));
+      }
+      rows.push(row("Search", `${ps.points}pt  best ${ps.bestInliers}/${ps.minInliers}  thr ${ps.threshold.toFixed(3)}`));
+      const stageText =
+        ps.stage === "candidate"
+          ? `candidate  ${ps.inliers}i  s2 ${ps.extentMinor.toFixed(2)} ≥ ${ps.extentRequired.toFixed(2)}`
+          : ps.stage === "extent"
+            ? `extent  s2 ${ps.extentMinor.toFixed(2)} < ${ps.extentRequired.toFixed(2)}  (s1 ${ps.extentMajor.toFixed(2)})`
+            : ps.stage === "reclassify"
+              ? `reclassify  ${ps.inliers} < ${ps.minInliers}  (window ${ps.bestInliers})`
+              : ps.stage === "support"
+                ? `support  ${ps.bestInliers} < ${ps.minInliers}`
+                : `points  ${ps.points} < ${ps.minInliers}`;
+      rows.push(row("Stage", stageText, ps.stage === "candidate" ? undefined : "hud-warn"));
+      const committed = !!p && p.horizontal;
+      rows.push(row("Cand", `${p ? "YES" : "NO"}  commit ${committed ? "YES" : "NO"}${p && !p.horizontal ? `  (hz ${p.horizontalness.toFixed(2)})` : ""}`));
+      rows.push(
+        row(
+          "Stable",
+          `${p ? p.stableFrames : 0}/${pr ? pr.requiredStableFrames : "?"}${p ? `  conf ${p.confidence.toFixed(2)}` : ""}${p?.found ? "  FOUND" : ""}`,
+        ),
+      );
+      if (s.triangulation) {
+        const t = s.triangulation;
+        rows.push(
+          row(
+            "Tri",
+            `cand ${t.candidates}  +${t.added}  par ${t.parallaxRejected} ang ${t.angleRejected} err ${t.errorRejected} dep ${t.depthRejected}${t.cheiralityRejected ? ` chi ${t.cheiralityRejected}` : ""}`,
+          ),
+        );
+      }
+    }
+
     // ---- WORLD ----
     rows.push(section("WORLD"));
     rows.push(row("World", s.world?.ready ? `ready  ${s.world.scale.toFixed(3)} m/u  obj ${s.world.placed}` : "—"));
@@ -388,8 +478,8 @@ export class DebugOverlay {
     if (p) {
       rows.push(row("Plane", `n(${p.normal.map((v) => v.toFixed(2)).join(",")}) rms ${p.rms.toFixed(3)}`));
       rows.push(row("", `hz ${p.horizontalness.toFixed(2)}${p.horizontal ? " H" : ""}  st ${p.stableFrames}  conf ${p.confidence.toFixed(2)}${p.found ? "  FOUND" : ""}`));
-    } else if (s.planeSearch) {
-      rows.push(row("Plane", `${s.world?.ready ? "fixed" : "search"} ${s.planeSearch.points}pt best ${s.planeSearch.bestInliers}/${s.planeSearch.minInliers} thr ${s.planeSearch.threshold.toFixed(3)}`));
+    } else if (ps && s.world?.ready) {
+      rows.push(row("Plane", `fixed  ${ps.points}pt best ${ps.bestInliers}/${ps.minInliers} thr ${ps.threshold.toFixed(3)}`));
     }
     if (s.planePose) {
       const pp = s.planePose;

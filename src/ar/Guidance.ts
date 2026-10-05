@@ -1,28 +1,41 @@
+import type { PlaneRecoveryPhase } from "../vision/types";
 import { TrackingState } from "./ARState";
 
 /**
- * User guidance (修正指示書 v10 §13–§17): decides *what the user should do*
- * from the tracking state and a few quality facts. Pure, no DOM, no engine
- * access, and it never touches engine thresholds.
+ * User guidance (修正指示書 v10 §13–§17, v11 §45–§46): decides *what the
+ * user should do* from the tracking state and a few quality facts. Pure, no
+ * DOM, no engine access, and it never touches engine thresholds.
  *
  * The one rule that matters: "go back to where you were" exists only for an
  * established world that was lost and has been failing to relocalize for a
  * while (`relocGuidanceDelayMs`). Before a world exists the user may scan
- * wherever they like, and a lost map is nothing to return to.
+ * wherever they like, and a lost map is nothing to return to — including
+ * right after a fast motion, when the plane is simply searched again where
+ * the camera looks now (v11 §15, §46).
  */
 export type GuidanceKey =
   | "INITIALIZING"
   | "SHOW_FLAT_SURFACE" // too few features: point at a textured flat surface
   | "SCAN_SURFACE" // scanning a surface, no map yet
   | "MOVE_SLOWLY" // map exists, needs parallax
+  | "SLOW_DOWN" // fast motion with the map still tracked (plane recovery, v11 §45)
+  | "PLANE_WARMUP" // plane points re-collected after a fast motion (v11 §45)
   | "PLANE_DETECTING" // plane candidate, waiting for stability
   | "TAP_TO_PLACE" // world established, nothing placed
   | "NONE" // AR active
   | "RECOVER" // world lost, generic recovery
   | "RELOCALIZE"; // world lost for a while: return to the previous place
 
-/** v10 phase names derived from the engine state (for the HUD and the guidance). */
-export type WorldPhase = "INITIAL_SCAN" | "SURFACE_SCAN" | "PLANE_CANDIDATE" | "WORLD_TRACKING" | "WORLD_LOST" | "RELOCALIZING";
+/** v10 / v11 phase names derived from the engine state (for the HUD and the guidance). */
+export type WorldPhase =
+  | "INITIAL_SCAN"
+  | "SURFACE_SCAN"
+  | "PLANE_RECOVERY"
+  | "PLANE_WARMUP"
+  | "PLANE_CANDIDATE"
+  | "WORLD_TRACKING"
+  | "WORLD_LOST"
+  | "RELOCALIZING";
 
 export interface GuidanceContext {
   state: TrackingState;
@@ -38,18 +51,26 @@ export interface GuidanceContext {
   relocGuidanceDelayMs: number;
   /** Camera barely moving while a map is needed (optional, v10 §13). */
   motionTooLow?: boolean;
+  /** Plane recovery phase after a fast motion (v11 §28); absent / "none" when idle. */
+  planeRecovery?: PlaneRecoveryPhase;
 }
 
-/** Map the engine state to the v10 phase (v10 §3–§4, §26). */
-export function worldPhase(ctx: Pick<GuidanceContext, "state" | "worldEstablished" | "planeCandidate" | "lostMs" | "relocGuidanceDelayMs">): WorldPhase {
+/** Map the engine state to the v10 / v11 phase (v10 §3–§4, §26; v11 §28, §55). */
+export function worldPhase(
+  ctx: Pick<GuidanceContext, "state" | "worldEstablished" | "planeCandidate" | "lostMs" | "relocGuidanceDelayMs" | "planeRecovery">,
+): WorldPhase {
   switch (ctx.state) {
     case TrackingState.INITIALIZING:
     case TrackingState.SEARCHING_FEATURES:
       return "INITIAL_SCAN";
     case TrackingState.TRACKING:
-      return "SURFACE_SCAN";
     case TrackingState.PLANE_DETECTING:
-      return ctx.planeCandidate ? "PLANE_CANDIDATE" : "SURFACE_SCAN";
+      // Surface scan with the map tracked (v11 §28): a recovery after a fast
+      // motion is its own phase until a plane candidate exists.
+      if (ctx.planeRecovery === "recovery") return "PLANE_RECOVERY";
+      if (ctx.planeRecovery === "warmup") return "PLANE_WARMUP";
+      if (ctx.state === TrackingState.PLANE_DETECTING && (ctx.planeCandidate || ctx.planeRecovery === "candidate")) return "PLANE_CANDIDATE";
+      return "SURFACE_SCAN";
     case TrackingState.PLANE_FOUND:
     case TrackingState.AR_ACTIVE:
       return "WORLD_TRACKING";
@@ -66,7 +87,11 @@ export function getGuidance(ctx: GuidanceContext): GuidanceKey {
     // Initial / surface scan (v10 §16): wherever the camera looks now is the
     // target. Never RELOCALIZE here, whatever the engine state says.
     if (ctx.lowFeature) return "SHOW_FLAT_SURFACE";
-    if (ctx.state === TrackingState.PLANE_DETECTING) return ctx.planeCandidate ? "PLANE_DETECTING" : "MOVE_SLOWLY";
+    // Plane recovery after a fast motion (v11 §15, §45): slow down, then show
+    // a flat surface at the new place. Never "go back" (§46).
+    if (ctx.planeRecovery === "recovery") return "SLOW_DOWN";
+    if (ctx.planeRecovery === "warmup") return "PLANE_WARMUP";
+    if (ctx.state === TrackingState.PLANE_DETECTING) return ctx.planeCandidate || ctx.planeRecovery === "candidate" ? "PLANE_DETECTING" : "MOVE_SLOWLY";
     if (ctx.motionTooLow) return "MOVE_SLOWLY";
     return "SCAN_SURFACE";
   }
@@ -91,6 +116,8 @@ export const GUIDANCE_TEXT_JA: Record<GuidanceKey, string> = {
   SHOW_FLAT_SURFACE: "模様のある平らな場所（机・床）にカメラを向けてください",
   SCAN_SURFACE: "平らな場所をゆっくりスキャンしてください（スマホをゆっくり左右に）",
   MOVE_SLOWLY: "スマホをゆっくり左右に動かしてください",
+  SLOW_DOWN: "スマホをゆっくり動かしてください",
+  PLANE_WARMUP: "平らな場所をゆっくり映してください",
   PLANE_DETECTING: "平面を検出しています…",
   TAP_TO_PLACE: "平面をタップしてオブジェクトを置いてください",
   NONE: "",

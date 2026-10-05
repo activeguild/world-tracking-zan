@@ -3,7 +3,9 @@ import { symmetricEigen } from "../math/Decomposition";
 import { fitHorizontalPlane, horizontalness as planeHorizontalness, ransacPlane, type PlaneModel } from "../math/Plane";
 import { angleBetween } from "../math/Pose";
 import type { Rng } from "./OutlierRejection";
-import type { PlaneOutput } from "./types";
+import type { PlaneOutput, PlaneSearchInfo } from "./types";
+
+export type { PlaneSearchInfo, PlaneSearchStage } from "./types";
 
 /**
  * Plane detection on the landmark map (spec §21–§24, §51).
@@ -14,22 +16,20 @@ import type { PlaneOutput } from "./types";
  * One active plane at a time (spec §51). A plane is reported as `found`
  * only after `stableFramesRequired` consecutive consistent detections, and
  * stays found while it keeps being re-detected (with a short grace period).
+ *
+ * `lastSearch` records where each frame's search stopped (v11 §22): the HUD
+ * line `Plane search 42pt best 32/20` only ever appeared when no candidate
+ * came out, and the two stages that can swallow a 32-point height window
+ * are the re-classification around its mean plane (`reclassify`) and the
+ * 2D-extent test (`extent`).
  */
 export interface PlaneCandidate extends PlaneOutput {
   /** Landmark ids that are inliers of the plane. */
   inlierIds: number[];
 }
 
-/** Diagnostics of the last plane search (shown in the HUD when no plane is found). */
-export interface PlaneSearchInfo {
-  /** Landmarks offered to RANSAC. */
-  points: number;
-  /** Best sample support found (even when below minInliers). */
-  bestInliers: number;
-  /** Inlier distance threshold used (map units). */
-  threshold: number;
-  /** Horizontalness of the best plane when one was fitted. */
-  horizontalness: number;
+function emptySearch(points = 0): PlaneSearchInfo {
+  return { points, bestInliers: 0, threshold: 0, horizontalness: 0, stage: "points", inliers: 0, extentMajor: 0, extentMinor: 0, extentRequired: 0 };
 }
 
 export class PlaneDetector {
@@ -37,7 +37,7 @@ export class PlaneDetector {
   private stableFrames = 0;
   private found = false;
   private missedFrames = 0;
-  lastSearch: PlaneSearchInfo = { points: 0, bestInliers: 0, threshold: 0, horizontalness: 0 };
+  lastSearch: PlaneSearchInfo = emptySearch();
 
   constructor(
     private readonly config: PlaneConfig,
@@ -49,6 +49,21 @@ export class PlaneDetector {
     this.stableFrames = 0;
     this.found = false;
     this.missedFrames = 0;
+    this.lastSearch = emptySearch();
+  }
+
+  /**
+   * Plane recovery (v11 §8): forget the plane-specific state only — the
+   * previous candidate, its stability streak and the miss counter — so the
+   * next frames are judged against the view the camera has *now* instead
+   * of a candidate seen before a fast motion. The `found` flag is kept (a
+   * found plane is the world's reference and is not dropped by a motion);
+   * nothing outside this class (map, pose, world) is touched.
+   */
+  resetForRecovery(): void {
+    this.previous = null;
+    this.stableFrames = 0;
+    this.missedFrames = 0;
   }
 
   get isFound(): boolean {
@@ -59,6 +74,11 @@ export class PlaneDetector {
     return this.previous;
   }
 
+  /** Consecutive stable frames of the current candidate. */
+  get stableFrameCount(): number {
+    return this.stableFrames;
+  }
+
   /**
    * @param points landmark positions (x,y,z interleaved) in the map frame
    * @param ids    landmark ids, parallel to `points`
@@ -66,7 +86,8 @@ export class PlaneDetector {
    */
   update(points: Float64Array, ids: number[], n: number, up: Float64Array | null): PlaneCandidate | null {
     const cfg = this.config;
-    this.lastSearch = { points: n, bestInliers: 0, threshold: 0, horizontalness: 0 };
+    this.lastSearch = emptySearch(n);
+    const search = this.lastSearch;
     if (n < cfg.minInliers) {
       return this.miss();
     }
@@ -89,9 +110,13 @@ export class PlaneDetector {
           maxIterations: cfg.maxIterations,
           minInliers: cfg.minInliers,
         }, this.rng);
-    this.lastSearch.threshold = threshold;
-    this.lastSearch.bestInliers = res.bestInlierCount;
+    search.threshold = threshold;
+    search.bestInliers = res.bestInlierCount;
+    search.inliers = res.plane ? res.inlierCount : 0;
     if (!res.plane || res.inlierCount < cfg.minInliers) {
+      // Enough support in the best window / sample but the re-classification
+      // around the fitted plane lost it → "reclassify"; otherwise "support".
+      search.stage = res.bestInlierCount >= cfg.minInliers ? "reclassify" : "support";
       return this.miss();
     }
 
@@ -101,14 +126,19 @@ export class PlaneDetector {
     const ext = inPlaneExtents(points, res.inliers, n, plane);
     // The inliers must cover a 2D patch, not a line: a horizontal slice through
     // a wall (or a thin strip of noisy points) has no second extent.
-    if (ext.s2 < Math.max(2 * threshold, 0.15 * ext.s1)) {
+    search.extentMajor = ext.s1;
+    search.extentMinor = ext.s2;
+    search.extentRequired = Math.max(2 * threshold, 0.15 * ext.s1);
+    if (ext.s2 < search.extentRequired) {
+      search.stage = "extent";
       return this.miss();
     }
+    search.stage = "candidate";
     const area = 4 * ext.s1 * 4 * ext.s2;
 
     const upVec = up ?? new Float64Array([0, -1, 0]);
     const hz = planeHorizontalness(plane.normal, upVec);
-    this.lastSearch.horizontalness = hz;
+    search.horizontalness = hz;
     const horizontal = hz >= (up ? cfg.horizontalThreshold : cfg.fallbackHorizontalThreshold);
 
     // Temporal stability against the previous candidate.

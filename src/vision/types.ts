@@ -162,6 +162,8 @@ export interface MapPoseOutput {
   sourceHistory: string;
   /** The pose was re-seeded by a relocalization in this frame or is still within its monitoring window (v5 §20). */
   relocalized: boolean;
+  /** New-landmark triangulation of this frame (v11 diagnostics). */
+  triangulation: TriangulationStats;
   /**
    * Where this frame's pose came from: "plane" = plane-relative estimate
    * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no
@@ -197,15 +199,100 @@ export interface PlanePoseOutput {
 /** Packed landmark layout (Float32): [x, y, z, planeInlier] in the map frame. */
 export const LANDMARK_STRIDE = 4;
 
-/** Keyframe / relocalization status (Phase 5). */
-/** Plane search diagnostics (why no plane yet). */
-export interface PlaneSearchOutput {
+/**
+ * Where the per-frame plane search stopped (修正指示書 v11 §21–§22, §37–§38):
+ *   points      – fewer landmarks than `plane.minInliers` were offered
+ *   support     – the densest height window (gravity) / best RANSAC sample had too few inliers
+ *   reclassify  – the window had enough support but re-classifying around its mean plane lost it
+ *   extent      – enough inliers, but they do not cover a 2D patch (thin strip / compact cluster)
+ *   candidate   – a plane candidate was produced (it may still be non-horizontal or unstable)
+ */
+export type PlaneSearchStage = "points" | "support" | "reclassify" | "extent" | "candidate";
+
+/** Diagnostics of the last plane search (why no plane yet). */
+export interface PlaneSearchInfo {
+  /** Landmarks offered to RANSAC. */
   points: number;
+  /** Best sample support found (even when below minInliers). */
   bestInliers: number;
-  minInliers: number;
+  /** Inlier distance threshold used (map units). */
   threshold: number;
+  /** Horizontalness of the best plane when one was fitted. */
   horizontalness: number;
+  /** Stage the search reached this frame (v11 §22). */
+  stage: PlaneSearchStage;
+  /** Inliers of the fitted plane after re-classification (0 when none was fitted). */
+  inliers: number;
+  /** Std. dev. of the inliers along the two in-plane axes and the minimum the second one needs (map units). */
+  extentMajor: number;
+  extentMinor: number;
+  extentRequired: number;
 }
+
+export interface PlaneSearchOutput extends PlaneSearchInfo {
+  minInliers: number;
+}
+
+/** Why a plane recovery was started (v11 §23). Only `fast_motion` and `manual` are triggered today. */
+export type PlaneRecoveryReason = "fast_motion" | "insufficient_plane_points" | "plane_lost" | "manual" | null;
+
+/**
+ * Plane recovery phase (v11 §13–§14, §28): `recovery` while the camera still
+ * moves fast, `warmup` while plane points are re-collected at the new view,
+ * `candidate` once the detector has a plane candidate, `none` otherwise.
+ */
+export type PlaneRecoveryPhase = "none" | "recovery" | "warmup" | "candidate";
+
+/**
+ * Plane recovery diagnostics (v11 §23). After fast motion with a healthy map
+ * the plane detector alone is re-seeded; the map, the camera pose and the
+ * world are untouched. Numbers only: formatting happens in the HUD, debug on.
+ */
+export interface PlaneRecoveryDiagnostics {
+  active: boolean;
+  reason: PlaneRecoveryReason;
+  phase: PlaneRecoveryPhase;
+  /** Map PnP located the camera this frame with enough inliers and a finite pose. */
+  mapHealthy: boolean;
+  mapInliers: number;
+  trackedFeatures: number;
+  /** Landmarks observed within the seed window, and how many of them were handed to the plane search. */
+  seedCandidates: number;
+  seededPoints: number;
+  /** Plane search of this frame (same values as `planeSearch`). */
+  searchPoints: number;
+  bestInliers: number;
+  requiredInliers: number;
+  searchStage: PlaneSearchStage;
+  /** A plane candidate exists; it is "committed" when it is horizontal and counts toward stability. */
+  candidateFound: boolean;
+  candidateCommitted: boolean;
+  stableFrames: number;
+  requiredStableFrames: number;
+  /** Time since the recovery started (0 when inactive). */
+  recoveryElapsedMs: number;
+  /** Recoveries started for the current map. */
+  recoveries: number;
+}
+
+/** New-landmark triangulation of one frame (v11 diagnostics: why the map does / does not grow). */
+export interface TriangulationStats {
+  /** Landmark-less tracks with an anchor from an earlier frame. */
+  candidates: number;
+  /** Rejected: displacement from the anchor below `triangulateMinParallaxPx`. */
+  parallaxRejected: number;
+  /** Rejected: negative depth in either view. */
+  cheiralityRejected: number;
+  /** Rejected: ray angle below `minTriangulationAngleDeg`. */
+  angleRejected: number;
+  /** Rejected: two-view residual above `maxTriangulationErrorPx`. */
+  errorRejected: number;
+  /** Rejected: depth outside `maxDepthRatio` of the median landmark depth. */
+  depthRejected: number;
+  added: number;
+}
+
+/** Keyframe / relocalization status (Phase 5). */
 
 export interface RelocalizationOutput {
   keyframes: number;
@@ -350,6 +437,8 @@ export interface VisionOutput {
   plane: PlaneOutput | null;
   /** Plane search diagnostics (null until the map exists). */
   planeSearch: PlaneSearchOutput | null;
+  /** Plane recovery after fast motion (v11 §23); always present, `active` false when idle. */
+  planeRecovery: PlaneRecoveryDiagnostics;
   /** The fixed plane the world is anchored to (null until a plane was found). */
   planeAnchor: PlaneAnchorOutput | null;
   /** Plane-relative pose quality (null until anchored). */

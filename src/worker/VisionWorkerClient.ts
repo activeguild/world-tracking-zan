@@ -7,6 +7,7 @@ import type {
   PlaneAnchorOutput,
   PlaneOutput,
   PlanePoseOutput,
+  PlaneRecoveryDiagnostics,
   PlaneSearchOutput,
   PoseOutput,
   MotionDiagnostics,
@@ -30,6 +31,7 @@ export interface VisionResult {
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
   worldEstablished: boolean;
+  planeRecovery: PlaneRecoveryDiagnostics;
   landmarks: Float32Array;
   landmarkCount: number;
   tracks: Float32Array;
@@ -105,6 +107,7 @@ export class VisionWorkerClient implements VisionBackend {
               relocalization: msg.relocalization,
               motion: msg.motion,
               worldEstablished: msg.worldEstablished,
+              planeRecovery: msg.planeRecovery,
               landmarks: new Float32Array(msg.landmarks),
               landmarkCount: msg.landmarkCount,
               tracks: new Float32Array(msg.tracks),
@@ -199,6 +202,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         relocalization: out.relocalization,
         motion: out.motion,
         worldEstablished: out.worldEstablished,
+        planeRecovery: out.planeRecovery,
         landmarks: out.landmarks,
         landmarkCount: out.landmarkCount,
         tracks: out.tracks,

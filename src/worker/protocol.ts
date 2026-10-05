@@ -7,6 +7,7 @@ import type {
   PlaneAnchorOutput,
   PlaneOutput,
   PlanePoseOutput,
+  PlaneRecoveryDiagnostics,
   PlaneSearchOutput,
   PoseOutput,
   MotionDiagnostics,
@@ -78,6 +79,7 @@ export interface ResultResponse {
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
   worldEstablished: boolean;
+  planeRecovery: PlaneRecoveryDiagnostics;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */
   landmarks: ArrayBuffer;
   landmarkCount: number;
