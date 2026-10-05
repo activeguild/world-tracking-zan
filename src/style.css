@@ -111,3 +111,32 @@ body {
 #start:disabled {
   opacity: 0.6;
 }
+
+/* One-tap debug HUD toggle (v7 §15–§16, §25): small, top-right, outside the HUD column. */
+#debug-toggle {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  right: calc(env(safe-area-inset-right, 0px) + 8px);
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 20px;
+  line-height: 44px;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  z-index: 10;
+}
+
+#debug-toggle.on {
+  background: rgba(159, 211, 255, 0.35);
+}
+
+/* Leave room for the toggle so the HUD never sits under it. */
+.ar-hud {
+  max-width: min(420px, calc(100vw - 76px));
+}

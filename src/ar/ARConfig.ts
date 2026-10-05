@@ -79,10 +79,28 @@ export interface TrackerConfig {
   /** Maximum displacement a track may move between frames (pixels, at level 0). */
   maxDisplacement: number;
   /**
-   * Seed LK with a constant-velocity prediction (previous frame's
-   * displacement) so fast motion stays inside the pyramid's capture range.
+   * Seed LK with a motion prediction so fast motion stays inside the
+   * pyramid's capture range (修正指示書 v7 §6–§7): the previous frame's
+   * frame-to-frame homography applied to each track when that homography is
+   * well supported (≥ predictionMinInliers inliers, inlier ratio ≥
+   * predictionMinInlierRatio), else each track's own last displacement
+   * (constant velocity). Off → LK starts at the previous position.
    */
   predictMotion: boolean;
+  homographyPrediction: boolean;
+  predictionMinInliers: number;
+  predictionMinInlierRatio: number;
+  /**
+   * Motion level from the previous frame's median track displacement (px,
+   * v7 §3): below mediumMotionPx = normal, below fastMotionPx = medium,
+   * else fast. The LK displacement gate (maxDisplacement, measured from the
+   * prediction) is scaled by the level's search scale (v7 §4) so the gate
+   * only opens up while the camera actually moves fast.
+   */
+  mediumMotionPx: number;
+  fastMotionPx: number;
+  mediumMotionSearchScale: number;
+  fastMotionSearchScale: number;
 }
 
 /** RANSAC configuration (spec §14, §15). */
@@ -492,6 +510,13 @@ export const DEFAULT_CONFIG: ARConfig = {
     forwardBackwardThreshold: 1.0,
     maxDisplacement: 60,
     predictMotion: true,
+    homographyPrediction: true,
+    predictionMinInliers: 30,
+    predictionMinInlierRatio: 0.6,
+    mediumMotionPx: 8,
+    fastMotionPx: 20,
+    mediumMotionSearchScale: 1.5,
+    fastMotionSearchScale: 2.0,
   },
   ransac: {
     // Frame-to-frame homography gate. Real rooms are not planar: with the

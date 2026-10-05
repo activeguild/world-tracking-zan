@@ -290,6 +290,31 @@ export interface PoseOutput {
   planeNormal: number[] | null;
 }
 
+/**
+ * Frame-to-frame motion and LK diagnostics (修正指示書 v7 §3, §12–§13).
+ * `level` is decided from the *previous* frame's median displacement and
+ * drives this frame's prediction / search scale.
+ */
+export type MotionLevel = "normal" | "medium" | "fast";
+
+export interface MotionDiagnostics {
+  level: MotionLevel;
+  /** Median / max displacement of the tracks that survived LK this frame (px). */
+  medianDisplacementPx: number;
+  maxDisplacementPx: number;
+  /** Tracks offered to LK and tracks it kept. */
+  trackedBefore: number;
+  trackedAfter: number;
+  forwardBackwardRejects: number;
+  tooFarRejects: number;
+  /** Mean LK residual of the kept tracks (0–255). */
+  meanResidual: number;
+  /** How LK was seeded this frame. */
+  predictionMode: "homography" | "velocity" | "none";
+  /** Displacement-gate scale applied this frame (1 = normal). */
+  searchScale: number;
+}
+
 /** Input to the vision engine for one frame (spec §40). */
 export interface VisionInput {
   frameId: number;
@@ -331,6 +356,8 @@ export interface VisionOutput {
   planePose: PlanePoseOutput | null;
   /** Keyframe / relocalization status (Phase 5). */
   relocalization: RelocalizationOutput;
+  /** Frame-to-frame motion level and LK diagnostics (v7). */
+  motion: MotionDiagnostics;
   /** Packed landmarks for debug rendering: see `LANDMARK_STRIDE`. */
   landmarks: Float32Array;
   landmarkCount: number;

@@ -137,6 +137,8 @@ Query parameters:
 | `?fov=66`   | camera field of view along the long side (degrees) |
 | `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
 | `?sync=0`   | show the live video instead of the pose-synchronized frame |
+| `?debug=1` | debug mode: HUD + debug drawing on at start, `[AR]` console logs (the ☰ button toggles the HUD at any time; off by default) |
+| `?hud=1` / `?hud=0` | force the initial HUD state independently of `?debug` |
 | `?smooth=1` | enable pose smoothing (off by default while the raw pose is validated) |
 | `?refine=1` | re-enable landmark depth refinement (A/B against the fixed map) |
 | `?walk=1`   | the placed object walks back and forth on the plane (object-motion test) |
@@ -169,7 +171,15 @@ tracked frames.
 
 Fast motion: 4 LK pyramid levels and constant-velocity seeding
 (`tracker.pyramidLevels`, `tracker.predictMotion`) roughly double the per-frame
-displacement that stays trackable.
+displacement that stays trackable. v7 adds a motion level from the previous
+frame's median track displacement (`mediumMotionPx` / `fastMotionPx`), a
+displacement gate that widens only at medium / fast motion
+(`mediumMotionSearchScale` / `fastMotionSearchScale`) and LK seeding with the
+previous frame's RANSAC homography when it was well supported
+(`homographyPrediction`, `predictionMinInliers`, `predictionMinInlierRatio`),
+falling back to per-track velocity otherwise; `VisionOutput.motion` carries the
+level, displacements, LK rejects and the prediction mode (HUD `Motion` / `LK`
+rows). PnP, RANSAC, the gates and relocalization are untouched.
 
 Temporal gate (v4): three independent judgements decide about a pose
 candidate — PnP quality (inliers / error, "trusted"), temporal continuity

@@ -207,6 +207,18 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v7 対応 — 高速移動の追跡強化 + Debug HUD トグル（2026-10-05、実機確認待ち）
+
+通常速度の安定性を維持したまま、高速カメラ移動時の特徴点対応を「LK 以前〜LK」で強化する。**PnP / RANSAC / Jump Gate / Lost Gate 上限 / 再局所化の検証・確認 / WorldAnchor / ARObject は変更していない**（§2、§10–§11）。
+
+- **Fast Motion 検出（§3）**: 前フレームで LK を生き残った追跡点の中央変位（`medianDisplacementPx`）で判定。`tracker.mediumMotionPx`（8）未満 = normal、`fastMotionPx`（20）未満 = medium、以上 = fast。参照フレームとの 2view parallax は累積量なのでフレーム間の速さには使わず、フレーム間の実測変位を使う
+- **Adaptive LK（§4）**: LK の変位ゲート（`maxDisplacement` 60 px、予測位置からの距離）に段階別の倍率 `mediumMotionSearchScale`（1.5）/ `fastMotionSearchScale`（2.0）を掛ける。通常時は従来どおり 1 倍。ピラミッド（4 段、coarse-to-fine）はそのまま（§5）
+- **Homography 予測（§6–§7）**: 前フレームの外れ値除去で得たフレーム間 Homography（`lastImageMotion`）を各追跡点に適用した位置を LK の開始点にする（パン・回転・ズームを 1 つの大域モデルで予測）。前フレームの RANSAC が `predictionMinInliers`（30）以上かつ inlier 比 `predictionMinInlierRatio`（0.6）以上のときだけ使い、それ以外は従来の追跡点ごとの等速予測（`predictMotion`）。合成 32 px/frame パンの維持率: Homography 予測 平均 0.91 / 等速 0.88 / 予測なし 3 段 0.77
+- **診断（§12–§13）**: `VisionOutput.motion`（`MotionDiagnostics { level, medianDisplacementPx, maxDisplacementPx, trackedBefore, trackedAfter, forwardBackwardRejects, tooFarRejects, meanResidual, predictionMode: homography|velocity|none, searchScale }`）。HUD `Motion FAST 30.3px (max 41) H ×2` / `LK 231/265 fb 12 far 3`。Worker プロトコル経由で転送
+- **Debug HUD トグル（§15–§26）**: 右上に 44×44 の `☰` ボタン（`#debug-toggle`、safe-area 考慮、HUD は `max-width: min(420px, 100vw − 76px)` でボタンに重ならない）。OFF で HUD・特徴点オーバーレイ（`#overlay`）・平面グリッドを非表示、エンジン・診断・stats は継続（`ARSession.setDebugVisualization(visible)`、`ARWorld.setPlaneGridVisible`。グリッドは設定どおり生成しておき表示だけ切替）。**既定 OFF**、`?debug=1` で ON（ログも ON）、`?hud=1 / ?hud=0` で初期状態を個別指定
+- **変更しなかったもの**: PnP 品質基準、RANSAC、Jump Gate、Lost Gate 上限、再局所化の検証・確認、WorldAnchor、ARObject、v6 の RELOC 診断（OFF 時は隠すだけ）
+- テスト 160 件（+4）: 動き段階（3 / 12 / 30 px で normal / medium / fast、倍率 1 / 1.5 / 2.0）、Homography 予測が成立する条件と LK 集計の整合（`trackedAfter == trackedCount`、`trackedBefore == 前フレームの featureCount`）、支持不足時は等速へフォールバック・`predictMotion: false` で `none`、低速では level normal・倍率 1・維持率 95% 超（回帰なし）。ブラウザテスト全サンプル `PLANE_FOUND`
+
 ### 修正指示書 v6 対応 — Relocalization 診断強化 + HUD 整理（2026-10-05、実機確認待ち）
 
 実機（Keyframe 8、Lost 3.6 s、`RELOC none`、ok×0、Map 候補 14i / 3.18 px）で「8 枚の Keyframe がどの段階で落ちているか」を読めるようにする。**閾値（`minInliers` / `maxMeanErrorPx` / `minInlierRatio` / `minSpatialCells` / `coarseMinScore` / `lkMaxDisplacementPx`）、Jump Gate、Lost Gate 上限、長時間失探の要求 inlier、Immediate Apply、確認フレームは一切変更していない**（§7–§9、§18）。

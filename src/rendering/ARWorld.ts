@@ -44,6 +44,11 @@ export class ARWorld {
     }
   }
 
+  /** Toggle the plane grid without rebuilding it (debug HUD on/off, v7 §17). */
+  setPlaneGridVisible(visible: boolean): void {
+    this.planeGroup.visible = visible && this.planeGroup.children.length > 0;
+  }
+
   /** Transparent grid on the plane (spec §44). `extent` in meters. */
   showPlaneGrid(extent: number, visible = true): void {
     this.planeGroup.clear();

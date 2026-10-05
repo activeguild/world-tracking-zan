@@ -15,9 +15,10 @@ import "./style.css";
  *       → tap to place a cube or a GLB model.
  *
  * Query parameters:
- *   ?debug=1          enable `[AR]` console logs
+ *   ?debug=1          debug mode: HUD + debug drawing on at start, `[AR]` console logs
+ *                     (default off — the ☰ button toggles the HUD at any time, v7 §15–§20)
  *   ?worker=0         run the vision engine on the main thread
- *   ?hud=0            hide the HUD
+ *   ?hud=0 / ?hud=1   force the initial HUD state independently of ?debug
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
@@ -32,7 +33,9 @@ import "./style.css";
 const params = new URLSearchParams(location.search);
 const debugLog = params.get("debug") === "1";
 const useWorker = params.get("worker") !== "0";
-const showHud = params.get("hud") !== "0";
+// HUD off by default for the AR experience; ?debug=1 (or ?hud=1) starts with it on.
+const hudParam = params.get("hud");
+const showHud = hudParam !== null ? hudParam === "1" : debugLog;
 const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
 const modelUrl = params.get("model");
@@ -63,7 +66,7 @@ const startButton = document.getElementById("start") as HTMLButtonElement;
 const messageEl = document.getElementById("message") as HTMLElement;
 
 const hud = new DebugOverlay(app);
-hud.visible = showHud;
+const debugToggle = document.getElementById("debug-toggle") as HTMLButtonElement;
 console.log(`[AR] build ${typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev"}`);
 
 const session = new ARSession({
@@ -87,6 +90,24 @@ const session = new ARSession({
   },
   gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
 });
+
+// Debug HUD on/off (v7 §15–§18): UI state only. The engine, its diagnostics
+// and the stats keep running; only the HUD, the feature overlay and the
+// plane grid are shown or hidden.
+let hudVisible = showHud;
+function applyHudVisibility(): void {
+  hud.visible = hudVisible;
+  overlay.style.display = hudVisible ? "" : "none";
+  session.setDebugVisualization(hudVisible);
+  debugToggle.classList.toggle("on", hudVisible);
+  debugToggle.setAttribute("aria-pressed", String(hudVisible));
+}
+debugToggle.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  hudVisible = !hudVisible;
+  applyHudVisibility();
+});
+applyHudVisibility();
 
 session.on("trackingStateChanged", (state) => {
   messageEl.textContent = userMessageFor(state, session.getStats().quality.lowFeature);
@@ -278,6 +299,19 @@ function refreshHud(): void {
     fastThreshold: s.fastThreshold,
     processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
     backend: s.backend,
+    motion: s.motion
+      ? {
+          level: s.motion.level,
+          medianPx: s.motion.medianDisplacementPx,
+          maxPx: s.motion.maxDisplacementPx,
+          before: s.motion.trackedBefore,
+          after: s.motion.trackedAfter,
+          fbRejects: s.motion.forwardBackwardRejects,
+          tooFar: s.motion.tooFarRejects,
+          prediction: s.motion.predictionMode,
+          searchScale: s.motion.searchScale,
+        }
+      : null,
     pose: s.pose
       ? {
           ...rotationToEulerDeg(Float64Array.from(s.pose.rotation)),

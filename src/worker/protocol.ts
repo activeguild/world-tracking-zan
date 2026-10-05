@@ -9,6 +9,7 @@ import type {
   PlanePoseOutput,
   PlaneSearchOutput,
   PoseOutput,
+  MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
 
@@ -75,6 +76,7 @@ export interface ResultResponse {
   planeAnchor: PlaneAnchorOutput | null;
   planePose: PlanePoseOutput | null;
   relocalization: RelocalizationOutput;
+  motion: MotionDiagnostics;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */
   landmarks: ArrayBuffer;
   landmarkCount: number;

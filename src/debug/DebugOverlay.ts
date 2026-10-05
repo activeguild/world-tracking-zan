@@ -158,6 +158,18 @@ export interface HudStats {
     /** Last attempt of the current lost episode (null while tracking). */
     diag: HudRelocDiagnostics | null;
   } | null;
+  /** Frame-to-frame motion level and LK diagnostics (v7 §12–§13). */
+  motion?: {
+    level: string;
+    medianPx: number;
+    maxPx: number;
+    before: number;
+    after: number;
+    fbRejects: number;
+    tooFar: number;
+    prediction: string;
+    searchScale: number;
+  } | null;
   /** Build identifier (phase + commit + time) so testers can confirm the deployed version. */
   build?: string;
 }
@@ -233,6 +245,18 @@ export class DebugOverlay {
       rows.push(row("PnP", "—"));
     }
     rows.push(row("Lost", s.lostMs !== undefined && s.lostMs > 0 ? `${s.lostMs.toFixed(0)}ms` : "0ms", lost ? "hud-warn" : undefined));
+    if (s.motion) {
+      const mo = s.motion;
+      const lvl = mo.level === "fast" ? "FAST" : mo.level === "medium" ? "MED" : "N";
+      rows.push(
+        row(
+          "Motion",
+          `${lvl}  ${mo.medianPx.toFixed(1)}px (max ${mo.maxPx.toFixed(0)})  ${mo.prediction === "homography" ? "H" : mo.prediction === "velocity" ? "V" : "-"}${mo.searchScale !== 1 ? ` ×${mo.searchScale}` : ""}`,
+          mo.level === "fast" ? "hud-warn" : undefined,
+        ),
+      );
+      rows.push(row("LK", `${mo.after}/${mo.before}${mo.fbRejects ? `  fb ${mo.fbRejects}` : ""}${mo.tooFar ? `  far ${mo.tooFar}` : ""}`));
+    }
     if (s.pose) {
       rows.push(row("Rot", `yaw ${fmt(s.pose.yaw)} pitch ${fmt(s.pose.pitch)} roll ${fmt(s.pose.roll)}`));
       rows.push(

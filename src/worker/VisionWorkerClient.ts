@@ -9,6 +9,7 @@ import type {
   PlanePoseOutput,
   PlaneSearchOutput,
   PoseOutput,
+  MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
 import { VisionEngine } from "../vision/VisionEngine";
@@ -27,6 +28,7 @@ export interface VisionResult {
   planeAnchor: PlaneAnchorOutput | null;
   planePose: PlanePoseOutput | null;
   relocalization: RelocalizationOutput;
+  motion: MotionDiagnostics;
   landmarks: Float32Array;
   landmarkCount: number;
   tracks: Float32Array;
@@ -100,6 +102,7 @@ export class VisionWorkerClient implements VisionBackend {
               planeAnchor: msg.planeAnchor,
               planePose: msg.planePose,
               relocalization: msg.relocalization,
+              motion: msg.motion,
               landmarks: new Float32Array(msg.landmarks),
               landmarkCount: msg.landmarkCount,
               tracks: new Float32Array(msg.tracks),
@@ -192,6 +195,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         planeAnchor: out.planeAnchor,
         planePose: out.planePose,
         relocalization: out.relocalization,
+        motion: out.motion,
         landmarks: out.landmarks,
         landmarkCount: out.landmarkCount,
         tracks: out.tracks,

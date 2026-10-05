@@ -15,6 +15,8 @@ import {
   LANDMARK_STRIDE,
   packTracks,
   type MapPoseOutput,
+  type MotionDiagnostics,
+  type MotionLevel,
   type PlaneAnchorOutput,
   type PlaneOutput,
   type PlanePoseOutput,
@@ -24,7 +26,7 @@ import {
   type VisionInput,
   type VisionOutput,
 } from "./types";
-import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
+import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
 import { transpose3 } from "../math/Decomposition";
 import { rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
 
@@ -65,7 +67,13 @@ export class VisionEngine {
   private readonly stateMachine: TrackingStateMachine;
   private lastQuality: TrackingQuality = emptyQuality();
   private lastHomographyInliers = 0;
+  private lastHomographyInlierRatio = 0;
   private lastRansacError = 0;
+  /** Fast-motion state (v7): previous frame's median displacement decides this frame's level. */
+  private lastMedianDisplacementPx = 0;
+  private lastMotion: MotionDiagnostics = emptyMotion();
+  private readonly predictScratch = new Float64Array(2);
+  private dispScratch = new Float32Array(0);
   /** Frame-to-frame pixel homography (prev → cur) of the last frame, for landmark re-association while lost. */
   private lastImageMotion: Mat3 | null = null;
 
@@ -202,6 +210,8 @@ export class VisionEngine {
   reset(): void {
     this.tracks = [];
     this.hasPrev = false;
+    this.lastMedianDisplacementPx = 0;
+    this.lastMotion = emptyMotion();
     this.stateMachine.reset();
     this.lastQuality = emptyQuality();
     this.referenceFrameId = -1;
@@ -267,8 +277,14 @@ export class VisionEngine {
       inlierCount = this.rejectOutliers();
     } else {
       this.lastHomographyInliers = 0;
+      this.lastHomographyInlierRatio = 0;
       this.lastRansacError = 0;
       this.lastImageMotion = null;
+    }
+    if (trackedCount === 0) {
+      // Nothing tracked (first frame or a total loss): no motion measurement.
+      this.lastMotion = { ...emptyMotion(), level: this.motionLevel(), trackedBefore: previousCount };
+      this.lastMedianDisplacementPx = 0;
     }
     const t3 = now();
 
@@ -349,6 +365,7 @@ export class VisionEngine {
       planeAnchor: this.lastPlaneAnchor,
       planePose: this.lastPlanePose,
       relocalization: this.relocStatus,
+      motion: this.lastMotion,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
       landmarkCount: this.packedLandmarkCount,
       tracks: packTracks(this.tracks),
@@ -817,10 +834,29 @@ export class VisionEngine {
     this.packedLandmarkCount = i;
   }
 
-  /** LK + forward-backward. Mutates `this.tracks` (drops failures). Returns surviving count. */
+  /** Motion level for this frame from the previous frame's median displacement (v7 §3). */
+  private motionLevel(): MotionLevel {
+    const cfg = this.config.tracker;
+    const d = this.lastMedianDisplacementPx;
+    return d >= cfg.fastMotionPx ? "fast" : d >= cfg.mediumMotionPx ? "medium" : "normal";
+  }
+
+  /**
+   * LK + forward-backward. Mutates `this.tracks` (drops failures). Returns
+   * surviving count.
+   *
+   * Fast motion (v7 §4–§8): the LK starting point is a *prediction* of where
+   * each track is now — the previous frame's frame-to-frame homography
+   * applied to the track when that homography was well supported (a global
+   * model: pan, rotation, zoom), else the track's own last displacement —
+   * and the displacement gate around that prediction is widened only while
+   * the camera is measured to move fast. The pyramid itself (coarse-to-fine)
+   * is unchanged; PnP / RANSAC are not touched.
+   */
   private trackExisting(): number {
     const tracks = this.tracks;
     const n = tracks.length;
+    const cfg = this.config.tracker;
     if (this.pointBuf.length < n * 2) this.pointBuf = new Float32Array(n * 2);
     if (this.trackResult.status.length < n) this.trackResult = allocResult(n);
     const pts = this.pointBuf;
@@ -828,18 +864,35 @@ export class VisionEngine {
       pts[i * 2] = tracks[i].x;
       pts[i * 2 + 1] = tracks[i].y;
     }
-    // Constant-velocity prediction as the LK starting point: a track that
-    // moved (dx, dy) last frame is searched around x + dx first, which keeps
-    // fast motion within the pyramid's capture range.
+
+    const level = this.motionLevel();
+    const searchScale = level === "fast" ? cfg.fastMotionSearchScale : level === "medium" ? cfg.mediumMotionSearchScale : 1;
+    const maxD = cfg.maxDisplacement * searchScale;
+
+    // Prediction (v7 §6–§7): the homography only when it was trustworthy in
+    // the previous frame — a poorly supported one would move every track
+    // wrongly at once — else per-track constant velocity.
     let guesses: Float32Array | null = null;
-    if (this.config.tracker.predictMotion) {
+    let predictionMode: MotionDiagnostics["predictionMode"] = "none";
+    if (cfg.predictMotion) {
       if (this.guessBuf.length < n * 2) this.guessBuf = new Float32Array(n * 2);
       guesses = this.guessBuf;
-      const maxD = this.config.tracker.maxDisplacement;
+      const H = this.lastImageMotion;
+      const useH =
+        cfg.homographyPrediction &&
+        H !== null &&
+        this.lastHomographyInliers >= cfg.predictionMinInliers &&
+        this.lastHomographyInlierRatio >= cfg.predictionMinInlierRatio;
+      predictionMode = useH ? "homography" : "velocity";
+      const out = this.predictScratch;
       for (let i = 0; i < n; i++) {
         const t = tracks[i];
         let vx = t.age > 0 ? t.x - t.prevX : 0;
         let vy = t.age > 0 ? t.y - t.prevY : 0;
+        if (useH && mat3TransformPoint(H!, t.x, t.y, out)) {
+          vx = out[0] - t.x;
+          vy = out[1] - t.y;
+        }
         const v = Math.hypot(vx, vy);
         if (v > maxD) {
           vx *= maxD / v;
@@ -849,11 +902,21 @@ export class VisionEngine {
         guesses[i * 2 + 1] = Math.min(this.height - 1, Math.max(0, t.y + vy));
       }
     }
-    const res = this.tracker.track(this.prevPyramid, this.curPyramid, pts, n, this.trackResult, guesses);
+    const res = this.tracker.track(this.prevPyramid, this.curPyramid, pts, n, this.trackResult, guesses, maxD);
 
     const survivors: Track[] = [];
+    let fbRejects = 0;
+    let tooFar = 0;
+    let residualSum = 0;
+    let maxDisp = 0;
+    const disps = this.dispScratch.length >= n ? this.dispScratch : (this.dispScratch = new Float32Array(Math.max(n, 64)));
     for (let i = 0; i < n; i++) {
-      if (res.status[i] !== TrackStatus.OK) continue;
+      const st = res.status[i];
+      if (st !== TrackStatus.OK) {
+        if (st === TrackStatus.FB_ERROR) fbRejects++;
+        else if (st === TrackStatus.TOO_FAR) tooFar++;
+        continue;
+      }
       const t = tracks[i];
       t.prevX = t.x;
       t.prevY = t.y;
@@ -861,10 +924,30 @@ export class VisionEngine {
       t.y = res.positions[i * 2 + 1];
       t.age++;
       t.inlier = true;
+      const d = Math.hypot(t.x - t.prevX, t.y - t.prevY);
+      disps[survivors.length] = d;
+      if (d > maxDisp) maxDisp = d;
+      residualSum += res.residual[i];
       survivors.push(t);
     }
+    const m = survivors.length;
+    const median = m ? medianOf(disps, m) : 0;
+    this.lastMotion = {
+      level,
+      medianDisplacementPx: median,
+      maxDisplacementPx: maxDisp,
+      trackedBefore: n,
+      trackedAfter: m,
+      forwardBackwardRejects: fbRejects,
+      tooFarRejects: tooFar,
+      meanResidual: m ? residualSum / m : 0,
+      predictionMode,
+      searchScale,
+    };
+    // The level of the *next* frame is decided from what was measured now.
+    this.lastMedianDisplacementPx = median;
     this.tracks = survivors;
-    return survivors.length;
+    return m;
   }
 
   /** Homography RANSAC on prev→cur positions. Drops outliers. Returns inlier count. */
@@ -880,6 +963,7 @@ export class VisionEngine {
     }
     const r = ransacHomography(c1x, c1y, c2x, c2y, n, this.config.ransac, this.rng);
     this.lastHomographyInliers = r.inlierCount;
+    this.lastHomographyInlierRatio = n > 0 ? r.inlierCount / n : 0;
     this.lastRansacError = r.meanError;
     this.lastImageMotion = r.homography;
     if (r.homography === null && r.inlierCount === n) {
@@ -1107,6 +1191,27 @@ function toPlanePoseOutput(r: PlaneTracker["result"]): PlanePoseOutput {
     reprojectionErrorPx: r.meanErrorPx,
     confidence: r.confidence,
   };
+}
+
+function emptyMotion(): MotionDiagnostics {
+  return {
+    level: "normal",
+    medianDisplacementPx: 0,
+    maxDisplacementPx: 0,
+    trackedBefore: 0,
+    trackedAfter: 0,
+    forwardBackwardRejects: 0,
+    tooFarRejects: 0,
+    meanResidual: 0,
+    predictionMode: "none",
+    searchScale: 1,
+  };
+}
+
+/** Median of the first `n` values (sorts a copy). */
+function medianOf(values: Float32Array, n: number): number {
+  const a = Array.from(values.subarray(0, n)).sort((x, y) => x - y);
+  return n % 2 ? a[n >> 1] : (a[(n >> 1) - 1] + a[n >> 1]) / 2;
 }
 
 function emptyReloc(): RelocalizationOutput {

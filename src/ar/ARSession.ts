@@ -21,6 +21,7 @@ import type {
   PoseCandidateReport,
   PoseOutput,
   RelocalizationOutput,
+  MotionDiagnostics,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
 import { WorldAnchor } from "./WorldAnchor";
@@ -109,6 +110,8 @@ export interface ARStats {
   worldScale: number;
   placedObjects: number;
   relocalization: RelocalizationOutput | null;
+  /** Frame-to-frame motion level and LK diagnostics (v7). */
+  motion: MotionDiagnostics | null;
   planeSearch: PlaneSearchOutput | null;
   state: TrackingState;
   fastThreshold: number;
@@ -196,6 +199,9 @@ export class ARSession {
   private plane: PlaneOutput | null = null;
   private landmarkCount = 0;
   private relocalization: RelocalizationOutput | null = null;
+  private motion: MotionDiagnostics | null = null;
+  /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
+  private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
   private planeWasFound = false;
   private lastGravity: number[] | null = null;
@@ -408,6 +414,21 @@ export class ARSession {
     this.arCamera.updateProjection(this.intrinsics, w, h);
   }
 
+  /**
+   * Show / hide the debug visualization (feature overlay, landmark / plane
+   * drawing, plane grid). UI state only: tracking and diagnostics continue
+   * unchanged (v7 §17–§18).
+   */
+  setDebugVisualization(visible: boolean): void {
+    this.debugVisualization = visible;
+    if (!visible) this.renderer?.clear();
+    this.world.setPlaneGridVisible(visible && this.config.debug.overlay && this.config.world.showPlaneGrid);
+  }
+
+  get debugVisualizationVisible(): boolean {
+    return this.debugVisualization;
+  }
+
   /** Forget all tracks and restart from INITIALIZING (keeps the camera running). */
   reset(): void {
     this.backend?.reset();
@@ -429,6 +450,7 @@ export class ARSession {
       worldScale: this.worldAnchor.frame?.scale ?? 0,
       placedObjects: this.world.placedCount,
       relocalization: this.relocalization,
+      motion: this.motion,
       planeSearch: this.planeSearch,
       planePose: this.planePose,
       planeAnchored: this.planeAnchored,
@@ -549,6 +571,7 @@ export class ARSession {
     this.plane = r.plane;
     this.landmarkCount = r.landmarkCount;
     this.relocalization = r.relocalization;
+    this.motion = r.motion;
     this.planeSearch = r.planeSearch;
     this.planePose = r.planePose;
     this.planeAnchored = r.planeAnchor !== null;
@@ -569,7 +592,7 @@ export class ARSession {
       this.emit("planeLost");
     }
 
-    if (this.renderer && this.config.debug.overlay && this.grabber && this.intrinsics) {
+    if (this.renderer && this.config.debug.overlay && this.debugVisualization && this.grabber && this.intrinsics) {
       this.renderer.resize();
       this.renderer.draw(r.tracks, r.trackCount, this.grabber.width, this.grabber.height);
       this.planeRenderer?.draw(r.mapPose, r.plane, r.landmarks, r.landmarkCount, this.intrinsics, !this.worldAnchor.isReady);
@@ -694,7 +717,10 @@ export class ARSession {
         const area = r.plane?.areaEstimate ?? 0;
         const extent = Math.max(0.4, Math.min(3, Math.sqrt(Math.max(area, 1e-6)) * scale * 1.5));
         this.world.setWorldReady(true);
+        // Build the grid whenever debug drawing is configured; whether it is
+        // shown right now follows the debug HUD toggle.
         this.world.showPlaneGrid(extent, this.config.debug.overlay && this.config.world.showPlaneGrid);
+        this.world.setPlaneGridVisible(this.debugVisualization);
         this.arCamera.resetSmoothing();
         this.logger.info(`world ready scale=${scale.toFixed(3)} m/unit grid=${extent.toFixed(2)} m`);
         this.emit("worldReady");
