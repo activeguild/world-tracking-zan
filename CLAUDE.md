@@ -207,6 +207,19 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v9 対応 — Relocalization Validation の分解・可視化（2026-10-05、実機確認待ち）
+
+実機ログ `Best KF3 35i 2.93px / Ratio 0.61 / cells 4/9 / Stage error / Fail error` の `error` は再投影誤差の段階（2.93 px > `maxMeanErrorPx` 1.5 px）だったが名前が曖昧だった。各検証条件を独立に評価して値・閾値・PASS/FAIL を出す。**閾値（`minInliers` 25 / `maxMeanErrorPx` 1.5 / `minInlierRatio` 0.5 / `minSpatialCells` 4 / NCC / LK / PnP / Jump Gate）は変更していない**（§30）。
+
+- **検証の分解（§3–§6）**: `validateRelocalizationCandidate(measures, thresholds)` が `RelocValidationDiagnostics`（inliers / reprojection / ratio / spatial cells / coverage / pose の値・閾値・`*Passed`、`passed`、`rejectReason: inliers | reprojection_error | inlier_ratio | spatial_distribution | pose_invalid | confirmation | unknown`）を返す。短絡せず全条件を評価し、`rejectReason` は pose → inliers → reprojection → ratio → spatial の順で最初に落ちた条件。段階名は `pnp_inliers / reprojection / ratio / spatial / invalid / ok`（`error` を廃止、§29）
+- **Spatial Coverage（§12–§14）**: inlier の外接矩形 / 画像面積（`spatialCoverage`、`spatialCoverageOf`）を追加。`relocalization.minSpatialCoverage` は **0（診断のみ）**。4/9 セルでも「広く散った 0.6」と「一塊の 0.08」を区別できる。将来の再局所化専用閾値はこの設定で独立に調整可能（§15、§31）
+- **Pose Jump は診断のみ（§16–§18）**: 通常 Tracking の Jump Gate は再局所化候補に適用しない（v5 と同じ）。非有限の Pose だけ `pose_invalid` で拒否。保持姿勢との差は `translationJump / rotationJumpDeg` として記録
+- **最良候補（§7–§8）**: 検証通過候補 > 未通過候補、未通過同士は段階 → inlier 数 → 再投影誤差 → coverage → NCC の順で比較。`RelocalizationKeyframeTrial.validation` / `RelocalizationResult.validation` に全内訳を保持
+- **HUD（§21–§22）**: RELOC 節に `Best KF3 35i 2.93px ncc 0.85` / `Inlier 35/25 OK` / `Error 2.93/1.50px NG` / `Ratio 0.61/0.50 OK` / `Cells 4/9 (min 4) OK` / `Cover 0.58` / `Reject reprojection_error`。閾値は設定値から表示
+- **Debug 既定 OFF（§23–§28、AC-9–AC-12）**: `?debug=1` のときだけ HUD・オーバーレイ・`[AR]` ログ ON（`debug=true` は OFF）。HUD 非表示中は `refreshHud` が整形も DOM 更新も行わない。起動時の `[AR] build` ログも debug 時のみ。`?hud=1/0` で HUD の初期状態だけを個別に上書き可能
+- テスト 169 件（+9）: `validateRelocalizationCandidate` Test 1–8（合格 / inlier 不足 / 再投影誤差過大 = 実機の 35i・2.93px ケース / ratio 不足 / cells 不足と coverage 不足の分離 / 複数 FAIL の全保持 / NaN Pose / 大きな Pose Jump でも拒否しない）、`spatialCoverageOf`、Test 9（拒否後も best の内訳を保持）。ブラウザテスト Test 10–11: 通常 URL で HUD・オーバーレイ非表示・`[AR]` ログなし・診断は生成、☰ で ON/OFF、`?debug=true` は OFF、`?debug=1` で HUD と `Motion` 行とログ
+- **今回の実機ログの結論**: `Inlier 35/25 OK`、`Error 2.93/1.50 NG`、`Ratio 0.61/0.50 OK`、`Cells 4/9 OK` → 拒否理由は再投影誤差のみ。v10 で判断する候補: 再局所化専用の `maxMeanErrorPx`（Keyframe→現フレームの LK は追跡中の 1 フレーム LK より誤差が大きいのが自然）
+
 ### 修正指示書 v7 対応 — 高速移動の追跡強化 + Debug HUD トグル（2026-10-05、実機確認待ち）
 
 通常速度の安定性を維持したまま、高速カメラ移動時の特徴点対応を「LK 以前〜LK」で強化する。**PnP / RANSAC / Jump Gate / Lost Gate 上限 / 再局所化の検証・確認 / WorldAnchor / ARObject は変更していない**（§2、§10–§11）。

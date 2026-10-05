@@ -40,17 +40,65 @@ export type RelocalizationRejectCode =
   | "confirmation_failed"
   | "invalid_pose";
 
-/** How far a keyframe candidate got in one attempt (v6 §1–§2). */
+/**
+ * How far a keyframe candidate got in one attempt (v6 §1–§2, names made
+ * unambiguous in v9 §29: no bare "error").
+ */
 export type RelocalizationStage =
   | "coarse" // rejected by the coarse NCC match
   | "landmarks" // too few of its landmarks are still in the map
   | "lk" // LK from the keyframe image failed
-  | "pnp" // PnP ran but had too few inliers
-  | "error" // enough inliers, reprojection error too high
+  | "pnp_inliers" // PnP ran but had too few inliers
+  | "reprojection" // enough inliers, mean reprojection error too high
   | "ratio" // inliers / tracked observations too low
   | "spatial" // inliers concentrated in too few image cells
   | "invalid" // non-finite pose
   | "ok"; // passed the global validation
+
+/** Which validation condition rejected a candidate that reached PnP (v9 §3). */
+export type RelocValidationRejectReason =
+  | "inliers"
+  | "reprojection_error"
+  | "inlier_ratio"
+  | "spatial_distribution"
+  | "pose_invalid"
+  | "confirmation"
+  | "unknown";
+
+/**
+ * Every validation condition of one PnP candidate, evaluated independently
+ * (v9 §4–§6): values, the thresholds they were measured against and a
+ * PASS / FAIL per condition, so several failing conditions are all visible
+ * rather than only the first one. Translation / rotation jump vs the held
+ * pose are *diagnostic only* (v9 §16–§17): a correct return after a loss
+ * can be far from the held pose, so they never fail a relocalization
+ * candidate; only a non-finite pose does.
+ */
+export interface RelocValidationDiagnostics {
+  inliers: number;
+  requiredInliers: number;
+  reprojectionErrorPx: number;
+  maxReprojectionErrorPx: number;
+  inlierRatio: number;
+  minInlierRatio: number;
+  coveredCells: number;
+  totalCells: number;
+  minSpatialCells: number;
+  /** Bounding box of the inliers / image area (0…1). */
+  spatialCoverage: number;
+  minSpatialCoverage: number;
+  /** Distance of the candidate pose from the held pose (map units / deg); NaN when unknown. */
+  translationJump: number;
+  rotationJumpDeg: number;
+  inliersPassed: boolean;
+  reprojectionPassed: boolean;
+  ratioPassed: boolean;
+  spatialPassed: boolean;
+  coveragePassed: boolean;
+  posePassed: boolean;
+  passed: boolean;
+  rejectReason: RelocValidationRejectReason | null;
+}
 
 /** Per-keyframe outcome of one attempt (internal diagnostics, v6 §2). */
 export interface RelocalizationKeyframeTrial {
@@ -63,6 +111,119 @@ export interface RelocalizationKeyframeTrial {
   meanReprojectionErrorPx: number;
   inlierRatio: number;
   spatialCells: number;
+  spatialCoverage: number;
+  /** Full validation breakdown when the candidate reached PnP, null before that. */
+  validation: RelocValidationDiagnostics | null;
+}
+
+/** Thresholds of the relocalization validation (v9 §31); taken from RelocalizationConfig. */
+export interface RelocValidationThresholds {
+  minInliers: number;
+  maxMeanErrorPx: number;
+  minInlierRatio: number;
+  minSpatialCells: number;
+  minSpatialCoverage: number;
+}
+
+/** Measured values of one candidate that reached PnP. */
+export interface RelocCandidateMeasures {
+  inliers: number;
+  reprojectionErrorPx: number;
+  inlierRatio: number;
+  coveredCells: number;
+  spatialCoverage: number;
+  poseFinite: boolean;
+  /** Optional, diagnostic only. */
+  translationJump?: number;
+  rotationJumpDeg?: number;
+}
+
+/**
+ * Relocalization validation (v9 §5–§6): every condition is evaluated, none
+ * short-circuits. The reject reason is the first failing condition in the
+ * order pose → inliers → reprojection → ratio → spatial / coverage; the
+ * per-condition flags keep the rest. The normal-tracking jump gate is *not*
+ * part of this (v9 §16–§17).
+ */
+export function validateRelocalizationCandidate(m: RelocCandidateMeasures, t: RelocValidationThresholds): RelocValidationDiagnostics {
+  const posePassed = m.poseFinite && Number.isFinite(m.reprojectionErrorPx);
+  const inliersPassed = m.inliers >= t.minInliers;
+  const reprojectionPassed = posePassed && m.reprojectionErrorPx <= t.maxMeanErrorPx;
+  const ratioPassed = m.inlierRatio >= t.minInlierRatio;
+  const spatialPassed = m.coveredCells >= t.minSpatialCells;
+  const coveragePassed = m.spatialCoverage >= t.minSpatialCoverage;
+  const passed = posePassed && inliersPassed && reprojectionPassed && ratioPassed && spatialPassed && coveragePassed;
+  let rejectReason: RelocValidationRejectReason | null = null;
+  if (!passed) {
+    rejectReason = !posePassed
+      ? "pose_invalid"
+      : !inliersPassed
+        ? "inliers"
+        : !reprojectionPassed
+          ? "reprojection_error"
+          : !ratioPassed
+            ? "inlier_ratio"
+            : !spatialPassed || !coveragePassed
+              ? "spatial_distribution"
+              : "unknown";
+  }
+  return {
+    inliers: m.inliers,
+    requiredInliers: t.minInliers,
+    reprojectionErrorPx: m.reprojectionErrorPx,
+    maxReprojectionErrorPx: t.maxMeanErrorPx,
+    inlierRatio: m.inlierRatio,
+    minInlierRatio: t.minInlierRatio,
+    coveredCells: m.coveredCells,
+    totalCells: 9,
+    minSpatialCells: t.minSpatialCells,
+    spatialCoverage: m.spatialCoverage,
+    minSpatialCoverage: t.minSpatialCoverage,
+    translationJump: m.translationJump ?? NaN,
+    rotationJumpDeg: m.rotationJumpDeg ?? NaN,
+    inliersPassed,
+    reprojectionPassed,
+    ratioPassed,
+    spatialPassed,
+    coveragePassed,
+    posePassed,
+    passed,
+    rejectReason,
+  };
+}
+
+/** Stage a candidate stopped at, from its validation (first failing condition). */
+export function stageOfValidation(v: RelocValidationDiagnostics): RelocalizationStage {
+  switch (v.rejectReason) {
+    case null:
+      return "ok";
+    case "pose_invalid":
+      return "invalid";
+    case "inliers":
+      return "pnp_inliers";
+    case "reprojection_error":
+      return "reprojection";
+    case "inlier_ratio":
+      return "ratio";
+    case "spatial_distribution":
+      return "spatial";
+    default:
+      return "invalid";
+  }
+}
+
+/** Bounding box of the points / image area (0…1). */
+export function spatialCoverageOf(xs: ArrayLike<number>, ys: ArrayLike<number>, n: number, width: number, height: number): number {
+  if (n === 0) return 0;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = xs[i], y = ys[i];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return Math.max(0, Math.min(1, ((maxX - minX) * (maxY - minY)) / (width * height)));
 }
 
 /**
@@ -115,6 +276,10 @@ export interface RelocalizationResult {
   inlierRatio: number;
   /** Cells of a 3×3 grid over the image that contain PnP inliers (1…9). */
   spatialCells: number;
+  /** Bounding box of the inliers / image area (v9 §13). */
+  spatialCoverage: number;
+  /** Full validation breakdown (null when the candidate did not reach PnP). */
+  validation: RelocValidationDiagnostics | null;
   /** Coarse shift found (level-0 pixels). */
   shiftX: number;
   shiftY: number;
@@ -132,9 +297,9 @@ const STAGE_RANK: Record<RelocalizationStage, number> = {
   coarse: 0,
   landmarks: 1,
   lk: 2,
-  pnp: 3,
+  pnp_inliers: 3,
   invalid: 3,
-  error: 4,
+  reprojection: 4,
   ratio: 5,
   spatial: 6,
   ok: 7,
@@ -144,9 +309,9 @@ const STAGE_CODE: Record<RelocalizationStage, RelocalizationRejectCode | null> =
   coarse: "low_match_score",
   landmarks: "insufficient_landmarks",
   lk: "lk_failed",
-  pnp: "insufficient_inliers",
+  pnp_inliers: "insufficient_inliers",
   invalid: "invalid_pose",
-  error: "high_reprojection_error",
+  reprojection: "high_reprojection_error",
   ratio: "low_inlier_ratio",
   spatial: "poor_spatial_distribution",
   ok: null,
@@ -187,13 +352,21 @@ export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDia
   };
 }
 
-/** Rank trials: furthest stage first, then more inliers, then higher coarse score. */
+/**
+ * Rank trials (v9 §8): a validated candidate beats any rejected one; among
+ * rejected ones the furthest stage, then more inliers, then lower
+ * reprojection error, then wider coverage, then higher coarse score.
+ */
 function betterTrial(a: RelocalizationKeyframeTrial, b: RelocalizationKeyframeTrial | null): boolean {
   if (!b) return true;
   const ra = STAGE_RANK[a.stage];
   const rb = STAGE_RANK[b.stage];
   if (ra !== rb) return ra > rb;
   if (a.inlierCount !== b.inlierCount) return a.inlierCount > b.inlierCount;
+  if (a.validation && b.validation && a.meanReprojectionErrorPx !== b.meanReprojectionErrorPx) {
+    return a.meanReprojectionErrorPx < b.meanReprojectionErrorPx;
+  }
+  if (a.spatialCoverage !== b.spatialCoverage) return a.spatialCoverage > b.spatialCoverage;
   return a.coarseScore > b.coarseScore;
 }
 
@@ -280,7 +453,7 @@ export class Relocalizer {
     const diag = emptyRelocalizationDiagnostics(this.keyframes.length);
     const fail: RelocalizationResult = {
       success: false, keyframeId: -1, pose: null, inlierCount: 0, meanReprojectionErrorPx: 0,
-      matchScore: -1, lkRatio: 0, inlierRatio: 0, spatialCells: 0,
+      matchScore: -1, lkRatio: 0, inlierRatio: 0, spatialCells: 0, spatialCoverage: 0, validation: null,
       shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0, reason: "no keyframes", rejectCode: "no_keyframes",
       diagnostics: diag,
     };
@@ -332,6 +505,8 @@ export class Relocalizer {
         meanReprojectionErrorPx: 0,
         inlierRatio: 0,
         spatialCells: 0,
+        spatialCoverage: 0,
+        validation: null,
       };
 
       // ---- stage 1: coarse NCC alignment ----
@@ -425,6 +600,30 @@ export class Relocalizer {
       trial.meanReprojectionErrorPx = errPx;
       trial.inlierRatio = pnp.inlierCount / m;
       trial.spatialCells = spatialCellCount(inX, inY, inX.length, current.width, current.height);
+      trial.spatialCoverage = spatialCoverageOf(inX, inY, inX.length, current.width, current.height);
+      // Every condition is evaluated (v9 §5–§6); the trial's stage is the
+      // first failing one, the breakdown keeps all of them.
+      const poseFinite =
+        Array.from(pnp.pose.translation).every((v) => Number.isFinite(v)) && Array.from(pnp.pose.rotation).every((v) => Number.isFinite(v));
+      const validation = validateRelocalizationCandidate(
+        {
+          inliers: pnp.inlierCount,
+          reprojectionErrorPx: errPx,
+          inlierRatio: trial.inlierRatio,
+          coveredCells: trial.spatialCells,
+          spatialCoverage: trial.spatialCoverage,
+          poseFinite,
+        },
+        {
+          minInliers: cfg.minInliers,
+          maxMeanErrorPx: cfg.maxMeanErrorPx,
+          minInlierRatio: cfg.minInlierRatio,
+          minSpatialCells: cfg.minSpatialCells,
+          minSpatialCoverage: cfg.minSpatialCoverage,
+        },
+      );
+      trial.validation = validation;
+      trial.stage = stageOfValidation(validation);
       const candidate: RelocalizationResult = {
         success: false,
         keyframeId: kf.id,
@@ -435,6 +634,8 @@ export class Relocalizer {
         lkRatio: trial.lkRatio,
         inlierRatio: trial.inlierRatio,
         spatialCells: trial.spatialCells,
+        spatialCoverage: trial.spatialCoverage,
+        validation,
         shiftX: sx,
         shiftY: sy,
         tracks,
@@ -443,36 +644,24 @@ export class Relocalizer {
         rejectCode: null,
         diagnostics: diag,
       };
-      if (!Number.isFinite(errPx) || pnp.pose.translation.some((v) => !Number.isFinite(v))) {
-        trial.stage = "invalid";
-        record(trial, candidate, `kf ${kf.id}: invalid pose`);
+      if (validation.inliersPassed && validation.posePassed) diag.pnpPassed++;
+      if (!validation.reprojectionPassed && validation.posePassed) diag.errorRejected++;
+      if (!validation.ratioPassed) diag.ratioRejected++;
+      if (!validation.spatialPassed || !validation.coveragePassed) diag.spatialRejected++;
+      if (!validation.passed) {
+        const reason =
+          validation.rejectReason === "pose_invalid"
+            ? `kf ${kf.id}: invalid pose`
+            : validation.rejectReason === "inliers"
+              ? `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`
+              : validation.rejectReason === "reprojection_error"
+                ? `kf ${kf.id}: err ${errPx.toFixed(2)} > ${cfg.maxMeanErrorPx} px`
+                : validation.rejectReason === "inlier_ratio"
+                  ? `kf ${kf.id}: inlier ratio ${trial.inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}`
+                  : `kf ${kf.id}: inliers in ${trial.spatialCells}/9 cells < ${cfg.minSpatialCells}, coverage ${trial.spatialCoverage.toFixed(2)} < ${cfg.minSpatialCoverage}`;
+        record(trial, candidate, reason);
         continue;
       }
-      if (pnp.inlierCount < cfg.minInliers) {
-        trial.stage = "pnp";
-        record(trial, candidate, `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`);
-        continue;
-      }
-      diag.pnpPassed++;
-      if (errPx > cfg.maxMeanErrorPx) {
-        trial.stage = "error";
-        diag.errorRejected++;
-        record(trial, candidate, `kf ${kf.id}: err ${errPx.toFixed(2)} > ${cfg.maxMeanErrorPx} px`);
-        continue;
-      }
-      if (trial.inlierRatio < cfg.minInlierRatio) {
-        trial.stage = "ratio";
-        diag.ratioRejected++;
-        record(trial, candidate, `kf ${kf.id}: inlier ratio ${trial.inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}`);
-        continue;
-      }
-      if (trial.spatialCells < cfg.minSpatialCells) {
-        trial.stage = "spatial";
-        diag.spatialRejected++;
-        record(trial, candidate, `kf ${kf.id}: inliers in ${trial.spatialCells}/9 cells < ${cfg.minSpatialCells}`);
-        continue;
-      }
-      trial.stage = "ok";
       diag.validated++;
       record(trial, candidate, null);
       candidate.success = true;

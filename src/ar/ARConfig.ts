@@ -348,8 +348,14 @@ export interface RelocalizationConfig {
    * must be at least this fraction of the LK-tracked observations …
    */
   minInlierRatio: number;
-  /** … and occupy at least this many cells of a 3×3 grid over the image (spatial distribution, v5 §6). */
+  /** … and occupy at least this many cells of a 3×3 grid over the image (spatial distribution, v5 §6) … */
   minSpatialCells: number;
+  /**
+   * … and their bounding box must cover at least this fraction of the image
+   * (v9 §13: 35 inliers in 4 cells can span half the image or sit in one
+   * patch). 0 = diagnostic only; raised only after on-device logs (v9 §15, §30).
+   */
+  minSpatialCoverage: number;
   /**
    * Confirmation (v5 §10–§11): a validated candidate is applied at once only
    * when it is clearly high quality (≥ immediateInliers inliers and mean
@@ -618,6 +624,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     attemptEveryNFrames: 3,
     minInlierRatio: 0.5,
     minSpatialCells: 4,
+    minSpatialCoverage: 0,
     confirmationFrames: 1,
     immediateInliers: 60,
     immediateMaxErrorPx: 1.0,

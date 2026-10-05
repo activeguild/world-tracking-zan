@@ -67,7 +67,8 @@ const messageEl = document.getElementById("message") as HTMLElement;
 
 const hud = new DebugOverlay(app);
 const debugToggle = document.getElementById("debug-toggle") as HTMLButtonElement;
-console.log(`[AR] build ${typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev"}`);
+// Console output only in debug mode (v9 §23–§26); real errors still surface through showError().
+if (debugLog) console.log(`[AR] build ${typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev"}`);
 
 const session = new ARSession({
   video,
@@ -243,16 +244,16 @@ function hudCandidate(c: PoseCandidateReport | null, scale: number): HudCandidat
   };
 }
 
-/** Short stage names for the RELOC section (v6 §6). */
+/** Short stage names for the RELOC section (v6 §6, v9 §29: unambiguous). */
 const RELOC_FAIL_SHORT: Record<string, string> = {
-  coarse: "ncc",
-  landmarks: "landmarks",
-  lk: "lk",
-  pnp: "inliers",
-  invalid: "invalid",
-  error: "error",
-  ratio: "ratio",
-  spatial: "spatial",
+  coarse: "ncc_match",
+  landmarks: "landmarks_left",
+  lk: "lk_tracking",
+  pnp_inliers: "inliers",
+  invalid: "pose_invalid",
+  reprojection: "reprojection_error",
+  ratio: "inlier_ratio",
+  spatial: "spatial_distribution",
 };
 
 function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): HudRelocDiagnostics | null {
@@ -276,6 +277,28 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
           inlierRatio: b.inlierRatio,
           spatialCells: b.spatialCells,
           coarseScore: b.coarseScore,
+          validation: b.validation
+            ? {
+                inliers: b.validation.inliers,
+                requiredInliers: b.validation.requiredInliers,
+                errorPx: b.validation.reprojectionErrorPx,
+                maxErrorPx: b.validation.maxReprojectionErrorPx,
+                ratio: b.validation.inlierRatio,
+                minRatio: b.validation.minInlierRatio,
+                cells: b.validation.coveredCells,
+                totalCells: b.validation.totalCells,
+                minCells: b.validation.minSpatialCells,
+                coverage: b.validation.spatialCoverage,
+                minCoverage: b.validation.minSpatialCoverage,
+                inliersPassed: b.validation.inliersPassed,
+                reprojectionPassed: b.validation.reprojectionPassed,
+                ratioPassed: b.validation.ratioPassed,
+                spatialPassed: b.validation.spatialPassed,
+                coveragePassed: b.validation.coveragePassed,
+                posePassed: b.validation.posePassed,
+                rejectReason: b.validation.rejectReason,
+              }
+            : null,
         }
       : null,
     fail: b && b.stage !== "ok" ? (RELOC_FAIL_SHORT[b.stage] ?? b.stage) : d.rejectCode === "no_keyframes" ? "no keyframes" : null,
@@ -283,8 +306,14 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
   };
 }
 
-// HUD refresh loop (independent of vision rate).
+// HUD refresh loop (independent of vision rate). With the HUD hidden nothing
+// is formatted or written to the DOM (v9 §28); the engine's diagnostics are
+// still computed and available through getStats().
 function refreshHud(): void {
+  if (!hudVisible) {
+    requestAnimationFrame(refreshHud);
+    return;
+  }
   const s = session.getStats();
   hud.update({
     renderFps: s.renderFps,

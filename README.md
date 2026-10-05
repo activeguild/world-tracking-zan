@@ -218,6 +218,17 @@ per value, `RELOC` section only while lost): `KF 8 / try 2`, `NCC 2`, `LK 2`,
 `Need 14/24i obs 14 (recovery)` row naming the map-PnP recovery rule in force.
 No threshold changed.
 
+Relocalization validation breakdown (v9): every condition of a PnP candidate
+is evaluated independently (`validateRelocalizationCandidate`): inliers,
+reprojection error, inlier ratio, covered 3×3 cells and the bounding-box
+coverage of the inliers (`minSpatialCoverage`, 0 = diagnostic only), plus a
+finite-pose check; the reject reason is structured (`inliers |
+reprojection_error | inlier_ratio | spatial_distribution | pose_invalid`) and
+the HUD shows each value against its threshold with OK / NG. The
+normal-tracking jump gate is not applied to relocalization candidates. The
+debug HUD, the overlay and the `[AR]` console logs are off unless `?debug=1`;
+with the HUD hidden nothing is formatted or written to the DOM per frame.
+
 ## Tests
 
 ```bash

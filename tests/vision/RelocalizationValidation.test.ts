@@ -137,6 +137,18 @@ describe("Relocalizer global validation (v5 §5–§7)", () => {
     expect(d2.best?.stage).toBe("spatial");
     expect(d2.best?.spatialCells).toBe(r2.spatialCells);
     expect(d2.rejectCode).toBe("poor_spatial_distribution");
+    // Test 9 (v9): the best candidate keeps its full validation breakdown
+    // after the rejection — inliers / error passed, spatial did not.
+    const bv = d2.best!.validation!;
+    expect(bv.inliersPassed).toBe(true);
+    expect(bv.reprojectionPassed).toBe(true);
+    expect(bv.spatialPassed).toBe(false);
+    expect(bv.rejectReason).toBe("spatial_distribution");
+    expect(bv.requiredInliers).toBe(corner.cfg.relocalization.minInliers);
+    expect(bv.coveredCells).toBe(r2.spatialCells);
+    expect(r2.spatialCoverage).toBeGreaterThan(0);
+    expect(r2.spatialCoverage).toBeLessThan(0.2); // the corner cluster covers little of the image
+    expect(r2.validation).toEqual(bv);
 
     // A different scene: the keyframe drops out early (coarse or LK) and the
     // counters say so; the best trial carries its coarse score.

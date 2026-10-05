@@ -169,6 +169,68 @@ describe("Phase 1 browser smoke test", () => {
     server?.kill();
   });
 
+  it("debug HUD and debug console logs are off without ?debug=1 and on with it (v9 §23–§24, Tests 10–11)", async () => {
+    const base = `https://localhost:${PORT}/`;
+    // Plain URL: HUD hidden, feature overlay hidden, toggle present, no [AR] console output.
+    const ctxOff = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const pageOff = await ctxOff.newPage();
+    const offLogs: string[] = [];
+    pageOff.on("console", (m: ConsoleMessage) => {
+      if (m.text().startsWith("[AR]")) offLogs.push(m.text());
+    });
+    await pageOff.goto(base, { waitUntil: "load" });
+    await pageOff.click("#start");
+    await pageOff.waitForFunction(() => window.__ar.stats().framesProcessed > 20, null, { timeout: 60_000 });
+    const off = await pageOff.evaluate(() => ({
+      hud: getComputedStyle(document.querySelector(".ar-hud")!).display,
+      overlay: getComputedStyle(document.getElementById("overlay")!).display,
+      toggle: getComputedStyle(document.getElementById("debug-toggle")!).display,
+      toggleOn: document.getElementById("debug-toggle")!.classList.contains("on"),
+      // Diagnostics are still produced with the HUD off.
+      motion: window.__ar.stats().motion?.level ?? null,
+    }));
+    expect(off.hud).toBe("none");
+    expect(off.overlay).toBe("none");
+    expect(off.toggle).not.toBe("none");
+    expect(off.toggleOn).toBe(false);
+    expect(off.motion).not.toBeNull();
+    expect(offLogs, offLogs.join("\n")).toEqual([]);
+    // One tap turns the HUD on; another turns it off again.
+    await pageOff.click("#debug-toggle");
+    expect(await pageOff.evaluate(() => getComputedStyle(document.querySelector(".ar-hud")!).display)).toBe("block");
+    await pageOff.click("#debug-toggle");
+    expect(await pageOff.evaluate(() => getComputedStyle(document.querySelector(".ar-hud")!).display)).toBe("none");
+    // `debug=true` is not debug mode either.
+    await ctxOff.close();
+    const ctxTrue = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const pageTrue = await ctxTrue.newPage();
+    await pageTrue.goto(`${base}?debug=true`, { waitUntil: "load" });
+    expect(await pageTrue.evaluate(() => getComputedStyle(document.querySelector(".ar-hud")!).display)).toBe("none");
+    await ctxTrue.close();
+
+    // ?debug=1: HUD visible with the diagnostics rows.
+    const ctxOn = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const pageOn = await ctxOn.newPage();
+    const onLogs: string[] = [];
+    pageOn.on("console", (m: ConsoleMessage) => {
+      if (m.text().startsWith("[AR]")) onLogs.push(m.text());
+    });
+    await pageOn.goto(`${base}?debug=1`, { waitUntil: "load" });
+    await pageOn.click("#start");
+    await pageOn.waitForFunction(() => window.__ar.stats().framesProcessed > 20, null, { timeout: 60_000 });
+    const on = await pageOn.evaluate(() => ({
+      hud: getComputedStyle(document.querySelector(".ar-hud")!).display,
+      text: (document.querySelector(".ar-hud") as HTMLElement).innerText,
+      toggleOn: document.getElementById("debug-toggle")!.classList.contains("on"),
+    }));
+    expect(on.hud).toBe("block");
+    expect(on.toggleOn).toBe(true);
+    expect(on.text).toMatch(/State/);
+    expect(on.text).toMatch(/Motion/);
+    expect(onLogs.length).toBeGreaterThan(0);
+    await ctxOn.close();
+  });
+
   it("tracks features from the camera through the worker pipeline", async () => {
     const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
     const page = await context.newPage();

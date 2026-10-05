@@ -40,6 +40,27 @@ export interface HudRelocDiagnostics {
     inlierRatio: number;
     spatialCells: number;
     coarseScore: number;
+    /** Per-condition validation of the best candidate (v9 §21), null before PnP. */
+    validation: {
+      inliers: number;
+      requiredInliers: number;
+      errorPx: number;
+      maxErrorPx: number;
+      ratio: number;
+      minRatio: number;
+      cells: number;
+      totalCells: number;
+      minCells: number;
+      coverage: number;
+      minCoverage: number;
+      inliersPassed: boolean;
+      reprojectionPassed: boolean;
+      ratioPassed: boolean;
+      spatialPassed: boolean;
+      coveragePassed: boolean;
+      posePassed: boolean;
+      rejectReason: string | null;
+    } | null;
   } | null;
   /** Short reject code of the best candidate's stage (v6 §6), null when it passed. */
   fail: string | null;
@@ -312,11 +333,28 @@ export class DebugOverlay {
         rows.push(row("VAL", `${d.validated}`, d.validated === 0 && d.tried > 0 ? "hud-warn" : undefined));
         if (d.best) {
           const b = d.best;
-          rows.push(row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px`));
-          rows.push(row("Ratio", `${b.inlierRatio.toFixed(2)}  cells ${b.spatialCells}/9  ncc ${b.coarseScore.toFixed(2)}`));
-          rows.push(row("Stage", b.stage));
+          rows.push(row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}`));
+          const v = b.validation;
+          if (v) {
+            // v9 §21: every condition with its value, its threshold and PASS / FAIL.
+            const ok = (p: boolean) => (p ? "OK" : "NG");
+            rows.push(row("Inlier", `${v.inliers}/${v.requiredInliers}  ${ok(v.inliersPassed)}`, v.inliersPassed ? undefined : "hud-warn"));
+            rows.push(row("Error", `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  ${ok(v.reprojectionPassed)}`, v.reprojectionPassed ? undefined : "hud-warn"));
+            rows.push(row("Ratio", `${v.ratio.toFixed(2)}/${v.minRatio.toFixed(2)}  ${ok(v.ratioPassed)}`, v.ratioPassed ? undefined : "hud-warn"));
+            rows.push(row("Cells", `${v.cells}/${v.totalCells} (min ${v.minCells})  ${ok(v.spatialPassed)}`, v.spatialPassed ? undefined : "hud-warn"));
+            rows.push(
+              row("Cover", `${v.coverage.toFixed(2)}${v.minCoverage > 0 ? `/${v.minCoverage.toFixed(2)}  ${ok(v.coveragePassed)}` : ""}`, v.coveragePassed ? undefined : "hud-warn"),
+            );
+            if (!v.posePassed) rows.push(row("Pose", "invalid", "hud-warn"));
+            rows.push(row("Reject", v.rejectReason ?? "-", v.rejectReason ? "hud-warn" : undefined));
+          } else {
+            // Dropped out before PnP: the stage says where.
+            rows.push(row("Stage", b.stage));
+            if (d.fail) rows.push(row("Reject", d.fail, "hud-warn"));
+          }
+        } else if (d.fail) {
+          rows.push(row("Reject", d.fail, "hud-warn"));
         }
-        if (d.fail) rows.push(row("Fail", d.fail, "hud-warn"));
       }
       if (r.attempt === "candidate" || r.attempt === "success") {
         rows.push(row(r.attempt === "success" ? "Apply" : "Cand", `KF${r.keyframeId} ${r.inliers}i ${r.errorPx.toFixed(2)}px match ${r.match.toFixed(2)}`));
