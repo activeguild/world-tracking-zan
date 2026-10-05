@@ -207,6 +207,17 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v12 対応 — Relocalization 再投影誤差の Acceptable 段（2026-10-05、実機確認待ち）
+
+実機の再局所化候補 `2.44 px`（inlier / ratio / cells は合格）が `maxMeanErrorPx` 1.5 px だけで落ちていた。**`1.5 → 3 px` への単純な引き上げはしない**。1.5 px を strict として維持し、1.5 px 超〜`relocalization.acceptableMeanErrorPx`（3.0）を **acceptable 段** とする。acceptable は「他の既存条件（`minInliers` 25 / `minInlierRatio` 0.5 / `minSpatialCells` 4 / `minSpatialCoverage` / 有限 Pose）が**全部**通ったときだけ」合格で、合格しても **確認フレームが必須**（即 Apply しない。`confirmationFrames` が 0 でも 1 回）。NCC（`coarseMinScore`）・Jump 診断・事後監視（`postRelocMonitorFrames`）は従来どおり働く。指示書本文は末尾段落のみ受領のため、上限 3.0 は本文の言及値、構成は上記の前提で実装（相違があれば要修正）。
+
+- **検証（`validateRelocalizationCandidate`）**: `RelocValidationThresholds.acceptableMeanErrorPx?`（strict 以下なら無効）。`RelocValidationDiagnostics` に `acceptableReprojectionErrorPx` / `errorTier: strict | acceptable | rejected` / `reprojectionAcceptable`。`reprojectionPassed` は strict の意味のまま。`passed = 他条件 && (strict || acceptable)`。拒否理由: 上限超過は `reprojection_error`、上限内で他条件が落ちたら**その条件**（`inlier_ratio` / `spatial_distribution` / `inliers` / `pose_invalid`）。`errorRejected` カウンタは上限超過のみ、`validatedAcceptable` を追加
+- **Apply（`VisionEngine`）**: `requiredConfirmations(tier, confirmationFrames)` = acceptable なら `max(1, 設定値)`。即 Apply（`immediateInliers` 60 / `immediateMaxErrorPx` 1.0）は strict のみ。候補順位: 検証通過同士では strict > acceptable、同段なら inlier 数。`goodInliers` での早期打切りは strict のみ
+- **出力 / HUD / ログ**: `RelocalizationOutput.errorTier`、`RelocalizationResult.errorTier`。HUD `Error 2.44/1.50px ACCEPT (≤ 3.00)`（strict 不合格・上限内）/ `Error 3.20/1.50px NG (acc ≤ 3.00)`、`Cand KF3 35i 2.44px ACC`。ログ `RELOCALIZATION CANDIDATE … error = 2.44px (acceptable tier ≤ 3px, confirmation required)`
+- **変更しないもの**: strict 1.5 px、ratio / cells / coverage / NCC / Jump 診断のみ / 確認の再現許容（`confirmTranslationDepthRatio` 5% / `confirmRotationDeg` 5°）/ 事後監視 / PnP / LK / Jump Gate / Plane
+- テスト 196 件（+4）: v12 Test 1（2.44 px + 35i / 0.61 / 4 cells → `acceptable` 合格、strict 条件は不合格のまま、良候補は `strict`）、Test 2（上限内でも ratio / cells / inliers / pose のどれかが落ちれば拒否でその条件が理由、Jump は診断のみ）、Test 3（3.01 px は `reprojection_error`、3.0 ちょうどは acceptable、上限 ≤ strict / undefined で無効）、Test 4（`requiredConfirmations`: strict は設定値、acceptable は最低 1）。v9 Test 3（2.93 px）は段無効の閾値で従来の拒否を維持。ブラウザテスト 2 件合格
+- **実機で読むべきもの**: RELOC 節 `Error … ACCEPT` が出た次の試行で `Apply … ACC` になるか（確認フレームの再現）。`confirmation` で落ち続けるなら 2.44 px 候補は再現性がなく、上限ではなく候補の質の問題
+
 ### 修正指示書 v11.1 対応 — Recovery の 1 回リセット化・Two-view トリガー・候補診断の現フレーム化（2026-10-05、実機確認待ち）
 
 v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Relocalization / Plane RANSAC / Extent の閾値は変更していない**（AC-17、AC-18）。新しい固定値も追加していない（§7: 既存設定のみ再利用）。

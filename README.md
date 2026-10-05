@@ -278,6 +278,17 @@ are about the current frame's search (`candidateFound = stage === "candidate"`,
 detector's grace period is `previousCandidateHeld`. Recovery state:
 `inactive | starting | warmup | candidate | stable`.
 
+Relocalization error tiers (v12): the strict acceptance stays at
+`relocalization.maxMeanErrorPx` (1.5 px). A candidate above it but within
+`acceptableMeanErrorPx` (3.0 px) passes as the *acceptable* tier only when
+every other condition (inliers, inlier ratio, spatial cells, coverage, finite
+pose) passes, and it is then always held for a confirmation frame — never
+applied at once, whatever `confirmationFrames` or the immediate-apply rule
+say. Beyond the acceptable bound the error rejects on its own; within it a
+failing companion condition is the named reject reason. Validated strict
+candidates rank above acceptable ones. The HUD shows `Error 2.44/1.50px
+ACCEPT (≤ 3.00)` and marks the candidate `ACC`.
+
 ## Tests
 
 ```bash

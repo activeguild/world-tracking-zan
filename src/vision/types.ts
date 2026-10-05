@@ -326,6 +326,13 @@ export interface RelocalizationOutput {
   rejectCode: RelocalizationRejectCode | null;
   /** Quality of the candidate of this attempt (v5 §5–§6). */
   meanReprojectionErrorPx: number;
+  /**
+   * Reprojection-error tier of this attempt's candidate (v12): `strict` ≤
+   * `maxMeanErrorPx`, `acceptable` ≤ `acceptableMeanErrorPx` with every other
+   * condition passing (always confirmed before apply), `rejected` otherwise;
+   * null when no candidate reached PnP.
+   */
+  errorTier: "strict" | "acceptable" | "rejected" | null;
   matchScore: number;
   inlierRatio: number;
   spatialCells: number;

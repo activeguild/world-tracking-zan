@@ -351,8 +351,18 @@ export interface RelocalizationConfig {
   minInliers: number;
   /** Stop trying more candidates once this many inliers are found. */
   goodInliers: number;
-  /** Accept only when the mean reprojection error is below this (px). */
+  /** Strict acceptance: mean reprojection error at or below this (px). */
   maxMeanErrorPx: number;
+  /**
+   * Acceptable tier (v12): a candidate whose error is above `maxMeanErrorPx`
+   * but at or below this bound still passes when *every other* condition
+   * (minInliers, minInlierRatio, minSpatialCells, minSpatialCoverage, finite
+   * pose) passes, and is then always held for a confirmation frame — never
+   * applied at once. The strict bound is not moved; the on-device 2.44 px
+   * return (inliers, ratio and cells all fine) is let through by the other
+   * conditions. Values ≤ `maxMeanErrorPx` disable the tier.
+   */
+  acceptableMeanErrorPx: number;
   /** Frames the map may stay lost before a relocalization attempt starts. */
   startAfterLostFrames: number;
   /** Failed relocalization attempts required (besides the lost time) before the map / world are reset. */
@@ -641,6 +651,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     minInliers: 25,
     goodInliers: 60,
     maxMeanErrorPx: 1.5,
+    // Keyframe→current LK after a loss is naturally noisier than the
+    // per-frame LK; between 1.5 and 3 px the other conditions decide (v12).
+    acceptableMeanErrorPx: 3.0,
     startAfterLostFrames: 1,
     minAttemptsBeforeReset: 10,
     // Every 3rd frame: relocalization attempts dominated the lost-frame cost

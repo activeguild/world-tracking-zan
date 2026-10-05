@@ -9,7 +9,7 @@ import { PlaneDetector } from "./PlaneDetector";
 import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
-import { Relocalizer, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
+import { Relocalizer, requiredConfirmations, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
 import { isJumpRejection, poseDelta } from "./PoseValidation";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
 import {
@@ -539,6 +539,7 @@ export class VisionEngine {
           reason: r.reason,
           rejectCode: r.rejectCode,
           meanReprojectionErrorPx: r.meanReprojectionErrorPx,
+          errorTier: r.errorTier,
           matchScore: r.matchScore,
           inlierRatio: r.inlierRatio,
           spatialCells: r.spatialCells,
@@ -548,8 +549,13 @@ export class VisionEngine {
         };
         let apply = false;
         if (r.success && r.pose) {
+          // v12: an acceptable-tier candidate (error above the strict bound)
+          // is never applied at once — it needs at least one confirmation
+          // frame whatever the immediate-apply rule says.
+          const tier = r.errorTier ?? "strict";
+          const needed = requiredConfirmations(tier, rc.confirmationFrames);
           const immediate =
-            rc.confirmationFrames <= 0 || (r.inlierCount >= rc.immediateInliers && r.meanReprojectionErrorPx <= rc.immediateMaxErrorPx);
+            needed <= 0 || (tier === "strict" && r.inlierCount >= rc.immediateInliers && r.meanReprojectionErrorPx <= rc.immediateMaxErrorPx);
           if (pending) {
             // Confirmation: the new candidate must land where the pending one did.
             const c = poseDelta(r.pose, pending.result.pose!);
@@ -558,7 +564,7 @@ export class VisionEngine {
               c.translation <= rc.confirmTranslationDepthRatio * Math.max(depth, 1e-9) && c.rotationDeg <= rc.confirmRotationDeg;
             if (near) {
               pending.confirmations++;
-              apply = pending.confirmations >= rc.confirmationFrames;
+              apply = pending.confirmations >= needed;
             } else {
               this.relocStatus.reason = `confirmation failed: Δ ${c.translation.toFixed(3)} / ${c.rotationDeg.toFixed(1)}° vs frame ${pending.frameId}`;
               this.relocStatus.rejectCode = "confirmation_failed";
@@ -1384,6 +1390,7 @@ function emptyReloc(): RelocalizationOutput {
     reason: null,
     rejectCode: null,
     meanReprojectionErrorPx: 0,
+    errorTier: null,
     matchScore: 0,
     inlierRatio: 0,
     spatialCells: 0,

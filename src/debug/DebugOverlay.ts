@@ -47,6 +47,9 @@ export interface HudRelocDiagnostics {
       requiredInliers: number;
       errorPx: number;
       maxErrorPx: number;
+      /** Acceptable error bound and the tier the candidate landed in (v12). */
+      acceptableErrorPx: number;
+      errorTier: string;
       ratio: number;
       minRatio: number;
       cells: number;
@@ -207,6 +210,8 @@ export interface HudStats {
     attempt: string;
     inliers: number;
     errorPx: number;
+    /** strict / acceptable / rejected / null (v12). */
+    errorTier: string | null;
     match: number;
     inlierRatio: number;
     spatialCells: number;
@@ -390,7 +395,12 @@ export class DebugOverlay {
             // v9 §21: every condition with its value, its threshold and PASS / FAIL.
             const ok = (p: boolean) => (p ? "OK" : "NG");
             rows.push(row("Inlier", `${v.inliers}/${v.requiredInliers}  ${ok(v.inliersPassed)}`, v.inliersPassed ? undefined : "hud-warn"));
-            rows.push(row("Error", `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  ${ok(v.reprojectionPassed)}`, v.reprojectionPassed ? undefined : "hud-warn"));
+            // v12: strict bound, then the acceptable tier (ACCEPT = carried by the other conditions, confirmation required).
+            const errorText =
+              v.errorTier === "acceptable"
+                ? `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  ACCEPT (≤ ${v.acceptableErrorPx.toFixed(2)})`
+                : `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  ${ok(v.reprojectionPassed)}${!v.reprojectionPassed && v.acceptableErrorPx > v.maxErrorPx ? `  (acc ≤ ${v.acceptableErrorPx.toFixed(2)})` : ""}`;
+            rows.push(row("Error", errorText, v.reprojectionPassed ? undefined : "hud-warn"));
             rows.push(row("Ratio", `${v.ratio.toFixed(2)}/${v.minRatio.toFixed(2)}  ${ok(v.ratioPassed)}`, v.ratioPassed ? undefined : "hud-warn"));
             rows.push(row("Cells", `${v.cells}/${v.totalCells} (min ${v.minCells})  ${ok(v.spatialPassed)}`, v.spatialPassed ? undefined : "hud-warn"));
             rows.push(
@@ -408,7 +418,12 @@ export class DebugOverlay {
         }
       }
       if (r.attempt === "candidate" || r.attempt === "success") {
-        rows.push(row(r.attempt === "success" ? "Apply" : "Cand", `KF${r.keyframeId} ${r.inliers}i ${r.errorPx.toFixed(2)}px match ${r.match.toFixed(2)}`));
+        rows.push(
+          row(
+            r.attempt === "success" ? "Apply" : "Cand",
+            `KF${r.keyframeId} ${r.inliers}i ${r.errorPx.toFixed(2)}px${r.errorTier === "acceptable" ? " ACC" : ""} match ${r.match.toFixed(2)}`,
+          ),
+        );
         rows.push(row("Jump", `${cm(r.jumpM)} / ${r.jumpDeg.toFixed(1)}°`));
       }
       if (r.attempt === "fail" && r.rejectCode === "confirmation_failed") rows.push(row("Fail", "confirmation", "hud-warn"));
