@@ -68,34 +68,35 @@ describe("getGuidance (v10)", () => {
   // ---- v11: plane recovery after fast motion ----
   it("v11 Test 9: plane recovery without a world → slow down / show a flat surface / detecting; never the return text", () => {
     for (const state of [TrackingState.TRACKING, TrackingState.PLANE_DETECTING]) {
-      expect(getGuidance(ctx({ state, planeRecovery: "recovery" }))).toBe("SLOW_DOWN");
-      expect(GUIDANCE_TEXT_JA[getGuidance(ctx({ state, planeRecovery: "recovery" }))]).toBe("スマホをゆっくり動かしてください");
+      expect(getGuidance(ctx({ state, planeRecovery: "starting" }))).toBe("SLOW_DOWN");
+      expect(GUIDANCE_TEXT_JA[getGuidance(ctx({ state, planeRecovery: "starting" }))]).toBe("スマホをゆっくり動かしてください");
       expect(getGuidance(ctx({ state, planeRecovery: "warmup" }))).toBe("PLANE_WARMUP");
       expect(GUIDANCE_TEXT_JA[getGuidance(ctx({ state, planeRecovery: "warmup" }))]).toBe("平らな場所をゆっくり映してください");
     }
     expect(getGuidance(ctx({ state: TrackingState.PLANE_DETECTING, planeRecovery: "candidate" }))).toBe("PLANE_DETECTING");
+    expect(getGuidance(ctx({ state: TrackingState.PLANE_DETECTING, planeRecovery: "stable" }))).toBe("PLANE_DETECTING");
     // Too few features wins over the recovery wording.
     expect(getGuidance(ctx({ state: TrackingState.PLANE_DETECTING, planeRecovery: "warmup", lowFeature: true }))).toBe("SHOW_FLAT_SURFACE");
     // Whatever the recovery phase, no world → no RELOCALIZE and no "go back" text (v11 §46, AC-11).
     for (const state of Object.values(TrackingState)) {
-      for (const planeRecovery of ["none", "recovery", "warmup", "candidate"] as const) {
+      for (const planeRecovery of ["inactive", "starting", "warmup", "candidate", "stable"] as const) {
         const key = getGuidance(ctx({ state, planeRecovery, lostMs: 60_000 }));
         expect(key, `${state} ${planeRecovery}`).not.toBe("RELOCALIZE");
         expect(GUIDANCE_TEXT_JA[key]).not.toMatch(/先ほど見ていた場所/);
       }
     }
     // "none" / absent behaves exactly as before v11.
-    expect(getGuidance(ctx({ state: TrackingState.PLANE_DETECTING, planeRecovery: "none" }))).toBe("MOVE_SLOWLY");
-    expect(getGuidance(ctx({ state: TrackingState.TRACKING, planeRecovery: "none" }))).toBe("SCAN_SURFACE");
+    expect(getGuidance(ctx({ state: TrackingState.PLANE_DETECTING, planeRecovery: "inactive" }))).toBe("MOVE_SLOWLY");
+    expect(getGuidance(ctx({ state: TrackingState.TRACKING, planeRecovery: "inactive" }))).toBe("SCAN_SURFACE");
   });
 
   it("v11 Test 10: established world, lost past the delay → RELOCALIZE (unchanged by v11)", () => {
-    for (const planeRecovery of ["none", "recovery", "warmup", "candidate"] as const) {
+    for (const planeRecovery of ["inactive", "starting", "warmup", "candidate", "stable"] as const) {
       const key = getGuidance(ctx({ state: TrackingState.RELOCALIZING, worldEstablished: true, lostMs: DELAY, planeRecovery }));
       expect(key).toBe("RELOCALIZE");
       expect(GUIDANCE_TEXT_JA[key]).toMatch(/先ほど見ていた場所にカメラを戻してください/);
     }
-    expect(getGuidance(ctx({ state: TrackingState.TRACKING_LOST, worldEstablished: true, lostMs: DELAY - 1, planeRecovery: "none" }))).toBe("RECOVER");
+    expect(getGuidance(ctx({ state: TrackingState.TRACKING_LOST, worldEstablished: true, lostMs: DELAY - 1, planeRecovery: "inactive" }))).toBe("RECOVER");
   });
 });
 
@@ -119,14 +120,15 @@ describe("worldPhase (v10 §3, §26)", () => {
   it("v11 §28, §55: plane recovery phases while the map is tracked", () => {
     const p = (over: Partial<GuidanceContext>) => worldPhase(ctx(over));
     for (const state of [TrackingState.TRACKING, TrackingState.PLANE_DETECTING]) {
-      expect(p({ state, planeRecovery: "recovery" })).toBe("PLANE_RECOVERY");
+      expect(p({ state, planeRecovery: "starting" })).toBe("PLANE_RECOVERY");
       expect(p({ state, planeRecovery: "warmup" })).toBe("PLANE_WARMUP");
     }
     expect(p({ state: TrackingState.PLANE_DETECTING, planeRecovery: "candidate" })).toBe("PLANE_CANDIDATE");
-    expect(p({ state: TrackingState.PLANE_DETECTING, planeRecovery: "none" })).toBe("SURFACE_SCAN");
+    expect(p({ state: TrackingState.PLANE_DETECTING, planeRecovery: "stable" })).toBe("PLANE_CANDIDATE");
+    expect(p({ state: TrackingState.PLANE_DETECTING, planeRecovery: "inactive" })).toBe("SURFACE_SCAN");
     expect(p({ state: TrackingState.TRACKING, planeRecovery: "candidate" })).toBe("SURFACE_SCAN");
     // Established world: the recovery phase never shows (the map tracking rides out the motion, §30).
-    expect(p({ state: TrackingState.PLANE_FOUND, worldEstablished: true, planeRecovery: "none" })).toBe("WORLD_TRACKING");
-    expect(p({ state: TrackingState.RELOCALIZING, worldEstablished: true, lostMs: DELAY, planeRecovery: "none" })).toBe("RELOCALIZING");
+    expect(p({ state: TrackingState.PLANE_FOUND, worldEstablished: true, planeRecovery: "inactive" })).toBe("WORLD_TRACKING");
+    expect(p({ state: TrackingState.RELOCALIZING, worldEstablished: true, lostMs: DELAY, planeRecovery: "inactive" })).toBe("RELOCALIZING");
   });
 });

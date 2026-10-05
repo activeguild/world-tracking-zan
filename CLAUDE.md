@@ -207,6 +207,19 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v11.1 対応 — Recovery の 1 回リセット化・Two-view トリガー・候補診断の現フレーム化（2026-10-05、実機確認待ち）
+
+v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Relocalization / Plane RANSAC / Extent の閾値は変更していない**（AC-17、AC-18）。新しい固定値も追加していない（§7: 既存設定のみ再利用）。
+
+- **Start と Active の分離（§3–§5, §31, AC-4〜AC-6）**: `PlaneRecovery.update()` は **inactive → active の瞬間だけ** true を返し、`resetForRecovery()` はそのフレームの 1 回のみ。Active 中に fast / two-view が再発しても restart せず `lastMotionTimestamp` を記録するだけ（reason は開始時のもの）。合成: 3 フレーム連続の高速移動で `recoveries` 1（v11 では 3）、高速フレーム中も stable が 0→1→2→3→4 と単調増加し PLANE_FOUND が 31 → 29 フレーム
+- **Significant Motion（§6–§10, AC-1〜AC-3）**: `PlaneRecovery.trigger()` の優先順位 `manual > fast_motion > two_view_motion`。`significantTwoViewMotion(pose, prev, thresholds)` = 二視点 `parallaxPx ≥ pose.fullConfidenceParallaxPx`（25）**かつ** `confidence` / `translationConfidence ≥ landmarks.initMinTranslationConfidence`（0.5）**かつ** `inlierCount ≥ pose.minCorrespondences`（20）**かつ** モデルが essential / homography、**かつ同一参照フレーム内で閾値を跨いだフレーム**（前フレームの視差が閾値未満、または参照更新直後）。視差は参照フレームからの累積量なので「水準」で判定すると低速スキャンでも視差が育った時点で毎回発火する。「跨いだ瞬間」= 視点が大きく変わったイベントとして扱う。実機ログ（`Motion MED 6.3px / 2view par 45px conf 1.00/1.00 n116`）は条件を満たす。視差だけでは発火しない（§8）
+- **終了条件（§32）**: `found` / World 確立 / Map 失探（`framesSinceTracked > state.mapLostFrameTolerance`、通常の失探処理へ引き渡し）。Timeout は既存設定がないため追加していない（§33）
+- **候補診断の現フレーム化（§21–§24, AC-11〜AC-13）**: `candidateFound = lastSearch.stage === "candidate"`（今フレームの RANSAC 結果）、`candidateCommitted = candidateFound && 水平`、新設 `previousCandidateHeld`（今フレームは失敗だが猶予期間で保持中の候補あり）。`stableFrames` は detector のカウンタ。v11 の `candidate !== null` 判定は保持候補を「発見」と誤表示していた
+- **state（§27）**: `phase` を `state: inactive | starting | warmup | candidate | stable` に変更（`starting` = 開始フレームと motion fast 継続中、`warmup` = 現フレーム候補なし、`candidate` = 現フレーム候補あり、`stable` = 安定カウント開始後）。Guidance / `worldPhase` は `starting → SLOW_DOWN / PLANE_RECOVERY`、`warmup → PLANE_WARMUP`、`candidate | stable → PLANE_DETECTING / PLANE_CANDIDATE`
+- **HUD（§25–§26）**: `Recov FAST|TWO_VIEW|PLANE_POINTS|MANUAL <state> 1.2s`、`Cand YES commit YES` は現フレーム基準、保持のみは `Cand NO commit NO (held)`。ログは state/段階が変わったときのみ
+- テスト 192 件（+3、内容更新）: Test 1（fast → start、state 遷移）、Test 2/3/4（MED + 視差 45 / conf 1.0 / n116 → `two_view_motion` 開始、視差小・信頼度低・inlier 不足・rotation モデルでは不発、水準ではなくイベント、参照更新後は再発火可）、Test 5〜9（3 フレーム fast + medium + normal + two-view 再発で start は `[true, false, false, false, false, false]`、`count` 1、Map 失探で終了）、Test 13〜16（PlaneDetector の保持候補は `stage: points` で現フレーム候補ではない）、合成（`recoveries` 全フレーム 1、stable 単調増加、`candidateFound === (planeSearch.stage === "candidate")`、`candidateCommitted ⇒ candidateFound`、`previousCandidateHeld ⇒ !candidateFound`、低速のみは視差 ≥ 25・conf ≥ 0.5 に達しても Recovery 0 回）。Guidance Test 9/10 は新 state 名で全組合せ。ブラウザテスト 2 件合格
+- **実機で読むべきもの（§41）**: `Recov TWO_VIEW` が出れば MED でも二視点イベントで開始できている（ケース B）。`Stable` が 1/5 のまま進まないならリセットの繰り返しを疑うが、v11.1 では `recoveries`（`×N` 表示）が増えない限り reset は起きていない
+
 ### 修正指示書 v11 対応 — Fast Motion 後の Plane Detection Recovery（2026-10-05、実機確認待ち）
 
 実機ログ（`LK 284/285`、`PnP 42i 0.38px`、`Source MAP`、`Lost 0ms`、`LM 47 plane 0`、`Plane search 42pt best 32/20 thr 1.645`、`World Established NO`）は Camera / Map Tracking が良好なまま Plane Detection だけが成立していない状態。**PnP / LK / Jump Gate / Relocalization / Plane RANSAC の閾値は変更していない**（AC-5〜AC-9）。

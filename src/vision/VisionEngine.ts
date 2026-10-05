@@ -6,7 +6,7 @@ import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker } from "./MapTracker";
 import { PlaneDetector } from "./PlaneDetector";
-import { PlaneRecovery, emptyPlaneRecovery } from "./PlaneRecovery";
+import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { Relocalizer, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
@@ -113,6 +113,8 @@ export class VisionEngine {
   private readonly planeRecovery = new PlaneRecovery();
   private lastPlaneRecovery: PlaneRecoveryDiagnostics = emptyPlaneRecovery();
   private planeRecoveryRequested = false;
+  /** Previous frame's two-view estimate, for the parallax-crossing trigger (v11.1 §7). */
+  private prevTwoView: { parallaxPx: number; referenceFrameId: number } | null = null;
 
   // Plane-anchored tracking (修正指示書): the first found plane is fixed and
   // the camera pose is solved relative to it (depth-free).
@@ -243,6 +245,7 @@ export class VisionEngine {
     this.planeRecovery.reset();
     this.lastPlaneRecovery = emptyPlaneRecovery();
     this.planeRecoveryRequested = false;
+    this.prevTwoView = null;
     this.planeTracker.reset(this.tracks);
     this.lastPlaneAnchor = null;
     this.lastPlanePose = null;
@@ -341,14 +344,24 @@ export class VisionEngine {
     this.updateMap(input);
     const t4c = now();
 
-    // 6b. Plane recovery decision (v11 §5–§6): fast motion with a healthy
-    // map and no world yet → forget the plane-specific state so the plane
-    // is searched in the view the camera has now. Map / pose untouched.
+    // 6b. Plane recovery decision (v11 §5–§6, v11.1 §3–§10): a significant
+    // motion (fast motion level, or a confident two-view parallax crossing)
+    // with a healthy map and no world yet → forget the plane-specific state
+    // once, so the plane is searched in the view the camera has now. Map /
+    // pose untouched; an active recovery is never restarted.
     const mapHealthy = this.mapHealthyThisFrame();
+    const twoViewMotion = significantTwoViewMotion(pose, this.prevTwoView, {
+      parallaxPx: this.config.pose.fullConfidenceParallaxPx,
+      minConfidence: this.config.landmarks.initMinTranslationConfidence,
+      minInliers: this.config.pose.minCorrespondences,
+    });
+    this.prevTwoView = pose ? { parallaxPx: pose.parallaxPx, referenceFrameId: pose.referenceFrameId } : null;
     const recoveryStarted = this.planeRecovery.update({
       motionLevel: this.lastMotion.level,
+      twoViewMotion,
       mapInitialized: this.mapTracker.initialized,
       mapTracked: this.mapTracker.initialized && this.mapTracker.result.tracked && this.mapTracker.framesSinceTracked === 0,
+      mapLost: this.mapTracker.initialized && this.mapTracker.framesSinceTracked > this.config.state.mapLostFrameTolerance,
       mapInliers: this.mapTracker.selection.mapInlierCount,
       requiredInliers: this.config.landmarks.minPnPInliers,
       poseFinite: mapHealthy.poseFinite,
@@ -357,11 +370,13 @@ export class VisionEngine {
       timestamp: input.timestamp,
     });
     this.planeRecoveryRequested = false;
+    // Exactly once per recovery (v11.1 §3–§5): `update` returns true only
+    // in the frame the recovery starts.
     if (recoveryStarted) this.planeDetector.resetForRecovery();
 
     // 7. Plane detection (Phase 3)
     this.updatePlane(input);
-    this.lastPlaneRecovery = this.planeRecoveryDiagnosticsFor(input, mapHealthy.healthy);
+    this.lastPlaneRecovery = this.planeRecoveryDiagnosticsFor(input, mapHealthy.healthy, recoveryStarted);
     const t4d = now();
 
     // 8. Quality + state
@@ -852,17 +867,24 @@ export class VisionEngine {
     return { healthy, poseFinite };
   }
 
-  /** Numbers for the HUD / tests (v11 §23); formatted only when the debug HUD is shown. */
-  private planeRecoveryDiagnosticsFor(input: VisionInput, mapHealthy: boolean): PlaneRecoveryDiagnostics {
+  /**
+   * Numbers for the HUD / tests (v11 §23, v11.1 §21–§24); formatted only
+   * when the debug HUD is shown. Candidate facts are about *this frame's*
+   * search: a candidate the detector still holds through its grace period
+   * is reported separately (`previousCandidateHeld`), never as "found".
+   */
+  private planeRecoveryDiagnosticsFor(input: VisionInput, mapHealthy: boolean, startedThisFrame: boolean): PlaneRecoveryDiagnostics {
     const tracker = this.mapTracker;
     const cfg = this.config.plane;
     const search = this.planeDetector.lastSearch;
-    const candidate = this.planeDetector.current;
+    const held = this.planeDetector.current;
+    const candidateNow = search.stage === "candidate" && held !== null;
     const rec = this.planeRecovery;
+    const stableFrames = this.planeDetector.stableFrameCount;
     return {
       active: rec.active,
       reason: rec.reason,
-      phase: rec.phase(this.lastMotion.level, candidate !== null),
+      state: rec.state(startedThisFrame, this.lastMotion.level, candidateNow, stableFrames),
       mapHealthy,
       mapInliers: tracker.initialized ? tracker.selection.mapInlierCount : 0,
       trackedFeatures: this.tracks.length,
@@ -872,11 +894,12 @@ export class VisionEngine {
       bestInliers: search.bestInliers,
       requiredInliers: cfg.minInliers,
       searchStage: search.stage,
-      candidateFound: candidate !== null,
-      // "Committed" = the candidate is horizontal, so the stability streak
-      // counts toward PLANE_FOUND (a non-horizontal candidate never commits).
-      candidateCommitted: candidate !== null && candidate.horizontal,
-      stableFrames: candidate ? candidate.stableFrames : 0,
+      candidateFound: candidateNow,
+      // "Committed" = this frame's candidate is horizontal, so the stability
+      // streak counts toward PLANE_FOUND (a non-horizontal candidate never commits).
+      candidateCommitted: candidateNow && held!.horizontal,
+      previousCandidateHeld: !candidateNow && held !== null,
+      stableFrames,
       requiredStableFrames: cfg.stableFramesRequired,
       recoveryElapsedMs: rec.elapsedMs(input.timestamp),
       recoveries: rec.count,

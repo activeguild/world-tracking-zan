@@ -233,25 +233,35 @@ export interface PlaneSearchOutput extends PlaneSearchInfo {
   minInliers: number;
 }
 
-/** Why a plane recovery was started (v11 §23). Only `fast_motion` and `manual` are triggered today. */
-export type PlaneRecoveryReason = "fast_motion" | "insufficient_plane_points" | "plane_lost" | "manual" | null;
-
 /**
- * Plane recovery phase (v11 §13–§14, §28): `recovery` while the camera still
- * moves fast, `warmup` while plane points are re-collected at the new view,
- * `candidate` once the detector has a plane candidate, `none` otherwise.
+ * Why a plane recovery was started (v11 §23, v11.1 §10). `fast_motion`
+ * (v7 motion level), `two_view_motion` (confident reference↔current parallax
+ * crossing) and `manual` are triggered today; `insufficient_plane_points`
+ * is reserved.
  */
-export type PlaneRecoveryPhase = "none" | "recovery" | "warmup" | "candidate";
+export type PlaneRecoveryReason = "fast_motion" | "two_view_motion" | "insufficient_plane_points" | "manual" | null;
 
 /**
- * Plane recovery diagnostics (v11 §23). After fast motion with a healthy map
- * the plane detector alone is re-seeded; the map, the camera pose and the
- * world are untouched. Numbers only: formatting happens in the HUD, debug on.
+ * Plane recovery state (v11.1 §27): `starting` in the start frame and while
+ * the camera still moves fast, `warmup` while plane points are re-collected
+ * at the new view (no candidate in the current frame), `candidate` when the
+ * current frame's search produced one, `stable` once its stability streak
+ * has begun, `inactive` otherwise.
+ */
+export type PlaneRecoveryState = "inactive" | "starting" | "warmup" | "candidate" | "stable";
+
+/**
+ * Plane recovery diagnostics (v11 §23, v11.1 §21–§24, §29). After a
+ * significant motion with a healthy map the plane detector alone is
+ * re-seeded; the map, the camera pose and the world are untouched. Numbers
+ * only: formatting happens in the HUD, debug on. `candidateFound` /
+ * `candidateCommitted` describe the *current frame's* search; a candidate
+ * the detector still holds from earlier frames shows as `previousCandidateHeld`.
  */
 export interface PlaneRecoveryDiagnostics {
   active: boolean;
   reason: PlaneRecoveryReason;
-  phase: PlaneRecoveryPhase;
+  state: PlaneRecoveryState;
   /** Map PnP located the camera this frame with enough inliers and a finite pose. */
   mapHealthy: boolean;
   mapInliers: number;
@@ -264,9 +274,12 @@ export interface PlaneRecoveryDiagnostics {
   bestInliers: number;
   requiredInliers: number;
   searchStage: PlaneSearchStage;
-  /** A plane candidate exists; it is "committed" when it is horizontal and counts toward stability. */
+  /** This frame's search produced a plane candidate (`searchStage === "candidate"`). */
   candidateFound: boolean;
+  /** This frame's candidate is horizontal, so it counts toward the stability streak. */
   candidateCommitted: boolean;
+  /** The detector still holds a candidate from an earlier frame (grace period) although this frame's search produced none. */
+  previousCandidateHeld: boolean;
   stableFrames: number;
   requiredStableFrames: number;
   /** Time since the recovery started (0 when inactive). */

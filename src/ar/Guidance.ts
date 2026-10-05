@@ -1,4 +1,4 @@
-import type { PlaneRecoveryPhase } from "../vision/types";
+import type { PlaneRecoveryState } from "../vision/types";
 import { TrackingState } from "./ARState";
 
 /**
@@ -51,8 +51,8 @@ export interface GuidanceContext {
   relocGuidanceDelayMs: number;
   /** Camera barely moving while a map is needed (optional, v10 §13). */
   motionTooLow?: boolean;
-  /** Plane recovery phase after a fast motion (v11 §28); absent / "none" when idle. */
-  planeRecovery?: PlaneRecoveryPhase;
+  /** Plane recovery state after a significant motion (v11 §28, v11.1 §27); absent / "inactive" when idle. */
+  planeRecovery?: PlaneRecoveryState;
 }
 
 /** Map the engine state to the v10 / v11 phase (v10 §3–§4, §26; v11 §28, §55). */
@@ -67,9 +67,11 @@ export function worldPhase(
     case TrackingState.PLANE_DETECTING:
       // Surface scan with the map tracked (v11 §28): a recovery after a fast
       // motion is its own phase until a plane candidate exists.
-      if (ctx.planeRecovery === "recovery") return "PLANE_RECOVERY";
+      if (ctx.planeRecovery === "starting") return "PLANE_RECOVERY";
       if (ctx.planeRecovery === "warmup") return "PLANE_WARMUP";
-      if (ctx.state === TrackingState.PLANE_DETECTING && (ctx.planeCandidate || ctx.planeRecovery === "candidate")) return "PLANE_CANDIDATE";
+      if (ctx.state === TrackingState.PLANE_DETECTING && (ctx.planeCandidate || ctx.planeRecovery === "candidate" || ctx.planeRecovery === "stable")) {
+        return "PLANE_CANDIDATE";
+      }
       return "SURFACE_SCAN";
     case TrackingState.PLANE_FOUND:
     case TrackingState.AR_ACTIVE:
@@ -89,9 +91,11 @@ export function getGuidance(ctx: GuidanceContext): GuidanceKey {
     if (ctx.lowFeature) return "SHOW_FLAT_SURFACE";
     // Plane recovery after a fast motion (v11 §15, §45): slow down, then show
     // a flat surface at the new place. Never "go back" (§46).
-    if (ctx.planeRecovery === "recovery") return "SLOW_DOWN";
+    if (ctx.planeRecovery === "starting") return "SLOW_DOWN";
     if (ctx.planeRecovery === "warmup") return "PLANE_WARMUP";
-    if (ctx.state === TrackingState.PLANE_DETECTING) return ctx.planeCandidate || ctx.planeRecovery === "candidate" ? "PLANE_DETECTING" : "MOVE_SLOWLY";
+    if (ctx.state === TrackingState.PLANE_DETECTING) {
+      return ctx.planeCandidate || ctx.planeRecovery === "candidate" || ctx.planeRecovery === "stable" ? "PLANE_DETECTING" : "MOVE_SLOWLY";
+    }
     if (ctx.motionTooLow) return "MOVE_SLOWLY";
     return "SCAN_SURFACE";
   }

@@ -264,6 +264,20 @@ fast) → `PLANE_WARMUP` → `PLANE_CANDIDATE` → `PLANE_FOUND`; guidance
 「スマホをゆっくり動かしてください」→「平らな場所をゆっくり映してください」, never
 "go back" before a world exists.
 
+v11.1 refinements: the detector is reset exactly once per recovery (the
+controller reports a start only on inactive → active; further fast motion
+while active never restarts it, so the stability streak can accumulate
+through a shaky scan). A second trigger uses the two-view estimate: the
+reference↔current parallax crossing `pose.fullConfidenceParallaxPx` with
+`confidence` / `translationConfidence` ≥ `landmarks.initMinTranslationConfidence`
+and inliers ≥ `pose.minCorrespondences` (the on-device `Motion MED 6.3px /
+2view par 45px conf 1.00/1.00 n116` case) — an event, not a level, so a slow
+scan whose parallax has simply grown does not fire it. Candidate diagnostics
+are about the current frame's search (`candidateFound = stage === "candidate"`,
+`candidateCommitted` = horizontal); a candidate merely held through the
+detector's grace period is `previousCandidateHeld`. Recovery state:
+`inactive | starting | warmup | candidate | stable`.
+
 ## Tests
 
 ```bash

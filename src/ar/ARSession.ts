@@ -716,12 +716,12 @@ export class ARSession {
         );
       }
     }
-    const stage = pr.active ? `${pr.phase}:${pr.searchStage}:${pr.candidateCommitted ? "commit" : pr.candidateFound ? "cand" : "-"}` : null;
+    const stage = pr.active ? `${pr.state}:${pr.searchStage}:${pr.candidateCommitted ? "commit" : pr.candidateFound ? "cand" : "-"}` : null;
     if (stage !== this.loggedPlaneStage) {
       this.loggedPlaneStage = stage;
       if (stage !== null) {
         this.logger.info(
-          `PLANE RECOVERY ${pr.phase} at frame ${r.frameId}\nsearch = ${pr.searchPoints}pt best ${pr.bestInliers}/${pr.requiredInliers} stage ${pr.searchStage}\ncandidate = ${pr.candidateFound ? "yes" : "no"} commit = ${pr.candidateCommitted ? "yes" : "no"} stable = ${pr.stableFrames}/${pr.requiredStableFrames}`,
+          `PLANE RECOVERY ${pr.state} at frame ${r.frameId}\nsearch = ${pr.searchPoints}pt best ${pr.bestInliers}/${pr.requiredInliers} stage ${pr.searchStage}\ncandidate = ${pr.candidateFound ? "yes" : "no"} commit = ${pr.candidateCommitted ? "yes" : "no"}${pr.previousCandidateHeld ? " (earlier candidate held)" : ""} stable = ${pr.stableFrames}/${pr.requiredStableFrames}`,
         );
       } else if (r.plane?.found) {
         this.logger.info(`PLANE RECOVERY done at frame ${r.frameId}: plane found (${r.plane.inlierCount} inliers)`);

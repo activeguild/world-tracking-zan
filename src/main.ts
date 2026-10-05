@@ -125,7 +125,7 @@ function refreshGuidance(): void {
     planeCandidate: s.plane !== null,
     lostMs: s.lostMs,
     relocGuidanceDelayMs: session.config.world.relocGuidanceDelayMs,
-    planeRecovery: s.planeRecovery?.phase,
+    planeRecovery: s.planeRecovery?.state,
   });
   let text = GUIDANCE_TEXT_JA[key];
   if (key === "TAP_TO_PLACE" && placed) text = "";
@@ -314,7 +314,7 @@ function refreshHud(): void {
       planeCandidate: s.plane !== null,
       lostMs: s.lostMs,
       relocGuidanceDelayMs: session.config.world.relocGuidanceDelayMs,
-      planeRecovery: s.planeRecovery?.phase,
+      planeRecovery: s.planeRecovery?.state,
     }),
     worldEstablished: s.worldEstablished,
     visionMs: s.visionMs,
@@ -396,13 +396,14 @@ function refreshHud(): void {
       ? {
           active: s.planeRecovery.active,
           reason: s.planeRecovery.reason,
-          phase: s.planeRecovery.phase,
+          state: s.planeRecovery.state,
           mapHealthy: s.planeRecovery.mapHealthy,
           mapInliers: s.planeRecovery.mapInliers,
           seedCandidates: s.planeRecovery.seedCandidates,
           seededPoints: s.planeRecovery.seededPoints,
           candidateFound: s.planeRecovery.candidateFound,
           candidateCommitted: s.planeRecovery.candidateCommitted,
+          previousCandidateHeld: s.planeRecovery.previousCandidateHeld,
           stableFrames: s.planeRecovery.stableFrames,
           requiredStableFrames: s.planeRecovery.requiredStableFrames,
           elapsedMs: s.planeRecovery.recoveryElapsedMs,

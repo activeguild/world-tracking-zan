@@ -168,13 +168,15 @@ export interface HudStats {
   planeRecovery?: {
     active: boolean;
     reason: string | null;
-    phase: string;
+    state: string;
     mapHealthy: boolean;
     mapInliers: number;
     seedCandidates: number;
     seededPoints: number;
+    /** This frame's search result (v11.1 §21–§24), not a held earlier candidate. */
     candidateFound: boolean;
     candidateCommitted: boolean;
+    previousCandidateHeld: boolean;
     stableFrames: number;
     requiredStableFrames: number;
     elapsedMs: number;
@@ -423,11 +425,12 @@ export class DebugOverlay {
     if (ps && m && !s.world?.ready) {
       rows.push(section("PLANE"));
       if (pr) {
+        const reason = pr.reason === "fast_motion" ? "FAST" : pr.reason === "two_view_motion" ? "TWO_VIEW" : pr.reason === "insufficient_plane_points" ? "PLANE_POINTS" : pr.reason === "manual" ? "MANUAL" : "";
         rows.push(
           row(
             "Recov",
             pr.active
-              ? `${(pr.reason ?? "").toUpperCase()}  ${pr.phase}  ${(pr.elapsedMs / 1000).toFixed(1)}s${pr.recoveries > 1 ? `  ×${pr.recoveries}` : ""}`
+              ? `${reason}  ${pr.state}  ${(pr.elapsedMs / 1000).toFixed(1)}s${pr.recoveries > 1 ? `  ×${pr.recoveries}` : ""}`
               : `—${pr.recoveries ? `  (done ×${pr.recoveries})` : ""}`,
             pr.active ? "hud-warn" : undefined,
           ),
@@ -447,12 +450,21 @@ export class DebugOverlay {
                 ? `support  ${ps.bestInliers} < ${ps.minInliers}`
                 : `points  ${ps.points} < ${ps.minInliers}`;
       rows.push(row("Stage", stageText, ps.stage === "candidate" ? undefined : "hud-warn"));
-      const committed = !!p && p.horizontal;
-      rows.push(row("Cand", `${p ? "YES" : "NO"}  commit ${committed ? "YES" : "NO"}${p && !p.horizontal ? `  (hz ${p.horizontalness.toFixed(2)})` : ""}`));
+      // This frame's candidate (v11.1 §21–§24); a candidate only *held* from
+      // an earlier frame is shown as such, not as found.
+      const foundNow = pr ? pr.candidateFound : ps.stage === "candidate" && !!p;
+      const committed = pr ? pr.candidateCommitted : foundNow && !!p && p.horizontal;
+      const heldOnly = pr ? pr.previousCandidateHeld : !foundNow && !!p;
+      rows.push(
+        row(
+          "Cand",
+          `${foundNow ? "YES" : "NO"}  commit ${committed ? "YES" : "NO"}${foundNow && p && !p.horizontal ? `  (hz ${p.horizontalness.toFixed(2)})` : ""}${heldOnly ? "  (held)" : ""}`,
+        ),
+      );
       rows.push(
         row(
           "Stable",
-          `${p ? p.stableFrames : 0}/${pr ? pr.requiredStableFrames : "?"}${p ? `  conf ${p.confidence.toFixed(2)}` : ""}${p?.found ? "  FOUND" : ""}`,
+          `${pr ? pr.stableFrames : p ? p.stableFrames : 0}/${pr ? pr.requiredStableFrames : "?"}${p ? `  conf ${p.confidence.toFixed(2)}` : ""}${p?.found ? "  FOUND" : ""}`,
         ),
       );
       if (s.triangulation) {
