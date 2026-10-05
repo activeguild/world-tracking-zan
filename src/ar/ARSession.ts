@@ -611,10 +611,22 @@ export class ARSession {
       );
       this.loggedRelocReject = null;
     } else if (rl.attempt === "fail") {
-      if (rl.rejectCode && rl.rejectCode !== this.loggedRelocReject) {
-        this.logger.info(`RELOC REJECT at frame ${r.frameId}\nreason = ${rl.rejectCode}${rl.reason ? `\ndetail = ${rl.reason}` : ""}`);
+      // v6 §1–§5: where the keyframes dropped out (NCC → LK → PnP → VAL) and
+      // the best of them, so a failing relocalization can be diagnosed from
+      // the console without the HUD.
+      const d = rl.diagnostics;
+      const key = `${rl.rejectCode}:${d?.best?.stage ?? ""}`;
+      if (rl.rejectCode && key !== this.loggedRelocReject) {
+        const stages = d
+          ? `\nkeyframes = ${d.keyframes}  tried = ${d.candidatesTried}\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
+            (d.best
+              ? `\nbest = KF${d.best.keyframeId} stage ${d.best.stage}  ${d.best.inlierCount}i  ${d.best.meanReprojectionErrorPx.toFixed(2)}px  ratio ${d.best.inlierRatio.toFixed(2)}  cells ${d.best.spatialCells}/9  ncc ${d.best.coarseScore.toFixed(2)}`
+              : "") +
+            `\ntrials = ${d.trials.map((t) => `KF${t.keyframeId}:${t.stage}${t.inlierCount ? `(${t.inlierCount}i)` : ""}`).join(" ")}`
+          : "";
+        this.logger.info(`RELOC REJECT at frame ${r.frameId}\nreason = ${rl.rejectCode}${rl.reason ? `\ndetail = ${rl.reason}` : ""}${stages}`);
       }
-      this.loggedRelocReject = rl.rejectCode;
+      this.loggedRelocReject = key;
     }
     if (rl.postInconsistent && !this.loggedRelocInconsistent) {
       this.logger.warn(

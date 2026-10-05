@@ -43,17 +43,43 @@ body {
   pointer-events: none;
 }
 
+/*
+ * Debug HUD (v6 §11–§15): one short row per value, sized for a phone in
+ * portrait. Never wider than the viewport minus the gutters, never under the
+ * browser chrome; scrolls only if a section grows past the screen.
+ */
 .ar-hud {
   position: absolute;
-  top: env(safe-area-inset-top, 8px);
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
   left: 8px;
-  padding: 8px 10px;
-  background: rgba(0, 0, 0, 0.55);
+  width: calc(100vw - 24px);
+  max-width: 420px;
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 24px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.6);
   border-radius: 6px;
   font-size: 12px;
-  line-height: 1.5;
-  white-space: pre;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   pointer-events: none;
+}
+
+.ar-hud .hud-state {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ar-hud .hud-section {
+  margin-top: 4px;
+  color: #9fd3ff;
+}
+
+.ar-hud .hud-warn {
+  color: #ffb347;
 }
 
 #message {

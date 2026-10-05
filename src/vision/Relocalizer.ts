@@ -19,13 +19,14 @@ import type { Track } from "./types";
  *   3. pyramidal LK from the keyframe image to the current image for the
  *      keyframe's landmark observations, initialized with the coarse shift
  *   4. PnP (LM + Huber) from the keyframe pose on the surviving 2D–3D pairs
- *   5. accept when enough inliers → camera pose in the existing map, and
- *      the observations become live tracks again
+ *   5. global validation (inliers, error, inlier ratio, spatial distribution)
+ *      → candidate; the caller confirms and applies it
  *
  * No descriptors are needed because the keyframe image itself is matched;
  * this covers blur, brief occlusion and the camera coming back to a view
  * it has seen, but not large viewpoint changes (deferred, spec §2).
  */
+
 /** Structured reasons a relocalization candidate was not accepted (修正指示書 v5 §19). */
 export type RelocalizationRejectCode =
   | "no_keyframes"
@@ -38,6 +39,60 @@ export type RelocalizationRejectCode =
   | "poor_spatial_distribution"
   | "confirmation_failed"
   | "invalid_pose";
+
+/** How far a keyframe candidate got in one attempt (v6 §1–§2). */
+export type RelocalizationStage =
+  | "coarse" // rejected by the coarse NCC match
+  | "landmarks" // too few of its landmarks are still in the map
+  | "lk" // LK from the keyframe image failed
+  | "pnp" // PnP ran but had too few inliers
+  | "error" // enough inliers, reprojection error too high
+  | "ratio" // inliers / tracked observations too low
+  | "spatial" // inliers concentrated in too few image cells
+  | "invalid" // non-finite pose
+  | "ok"; // passed the global validation
+
+/** Per-keyframe outcome of one attempt (internal diagnostics, v6 §2). */
+export interface RelocalizationKeyframeTrial {
+  keyframeId: number;
+  stage: RelocalizationStage;
+  coarseScore: number;
+  /** LK-tracked / observations (0 when LK did not run). */
+  lkRatio: number;
+  inlierCount: number;
+  meanReprojectionErrorPx: number;
+  inlierRatio: number;
+  spatialCells: number;
+}
+
+/**
+ * Where the candidates of one attempt dropped out (v6 §1, §5), and the best
+ * one — the candidate that progressed furthest (ties: more inliers) — even
+ * when the attempt failed (v6 §3).
+ */
+export interface RelocalizationDiagnostics {
+  /** Keyframes in the store at the time of the attempt. */
+  keyframes: number;
+  candidatesTried: number;
+  coarseTested: number;
+  coarsePassed: number;
+  lkTested: number;
+  lkPassed: number;
+  pnpTested: number;
+  /** PnP with ≥ minInliers inliers. */
+  pnpPassed: number;
+  /** Passed every validation check. */
+  validated: number;
+  errorRejected: number;
+  ratioRejected: number;
+  spatialRejected: number;
+  bestCoarseScore: number;
+  /** Best candidate of the attempt (null when no keyframe was tried). */
+  best: RelocalizationKeyframeTrial | null;
+  trials: RelocalizationKeyframeTrial[];
+  rejectCode: RelocalizationRejectCode | null;
+  rejectReason: string | null;
+}
 
 /**
  * A relocalization *candidate* (v5 §4): the best keyframe match of this
@@ -69,7 +124,33 @@ export interface RelocalizationResult {
   /** Why the attempt failed (best candidate's stage), null on success. */
   reason: string | null;
   rejectCode: RelocalizationRejectCode | null;
+  /** Stage counters and per-keyframe outcomes of this attempt (v6). */
+  diagnostics: RelocalizationDiagnostics;
 }
+
+const STAGE_RANK: Record<RelocalizationStage, number> = {
+  coarse: 0,
+  landmarks: 1,
+  lk: 2,
+  pnp: 3,
+  invalid: 3,
+  error: 4,
+  ratio: 5,
+  spatial: 6,
+  ok: 7,
+};
+
+const STAGE_CODE: Record<RelocalizationStage, RelocalizationRejectCode | null> = {
+  coarse: "low_match_score",
+  landmarks: "insufficient_landmarks",
+  lk: "lk_failed",
+  pnp: "insufficient_inliers",
+  invalid: "invalid_pose",
+  error: "high_reprojection_error",
+  ratio: "low_inlier_ratio",
+  spatial: "poor_spatial_distribution",
+  ok: null,
+};
 
 /** Number of occupied cells of a 3×3 grid over a width×height image. */
 export function spatialCellCount(xs: ArrayLike<number>, ys: ArrayLike<number>, n: number, width: number, height: number): number {
@@ -82,6 +163,38 @@ export function spatialCellCount(xs: ArrayLike<number>, ys: ArrayLike<number>, n
   let count = 0;
   for (let b = 0; b < 9; b++) if (mask & (1 << b)) count++;
   return count;
+}
+
+export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDiagnostics {
+  return {
+    keyframes,
+    candidatesTried: 0,
+    coarseTested: 0,
+    coarsePassed: 0,
+    lkTested: 0,
+    lkPassed: 0,
+    pnpTested: 0,
+    pnpPassed: 0,
+    validated: 0,
+    errorRejected: 0,
+    ratioRejected: 0,
+    spatialRejected: 0,
+    bestCoarseScore: -1,
+    best: null,
+    trials: [],
+    rejectCode: null,
+    rejectReason: null,
+  };
+}
+
+/** Rank trials: furthest stage first, then more inliers, then higher coarse score. */
+function betterTrial(a: RelocalizationKeyframeTrial, b: RelocalizationKeyframeTrial | null): boolean {
+  if (!b) return true;
+  const ra = STAGE_RANK[a.stage];
+  const rb = STAGE_RANK[b.stage];
+  if (ra !== rb) return ra > rb;
+  if (a.inlierCount !== b.inlierCount) return a.inlierCount > b.inlierCount;
+  return a.coarseScore > b.coarseScore;
 }
 
 export class Relocalizer {
@@ -155,20 +268,33 @@ export class Relocalizer {
 
   /**
    * Try to relocalize the current frame against the stored keyframes.
+   *
+   * Every keyframe tried gets a trial record saying where it dropped out
+   * (coarse → landmarks → lk → pnp → error → ratio → spatial → ok); the
+   * stage counters and the best trial are returned with the result so that
+   * a failing relocalization can be diagnosed without loosening anything
+   * (v6 §1–§6).
    */
   relocalize(current: ImagePyramid, map: LandmarkMap, k: CameraIntrinsics): RelocalizationResult {
     const cfg = this.config;
+    const diag = emptyRelocalizationDiagnostics(this.keyframes.length);
     const fail: RelocalizationResult = {
       success: false, keyframeId: -1, pose: null, inlierCount: 0, meanReprojectionErrorPx: 0,
       matchScore: -1, lkRatio: 0, inlierRatio: 0, spatialCells: 0,
       shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0, reason: "no keyframes", rejectCode: "no_keyframes",
+      diagnostics: diag,
     };
-    if (this.keyframes.length === 0) return fail;
+    if (this.keyframes.length === 0) {
+      diag.rejectCode = "no_keyframes";
+      diag.rejectReason = "no keyframes";
+      return fail;
+    }
 
     const coarseSrc = current.levels[Math.min(2, current.levels.length - 1)];
     const curCoarse = downsampleToCoarse(coarseSrc);
     this.scratchCoarse = curCoarse;
     const coarseScale = current.width / curCoarse.width;
+    const f = (k.fx + k.fy) / 2;
 
     // Candidates: most recent first, then round-robin through the rest on
     // the following attempts so that the view the camera returns to is
@@ -179,35 +305,57 @@ export class Relocalizer {
       candidates.push(ordered[(this.candidateCursor + i) % ordered.length]);
     }
     this.candidateCursor = (this.candidateCursor + candidates.length) % Math.max(1, ordered.length);
-    let tried = 0;
+
     let best: RelocalizationResult | null = null;
-    // The rejected candidate that got furthest (for the reason / diagnostics).
-    let rejected: RelocalizationResult = { ...fail, reason: "" };
-    let rejectedStage = -1;
-    const reject = (stage: number, partial: Partial<RelocalizationResult>, code: RelocalizationRejectCode, reason: string) => {
-      if (stage < rejectedStage) return;
-      rejectedStage = stage;
-      rejected = { ...fail, ...partial, success: false, reason, rejectCode: code };
+    // The rejected candidate that got furthest, with its reason.
+    let rejected: { result: RelocalizationResult; trial: RelocalizationKeyframeTrial } | null = null;
+
+    const record = (trial: RelocalizationKeyframeTrial, partial: Partial<RelocalizationResult>, reason: string | null) => {
+      diag.trials.push(trial);
+      if (betterTrial(trial, diag.best)) diag.best = trial;
+      if (trial.stage !== "ok" && (!rejected || betterTrial(trial, rejected.trial))) {
+        rejected = {
+          trial,
+          result: { ...fail, ...partial, success: false, keyframeId: trial.keyframeId, reason, rejectCode: STAGE_CODE[trial.stage] },
+        };
+      }
     };
+
     for (const kf of candidates) {
-      tried++;
+      diag.candidatesTried++;
+      const trial: RelocalizationKeyframeTrial = {
+        keyframeId: kf.id,
+        stage: "coarse",
+        coarseScore: -1,
+        lkRatio: 0,
+        inlierCount: 0,
+        meanReprojectionErrorPx: 0,
+        inlierRatio: 0,
+        spatialCells: 0,
+      };
+
+      // ---- stage 1: coarse NCC alignment ----
+      diag.coarseTested++;
       const shift = coarseShift(kf.coarse, curCoarse, cfg.coarseSearchRadius);
+      trial.coarseScore = shift.score;
+      diag.bestCoarseScore = Math.max(diag.bestCoarseScore, shift.score);
       if (shift.score < cfg.coarseMinScore) {
-        if (rejectedStage <= 0 && shift.score > rejected.matchScore) {
-          reject(0, { keyframeId: kf.id, matchScore: shift.score }, "low_match_score", `score ${shift.score.toFixed(2)} < ${cfg.coarseMinScore} (kf ${kf.id})`);
-        }
+        record(trial, { matchScore: shift.score }, `score ${shift.score.toFixed(2)} < ${cfg.coarseMinScore} (kf ${kf.id})`);
         continue;
       }
+      diag.coarsePassed++;
       const sx = shift.dx * coarseScale;
       const sy = shift.dy * coarseScale;
 
-      // LK from keyframe → current with the coarse shift as the initial guess.
+      // ---- stage 2: LK from keyframe → current with the coarse shift as the initial guess ----
       const obs = kf.observations.filter((o) => map.get(o.landmarkId) !== undefined);
       const n = obs.length;
       if (n < cfg.minInliers) {
-        reject(1, { keyframeId: kf.id, matchScore: shift.score }, "insufficient_landmarks", `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`);
+        trial.stage = "landmarks";
+        record(trial, { matchScore: shift.score }, `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`);
         continue;
       }
+      diag.lkTested++;
       const pts = new Float32Array(n * 2);
       const guesses = new Float32Array(n * 2);
       for (let i = 0; i < n; i++) {
@@ -217,18 +365,20 @@ export class Relocalizer {
         guesses[i * 2 + 1] = obs[i].y + sy;
       }
       const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, cfg.lkMaxDisplacementPx);
-      const lkRatio = res.okCount / n;
+      trial.lkRatio = res.okCount / n;
       if (res.okCount < cfg.minInliers) {
-        reject(
-          2,
-          { keyframeId: kf.id, matchScore: shift.score, lkRatio },
-          "lk_failed",
+        trial.stage = "lk";
+        record(
+          trial,
+          { matchScore: shift.score, lkRatio: trial.lkRatio },
           `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (score ${shift.score.toFixed(2)})`,
         );
         continue;
       }
+      diag.lkPassed++;
 
-      // PnP from the keyframe pose.
+      // ---- stage 3: PnP from the keyframe pose ----
+      diag.pnpTested++;
       const m = res.okCount;
       const pts3 = new Float64Array(m * 3);
       const ox = new Float64Array(m);
@@ -246,14 +396,14 @@ export class Relocalizer {
         idx.push(i);
         j++;
       }
-      const f = (k.fx + k.fy) / 2;
       const pnp = refinePosePnP(kf.pose, pts3, ox, oy, m, {
         huber: cfg.pnpHuberPx / f,
         inlierThreshold: cfg.pnpInlierPx / f,
         maxIterations: 20,
         epsilon: 1e-7,
       });
-      // ---- Global validation of the candidate (v5 §5–§7) ----
+
+      // ---- stage 4: global validation of the candidate (v5 §5–§7) ----
       // No single measure decides: PnP support, reprojection error, the
       // fraction of tracked observations the pose explains, and where the
       // inliers sit in the image (30 inliers in one corner pin the pose badly
@@ -271,8 +421,10 @@ export class Relocalizer {
         inY.push(y);
       }
       const errPx = pnp.meanError * f;
-      const inlierRatio = pnp.inlierCount / m;
-      const spatialCells = spatialCellCount(inX, inY, inX.length, current.width, current.height);
+      trial.inlierCount = pnp.inlierCount;
+      trial.meanReprojectionErrorPx = errPx;
+      trial.inlierRatio = pnp.inlierCount / m;
+      trial.spatialCells = spatialCellCount(inX, inY, inX.length, current.width, current.height);
       const candidate: RelocalizationResult = {
         success: false,
         keyframeId: kf.id,
@@ -280,42 +432,63 @@ export class Relocalizer {
         inlierCount: pnp.inlierCount,
         meanReprojectionErrorPx: errPx,
         matchScore: shift.score,
-        lkRatio,
-        inlierRatio,
-        spatialCells,
+        lkRatio: trial.lkRatio,
+        inlierRatio: trial.inlierRatio,
+        spatialCells: trial.spatialCells,
         shiftX: sx,
         shiftY: sy,
         tracks,
-        candidatesTried: tried,
+        candidatesTried: diag.candidatesTried,
         reason: null,
         rejectCode: null,
+        diagnostics: diag,
       };
       if (!Number.isFinite(errPx) || pnp.pose.translation.some((v) => !Number.isFinite(v))) {
-        reject(3, candidate, "invalid_pose", `kf ${kf.id}: invalid pose`);
+        trial.stage = "invalid";
+        record(trial, candidate, `kf ${kf.id}: invalid pose`);
         continue;
       }
       if (pnp.inlierCount < cfg.minInliers) {
-        reject(3, candidate, "insufficient_inliers", `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`);
+        trial.stage = "pnp";
+        record(trial, candidate, `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`);
         continue;
       }
+      diag.pnpPassed++;
       if (errPx > cfg.maxMeanErrorPx) {
-        reject(4, candidate, "high_reprojection_error", `kf ${kf.id}: err ${errPx.toFixed(2)} > ${cfg.maxMeanErrorPx} px`);
+        trial.stage = "error";
+        diag.errorRejected++;
+        record(trial, candidate, `kf ${kf.id}: err ${errPx.toFixed(2)} > ${cfg.maxMeanErrorPx} px`);
         continue;
       }
-      if (inlierRatio < cfg.minInlierRatio) {
-        reject(5, candidate, "low_inlier_ratio", `kf ${kf.id}: inlier ratio ${inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}`);
+      if (trial.inlierRatio < cfg.minInlierRatio) {
+        trial.stage = "ratio";
+        diag.ratioRejected++;
+        record(trial, candidate, `kf ${kf.id}: inlier ratio ${trial.inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}`);
         continue;
       }
-      if (spatialCells < cfg.minSpatialCells) {
-        reject(6, candidate, "poor_spatial_distribution", `kf ${kf.id}: inliers in ${spatialCells}/9 cells < ${cfg.minSpatialCells}`);
+      if (trial.spatialCells < cfg.minSpatialCells) {
+        trial.stage = "spatial";
+        diag.spatialRejected++;
+        record(trial, candidate, `kf ${kf.id}: inliers in ${trial.spatialCells}/9 cells < ${cfg.minSpatialCells}`);
         continue;
       }
+      trial.stage = "ok";
+      diag.validated++;
+      record(trial, candidate, null);
       candidate.success = true;
       if (!best || candidate.inlierCount > best.inlierCount) best = candidate;
       if (candidate.inlierCount >= cfg.goodInliers) break;
     }
-    if (best) return { ...best, candidatesTried: tried };
-    return { ...rejected, candidatesTried: tried };
+    if (best) {
+      return { ...best, candidatesTried: diag.candidatesTried, diagnostics: diag };
+    }
+    const r = rejected as { result: RelocalizationResult; trial: RelocalizationKeyframeTrial } | null;
+    if (r) {
+      diag.rejectCode = r.result.rejectCode;
+      diag.rejectReason = r.result.reason;
+      return { ...r.result, candidatesTried: diag.candidatesTried, diagnostics: diag };
+    }
+    return { ...fail, candidatesTried: diag.candidatesTried, reason: "no candidates", diagnostics: diag };
   }
 
   /** Last coarse image of the current frame (debug). */

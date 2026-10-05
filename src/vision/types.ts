@@ -2,7 +2,7 @@ import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import type { TrackingState } from "../ar/ARState";
 import type { TrackingQuality } from "./TrackingQuality";
 import type { PoseRejection } from "./PoseValidation";
-import type { RelocalizationRejectCode } from "./Relocalizer";
+import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -147,6 +147,14 @@ export interface MapPoseOutput {
   /** Temporal-gate limits used this frame (map units / deg). */
   gateMaxTranslation: number;
   gateMaxRotationDeg: number;
+  /**
+   * Map PnP recovery status (v6 §10): landmark observations available, the
+   * inliers the candidate needed and which rule set that requirement
+   * (tracking: minPnPInliers, recovery: minRecoveryInliers, long: minRecoveryInliersLong).
+   */
+  observations: number;
+  requiredInliers: number;
+  recoveryMode: "tracking" | "recovery" | "long";
   /** Map vs plane candidate difference when both existed (map units / degrees). */
   sourceDeltaTranslation: number;
   sourceDeltaRotationDeg: number;
@@ -234,6 +242,13 @@ export interface RelocalizationOutput {
   postDeltaTranslation: number;
   postDeltaRotationDeg: number;
   postInconsistent: boolean;
+  /**
+   * Stage counters / best trial of the most recent attempt (v6 §1–§5). Kept
+   * while the camera stays lost (attempts run every few frames), cleared
+   * when tracking resumes. `framesSinceAttempt` says how old it is.
+   */
+  diagnostics: RelocalizationDiagnostics | null;
+  framesSinceAttempt: number;
 }
 
 /**

@@ -8,7 +8,7 @@ import { MapTracker } from "./MapTracker";
 import { PlaneDetector } from "./PlaneDetector";
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
-import { Relocalizer, type RelocalizationResult } from "./Relocalizer";
+import { Relocalizer, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
 import { isJumpRejection, poseDelta } from "./PoseValidation";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
 import {
@@ -124,6 +124,9 @@ export class VisionEngine {
     inconsistent: boolean;
   } | null = null;
   private lastRelocalized = false;
+  /** Stage counters of the most recent relocalization attempt of the current lost episode (v6). */
+  private relocDiagnostics: RelocalizationDiagnostics | null = null;
+  private relocDiagnosticsAge = 0;
 
   /** Timing breakdown of the last frame (ms). */
   readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, reloc: 0, total: 0 };
@@ -228,6 +231,7 @@ export class VisionEngine {
     this.pendingReloc = null;
     this.relocMonitor = null;
     this.lastRelocalized = false;
+    this.relocDiagnostics = null;
   }
 
   /** Last pose output (null until a reference frame and enough tracks exist). */
@@ -379,6 +383,9 @@ export class VisionEngine {
       postDeltaTranslation: this.relocMonitor?.maxDeltaTranslation ?? 0,
       postDeltaRotationDeg: this.relocMonitor?.maxDeltaRotationDeg ?? 0,
       postInconsistent: this.relocMonitor?.inconsistent ?? false,
+      // The last attempt's stage counters stay visible between attempts (v6).
+      diagnostics: this.relocDiagnostics,
+      framesSinceAttempt: this.relocDiagnostics ? ++this.relocDiagnosticsAge : -1,
     };
     let relocalizedNow = false;
     let monitoredThisFrame = false;
@@ -416,8 +423,12 @@ export class VisionEngine {
         const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k);
         this.timing.reloc = now() - tr0;
         const d = r.pose ? poseDelta(r.pose, tracker.pose) : { translation: 0, rotationDeg: 0 };
+        this.relocDiagnostics = r.diagnostics;
+        this.relocDiagnosticsAge = 0;
         this.relocStatus = {
           ...this.relocStatus,
+          diagnostics: r.diagnostics,
+          framesSinceAttempt: 0,
           attempt: r.success ? "candidate" : "fail",
           inlierCount: r.inlierCount,
           candidatesTried: r.candidatesTried,
@@ -531,6 +542,12 @@ export class VisionEngine {
       }
       if (res.tracked) {
         this.relocAttemptsSinceLost = 0;
+        if (!relocalizedNow) {
+          // Tracking again: the lost-episode diagnostics are over.
+          this.relocDiagnostics = null;
+          this.relocStatus.diagnostics = null;
+          this.relocStatus.framesSinceAttempt = -1;
+        }
         if (external) {
           // Plane bookkeeping (streaks, off-plane flags, confidence) is
           // updated only when the plane candidate passed validation, and
@@ -572,6 +589,7 @@ export class VisionEngine {
         this.relocAttemptsSinceLost = 0;
         this.pendingReloc = null;
         this.relocMonitor = null;
+        this.relocDiagnostics = null;
       }
       this.sourceHistory = (
         this.sourceHistory + (relocalizedNow ? "R" : res.tracked ? (sel.source === "plane" ? "P" : "M") : "·")
@@ -605,6 +623,9 @@ export class VisionEngine {
         planeCandidate: tracker.selection.plane,
         gateMaxTranslation: tracker.selection.limits.maxTranslation,
         gateMaxRotationDeg: tracker.selection.limits.maxRotationDeg,
+        observations: tracker.selection.observations,
+        requiredInliers: tracker.selection.requiredInliers,
+        recoveryMode: tracker.selection.recoveryMode,
         sourceDeltaTranslation: tracker.selection.sourceDeltaTranslation,
         sourceDeltaRotationDeg: tracker.selection.sourceDeltaRotationDeg,
         sourceHistory: this.sourceHistory,
@@ -1108,5 +1129,7 @@ function emptyReloc(): RelocalizationOutput {
     postDeltaTranslation: 0,
     postDeltaRotationDeg: 0,
     postInconsistent: false,
+    diagnostics: null,
+    framesSinceAttempt: -1,
   };
 }

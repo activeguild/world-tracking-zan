@@ -2,8 +2,9 @@ import { ARSession } from "./ar/ARSession";
 import { ARError, TrackingState } from "./ar/ARState";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type * as THREE from "three";
-import { DebugOverlay, type HudCandidate } from "./debug/DebugOverlay";
+import { DebugOverlay, type HudCandidate, type HudRelocDiagnostics } from "./debug/DebugOverlay";
 import { rotationToEulerDeg } from "./math/Pose";
+import type { RelocalizationDiagnostics } from "./vision/Relocalizer";
 import type { PoseCandidateReport } from "./vision/types";
 import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
@@ -221,6 +222,46 @@ function hudCandidate(c: PoseCandidateReport | null, scale: number): HudCandidat
   };
 }
 
+/** Short stage names for the RELOC section (v6 §6). */
+const RELOC_FAIL_SHORT: Record<string, string> = {
+  coarse: "ncc",
+  landmarks: "landmarks",
+  lk: "lk",
+  pnp: "inliers",
+  invalid: "invalid",
+  error: "error",
+  ratio: "ratio",
+  spatial: "spatial",
+};
+
+function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): HudRelocDiagnostics | null {
+  if (!d) return null;
+  const b = d.best;
+  return {
+    keyframes: d.keyframes,
+    tried: d.candidatesTried,
+    coarsePassed: d.coarsePassed,
+    lkPassed: d.lkPassed,
+    pnpTested: d.pnpTested,
+    pnpPassed: d.pnpPassed,
+    validated: d.validated,
+    bestCoarseScore: d.bestCoarseScore,
+    best: b
+      ? {
+          keyframeId: b.keyframeId,
+          stage: b.stage,
+          inliers: b.inlierCount,
+          errorPx: b.meanReprojectionErrorPx,
+          inlierRatio: b.inlierRatio,
+          spatialCells: b.spatialCells,
+          coarseScore: b.coarseScore,
+        }
+      : null,
+    fail: b && b.stage !== "ok" ? (RELOC_FAIL_SHORT[b.stage] ?? b.stage) : d.rejectCode === "no_keyframes" ? "no keyframes" : null,
+    age: Math.max(0, age),
+  };
+}
+
 // HUD refresh loop (independent of vision rate).
 function refreshHud(): void {
   const s = session.getStats();
@@ -273,6 +314,9 @@ function refreshHud(): void {
           history: s.mapPose.sourceHistory,
           relinked: s.mapPose.reassociated,
           relocalized: s.mapPose.relocalized,
+          observations: s.mapPose.observations,
+          requiredInliers: s.mapPose.requiredInliers,
+          recoveryMode: s.mapPose.recoveryMode,
         }
       : null,
     lostMs: s.lostMs,
@@ -323,6 +367,7 @@ function refreshHud(): void {
           postM: s.worldReady ? s.relocalization.postDeltaTranslation * s.worldScale : NaN,
           postDeg: s.relocalization.postDeltaRotationDeg,
           postInconsistent: s.relocalization.postInconsistent,
+          diag: hudRelocDiagnostics(s.relocalization.diagnostics, s.relocalization.framesSinceAttempt),
         }
       : null,
     build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",

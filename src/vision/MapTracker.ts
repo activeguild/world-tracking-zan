@@ -78,6 +78,11 @@ export interface PoseSelection {
   sourceDeltaRotationDeg: number;
   /** Temporal-gate limits of this frame. */
   limits: PoseValidationLimits;
+  /** Landmark observations available to the map PnP this frame (v6 §10). */
+  observations: number;
+  /** Inliers the map candidate needed this frame, and which rule set it. */
+  requiredInliers: number;
+  recoveryMode: "tracking" | "recovery" | "long";
 }
 
 const EMPTY_SELECTION: PoseSelection = {
@@ -93,6 +98,9 @@ const EMPTY_SELECTION: PoseSelection = {
   sourceDeltaTranslation: 0,
   sourceDeltaRotationDeg: 0,
   limits: { maxTranslation: 0, maxRotationDeg: 0 },
+  observations: 0,
+  requiredInliers: 0,
+  recoveryMode: "tracking",
 };
 
 const EMPTY_RESULT: MapTrackingResult = {
@@ -430,17 +438,15 @@ export class MapTracker {
     // While lost a handful of re-associated links is enough to seed a solve
     // (the recovery threshold below still verifies the result).
     const minObservations = this._framesSinceTracked > 0 ? cfg.recoverySeedInliers : 6;
+    // Coming back from a lost frame needs stronger evidence than staying
+    // tracked, and a long loss (stale reference pose) even more (v5 §14):
+    // relocalization is the preferred way back then.
+    const recoveryMode: PoseSelection["recoveryMode"] =
+      this._framesSinceTracked > cfg.longLostFrames ? "long" : this._framesSinceTracked > 0 ? "recovery" : "tracking";
+    const minInliers =
+      recoveryMode === "long" ? cfg.minRecoveryInliersLong : recoveryMode === "recovery" ? cfg.minRecoveryInliers : cfg.minPnPInliers;
     if (n >= minObservations) {
       let res = solve(prior);
-      // Coming back from a lost frame needs stronger evidence than staying
-      // tracked, and a long loss (stale reference pose) even more (v5 §14):
-      // relocalization is the preferred way back then.
-      const minInliers =
-        this._framesSinceTracked > cfg.longLostFrames
-          ? cfg.minRecoveryInliersLong
-          : this._framesSinceTracked > 0
-            ? cfg.minRecoveryInliers
-            : cfg.minPnPInliers;
       if (
         res.inlierCount < minInliers &&
         this._framesSinceTracked > 0 &&
@@ -637,6 +643,9 @@ export class MapTracker {
       sourceDeltaTranslation: sourceDelta.translation,
       sourceDeltaRotationDeg: sourceDelta.rotationDeg,
       limits,
+      observations: n,
+      requiredInliers: minInliers,
+      recoveryMode,
     };
 
     // ---- Anchors for tracks the map has not seen yet ----

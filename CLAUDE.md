@@ -207,6 +207,18 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v6 対応 — Relocalization 診断強化 + HUD 整理（2026-10-05、実機確認待ち）
+
+実機（Keyframe 8、Lost 3.6 s、`RELOC none`、ok×0、Map 候補 14i / 3.18 px）で「8 枚の Keyframe がどの段階で落ちているか」を読めるようにする。**閾値（`minInliers` / `maxMeanErrorPx` / `minInlierRatio` / `minSpatialCells` / `coarseMinScore` / `lkMaxDisplacementPx`）、Jump Gate、Lost Gate 上限、長時間失探の要求 inlier、Immediate Apply、確認フレームは一切変更していない**（§7–§9、§18）。
+
+- **段階別診断（§1–§3、§5）**: `Relocalizer.relocalize()` が `RelocalizationResult.diagnostics`（`RelocalizationDiagnostics`）を返す。試行した Keyframe ごとに `RelocalizationKeyframeTrial { keyframeId, stage, coarseScore, lkRatio, inlierCount, meanReprojectionErrorPx, inlierRatio, spatialCells }` を記録し、`stage` は `coarse → landmarks → lk → pnp → error → ratio → spatial → ok`（`invalid` も）。集計: `candidatesTried / coarseTested / coarsePassed / lkTested / lkPassed / pnpTested / pnpPassed / validated / errorRejected / ratioRejected / spatialRejected / bestCoarseScore`。`best` は最も先の段階まで進んだ候補（同段階なら inlier 多い方）で、失敗時も必ず残す。拒否コードは best の段階から決める
+- **失探中は直近試行を保持（§4）**: 試行は 3 フレームに 1 回なので、`RelocalizationOutput.diagnostics` は次の試行まで保持し `framesSinceAttempt` を添える（追跡復帰で消去）。HUD が 3 フレーム中 2 フレーム `none` だけになる問題の解消
+- **Recovery 行（§10）**: `MapPoseOutput.observations / requiredInliers / recoveryMode`（`tracking` = `minPnPInliers` 12、`recovery` = `minRecoveryInliers` 24、`long` = `minRecoveryInliersLong` 40）。HUD `Need 14/24i obs 14 (recovery)` でどの規則が効いているか分かる
+- **HUD をモバイル向けに（§11–§16）**: 1 行 1 値の縦長レイアウト（`Label  value`、ラベル 6 文字）。節は常時 `State`（14 px 太字）/ FPS / `TRACK`（Feat / PnP / Source + 履歴 / Lost / Rot / 2view / Reloc 1 行）/ `MAP`（Cand / Reject / Need / Gate / Plane 候補）/ `RELOC`（**失探中・試行中・再局所化直後のみ**: `KF 8 / try 2` / `NCC 2 best .31` / `LK 2` / `PnP 2 ran / 0 ok` / `VAL 0` / `Best KF3 14i 3.18px` / `Ratio .24 cells 4/9 ncc .31` / `Stage ratio` / `Fail ratio` / Cand・Apply・Jump・Post）/ `WORLD` / `OBJECT` / `TIMING`。CSS: `width: calc(100vw - 24px)`、`max-width: 420px`、`font-size: 12px / line-height 1.35`、`top: safe-area + 8px`、`max-height: calc(100dvh - safe-area - 24px)` でスクロール、`pre-wrap` + `overflow-wrap: anywhere`。警告値は橙（`hud-warn`）。`MAP` 行は現フレームの Map PnP 候補、`RELOC` 行は再局所化の候補と、ラベルで意味を分離（§16）
+- **ログ**: `RELOC REJECT` に `keyframes = 8 tried = 2 / NCC 2/2 (best 0.31) LK 2/2 PnP 0/2 VAL 0 / best = KF3 stage ratio 14i 3.18px ratio 0.24 cells 4/9 / trials = KF3:ratio(14i) KF7:pnp(9i)` を追加（拒否コードまたは best の段階が変わったとき）
+- テスト 156 件（+1）: 成功時に全カウンタが 1 / `ok`、一隅の inlier は `pnpPassed 1 → spatialRejected 1 → validated 0`・best の stage `spatial`、別シーンは `coarse` で脱落し `bestCoarseScore` が trial と一致、失探中の出力に diagnostics が保持され追跡復帰で消える、`recoveryMode` が `long` → `tracking` に戻る。ブラウザテスト全サンプル `PLANE_FOUND`
+- **実機で読むべきもの**: `RELOC` 節の `NCC / LK / PnP / VAL` のどこで 0 になるか。`NCC 0` なら Keyframe 画像との粗一致が成立していない（視点変化が大きい、または Keyframe が別の場所）、`LK 0` なら粗一致は通るが特徴が追えない（ブラー / 露出差）、`PnP 0 ok` なら対応は取れるが Map と幾何が合わない（Landmark のずれ）、`VAL 0` なら inlier 数は足りるが error / ratio / spatial で落ちている（`Fail` 行にどれか）
+
 ### 修正指示書 v5 対応 — Relocalization の候補化・大域検証・確認（2026-10-05、実機確認待ち）
 
 通常 Tracking = 時系列連続性重視（Temporal Gate）、Relocalization = 大域的な幾何整合性重視（Global Validation）の 2 本立て（§2、§34）。再局所化は通常の Jump Gate では拒否しないが、成功を無条件に信頼もしない。

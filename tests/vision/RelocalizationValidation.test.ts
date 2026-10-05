@@ -103,6 +103,54 @@ describe("Relocalizer global validation (v5 §5–§7)", () => {
     expect(["low_match_score", "lk_failed", "insufficient_inliers", "high_reprojection_error", "low_inlier_ratio"]).toContain(r.rejectCode);
     void pyramid;
   });
+
+  it("reports where each keyframe dropped out and the best trial (v6 §1–§3)", () => {
+    // Success: every stage counter accounts for the one keyframe tried.
+    const ok = keyframeScene(gray, () => true);
+    const r1 = ok.reloc.relocalize(ok.pyramid, ok.map, K);
+    const d1 = r1.diagnostics;
+    expect(d1.keyframes).toBe(1);
+    expect(d1.candidatesTried).toBe(1);
+    expect(d1.coarseTested).toBe(1);
+    expect(d1.coarsePassed).toBe(1);
+    expect(d1.lkTested).toBe(1);
+    expect(d1.lkPassed).toBe(1);
+    expect(d1.pnpTested).toBe(1);
+    expect(d1.pnpPassed).toBe(1);
+    expect(d1.validated).toBe(1);
+    expect(d1.trials).toHaveLength(1);
+    expect(d1.trials[0].stage).toBe("ok");
+    expect(d1.best?.keyframeId).toBe(1);
+    expect(d1.best?.inlierCount).toBe(r1.inlierCount);
+    expect(d1.rejectCode).toBeNull();
+
+    // Spatial rejection: PnP ran and passed the inlier / error checks, the
+    // trial stops at "spatial" and that is the attempt's reject code.
+    const corner = keyframeScene(gray, (x, y) => x < 200 && y < 150);
+    const r2 = corner.reloc.relocalize(corner.pyramid, corner.map, K);
+    const d2 = r2.diagnostics;
+    expect(d2.pnpTested).toBe(1);
+    expect(d2.pnpPassed).toBe(1);
+    expect(d2.spatialRejected).toBe(1);
+    expect(d2.validated).toBe(0);
+    expect(d2.trials[0].stage).toBe("spatial");
+    expect(d2.best?.stage).toBe("spatial");
+    expect(d2.best?.spatialCells).toBe(r2.spatialCells);
+    expect(d2.rejectCode).toBe("poor_spatial_distribution");
+
+    // A different scene: the keyframe drops out early (coarse or LK) and the
+    // counters say so; the best trial carries its coarse score.
+    const other = new ImagePyramid(W, H, resolveConfig().tracker.pyramidLevels);
+    other.build(makeTexture(W, H, createRng(78), [10, 25, 60, 150]));
+    const r3 = ok.reloc.relocalize(other, ok.map, K);
+    const d3 = r3.diagnostics;
+    expect(d3.candidatesTried).toBe(1);
+    expect(d3.validated).toBe(0);
+    expect(d3.best).not.toBeNull();
+    expect(d3.best!.stage).not.toBe("ok");
+    expect(d3.bestCoarseScore).toBe(d3.trials[0].coarseScore);
+    console.log(`[reloc-diag] other scene: stage ${d3.best!.stage} ncc ${d3.bestCoarseScore.toFixed(2)} lk ${d3.best!.lkRatio.toFixed(2)} ${d3.best!.inlierCount}i`);
+  });
 });
 
 // ---- Engine-level confirmation and post-relocalization monitoring ----
@@ -144,6 +192,17 @@ describe("Relocalization confirmation and consistency (v5 §10–§11, §16–§
     expect(outs[outs.length - 1].mapPose!.framesSinceTracked).toBeGreaterThan(0);
     expect(outs[outs.length - 1].mapPose!.mapFrameId).toBe(mapFrameId); // not reset
 
+    // While lost on blank frames, the last attempt's diagnostics stay on the
+    // output between attempts (v6: the HUD must not read "none" with nothing
+    // else two frames out of three) and say the keyframes dropped out early.
+    const lastBlank = outs[outs.length - 1].relocalization;
+    expect(lastBlank.diagnostics).not.toBeNull();
+    expect(lastBlank.diagnostics!.validated).toBe(0);
+    expect(lastBlank.diagnostics!.candidatesTried).toBeGreaterThan(0);
+    expect(lastBlank.framesSinceAttempt).toBeGreaterThanOrEqual(0);
+    expect(lastBlank.framesSinceAttempt).toBeLessThan(resolveConfig().relocalization.attemptEveryNFrames);
+    expect(outs[29].relocalization.diagnostics).toBeNull(); // nothing while tracking
+
     const attempts: string[] = [];
     let successFrame = -1;
     for (let f = 36; f < 60; f++, frameId++) {
@@ -182,10 +241,19 @@ describe("Relocalization confirmation and consistency (v5 §10–§11, §16–§
     console.log(`[reloc-v5] post-reloc map Δ ${lastMon.postDeltaTranslation.toFixed(3)} map units / ${lastMon.postDeltaRotationDeg.toFixed(2)}°`);
     expect(lastMon.postDeltaRotationDeg).toBeLessThan(3);
     expect(lastMon.postDeltaTranslation).toBeLessThan(1.0);
-    // The monitoring window ends: the flag clears.
+    // The monitoring window ends: the flag clears, and the lost-episode
+    // diagnostics are gone once tracking resumed.
     const later = outs[outs.length - 1];
     expect(later.mapPose!.relocalized).toBe(false);
     expect(later.mapPose!.framesSinceTracked).toBe(0);
+    expect(later.relocalization.diagnostics).toBeNull();
+    expect(later.mapPose!.recoveryMode).toBe("tracking");
+    expect(later.mapPose!.requiredInliers).toBe(resolveConfig().landmarks.minPnPInliers);
+    // While lost the recovery rule was visible on the output (v6 §10).
+    // (the rule is chosen from the lost count before this frame's increment)
+    const lostOut = outs.find((o) => o.mapPose && o.mapPose.framesSinceTracked > resolveConfig().landmarks.longLostFrames + 1)!;
+    expect(lostOut.mapPose!.recoveryMode).toBe("long");
+    expect(lostOut.mapPose!.requiredInliers).toBe(resolveConfig().landmarks.minRecoveryInliersLong);
   });
 
   it("applies a clearly high-quality candidate at once (no confirmation delay) with the default config", () => {

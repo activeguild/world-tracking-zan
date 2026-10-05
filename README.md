@@ -198,6 +198,16 @@ show the candidate's quality, its jump from the held pose, the structured
 reject code and the post-relocalization agreement; `R` marks it in the source
 history.
 
+Relocalization diagnostics (v6): every attempt records, per keyframe tried,
+the stage it dropped out at (`coarse → landmarks → lk → pnp → error → ratio →
+spatial → ok`) plus stage counters and the best trial
+(`RelocalizationResult.diagnostics`); the last attempt stays on the output
+between attempts while lost. The HUD is laid out for a phone (one short row
+per value, `RELOC` section only while lost): `KF 8 / try 2`, `NCC 2`, `LK 2`,
+`PnP 2 ran / 0 ok`, `VAL 0`, `Best KF3 14i 3.18px`, `Fail ratio`, and a
+`Need 14/24i obs 14 (recovery)` row naming the map-PnP recovery rule in force.
+No threshold changed.
+
 ## Tests
 
 ```bash
