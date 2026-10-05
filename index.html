@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#000000" />
+    <link rel="icon" href="data:," />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <title>WebAR Tracking – Phase 5</title>
+  </head>
+  <body>
+    <div id="app">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="frame"></canvas>
+      <canvas id="three"></canvas>
+      <canvas id="overlay"></canvas>
+      <div id="message"></div>
+      <button id="start" type="button">Start Camera</button>
+      <button id="debug-toggle" type="button" aria-label="Toggle debug HUD" title="Debug HUD">☰</button>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
