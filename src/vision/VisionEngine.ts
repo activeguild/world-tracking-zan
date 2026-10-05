@@ -10,6 +10,16 @@ import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./P
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { Relocalizer, requiredConfirmations, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
+import {
+  advanceTimeline,
+  candidateAction,
+  candidateStale,
+  completeTimeline,
+  emptyRelocalizationTimeline,
+  type RelocalizationTimeline,
+  shouldAttemptRelocalization,
+  shouldPrepareRelocalization,
+} from "./RelocalizationSchedule";
 import { isJumpRejection, poseDelta } from "./PoseValidation";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
 import {
@@ -152,6 +162,12 @@ export class VisionEngine {
   /** Stage counters of the most recent relocalization attempt of the current lost episode (v6). */
   private relocDiagnostics: RelocalizationDiagnostics | null = null;
   private relocDiagnosticsAge = 0;
+  /** Timing of the current / last lost episode (v14 §45–§46); null until the world was lost once. */
+  private relocTimeline: RelocalizationTimeline | null = null;
+  /** Frame the keyframe ranking was last prepared on (v14 §3–§6), −1 when none. */
+  private relocPreparedFrame = -1;
+  /** Frames since the map PnP last located the camera, as of the previous frame (episode start detection). */
+  private prevFramesSinceTracked = 0;
 
   /** Timing breakdown of the last frame (ms). */
   readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, reloc: 0, total: 0 };
@@ -263,6 +279,9 @@ export class VisionEngine {
     this.relocMonitor = null;
     this.lastRelocalized = false;
     this.relocDiagnostics = null;
+    this.relocTimeline = null;
+    this.relocPreparedFrame = -1;
+    this.prevFramesSinceTracked = 0;
     this.worldEstablished = false;
   }
 
@@ -482,6 +501,11 @@ export class VisionEngine {
       // The last attempt's stage counters stay visible between attempts (v6).
       diagnostics: this.relocDiagnostics,
       framesSinceAttempt: this.relocDiagnostics ? ++this.relocDiagnosticsAge : -1,
+      searchStage: this.relocDiagnostics ? this.relocDiagnostics.searchStage : "idle",
+      preparedAgeFrames: this.relocPreparedFrame >= 0 ? frameId - this.relocPreparedFrame : -1,
+      pendingKeyframeId: this.pendingReloc ? this.pendingReloc.result.keyframeId : -1,
+      candidateAgeFrames: this.pendingReloc ? frameId - this.pendingReloc.frameId : -1,
+      timeline: this.relocTimeline,
     };
     let relocalizedNow = false;
     let monitoredThisFrame = false;
@@ -495,6 +519,8 @@ export class VisionEngine {
           this.lastPlaneAnchor = null;
           this.relocalizer.reset();
           this.worldEstablished = false;
+          this.relocTimeline = null;
+          this.relocPreparedFrame = -1;
           // The initialization frame is the first keyframe.
           this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
           this.relocStatus.keyframes = this.relocalizer.count;
@@ -510,24 +536,45 @@ export class VisionEngine {
       // temporal gate is not used here (a correct return after a loss can be
       // far from the held pose, v5 §9); the delta is diagnostic only.
       const rc = this.config.relocalization;
-      const pending = this.pendingReloc;
+      let pending = this.pendingReloc;
       // Relocalization only returns to an *established* world (v10 §2, §9):
       // before a plane fixed the world there is nothing to go back to, the
       // user may be scanning somewhere else on purpose, and the map is
       // re-initialized there instead (reset below).
-      const scheduled =
-        this.worldEstablished &&
-        tracker.framesSinceTracked >= rc.startAfterLostFrames &&
-        (tracker.framesSinceTracked - rc.startAfterLostFrames) % rc.attemptEveryNFrames === 0;
       if (tracker.framesSinceTracked === 0 || !this.worldEstablished) {
         this.pendingReloc = null;
+        pending = null;
       }
-      if (tracker.framesSinceTracked > 0 && this.worldEstablished && (pending !== null || scheduled)) {
+      // v14 §43–§44: a candidate that was not confirmed within its age limit
+      // is stale — never applied as the current pose, recomputed instead.
+      if (pending && candidateStale(pending.frameId, frameId, rc.candidateMaxAgeFrames)) {
+        this.relocStatus.rejectCode = "stale_candidate";
+        this.relocStatus.reason = `candidate from frame ${pending.frameId} is ${frameId - pending.frameId} frames old (> ${rc.candidateMaxAgeFrames})`;
+        this.relocStatus.attempt = "fail";
+        this.relocAttemptsSinceLost++;
+        this.pendingReloc = null;
+        pending = null;
+      }
+      const attempt = shouldAttemptRelocalization({
+        worldEstablished: this.worldEstablished,
+        framesSinceTracked: tracker.framesSinceTracked,
+        startAfterLostFrames: rc.startAfterLostFrames,
+        attemptEveryNFrames: rc.attemptEveryNFrames,
+        pending: pending !== null,
+      });
+      if (attempt) {
         const tr0 = now();
         // The held pose and scene depth feed the relocalization-specific jump
         // limits (v12 §9); the normal-tracking gate is still not applied here.
-        const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k, tracker.pose, tracker.sceneDepth);
+        // The lost pose never picks the keyframe (v14 §13–§14): the ranking
+        // is visual; only the pending candidate's keyframe is kept first.
+        const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k, tracker.pose, tracker.sceneDepth, {
+          frameId,
+          firstAttempt: this.relocTimeline !== null && this.relocTimeline.attempts === 0,
+          preferKeyframeId: pending ? pending.result.keyframeId : undefined,
+        });
         this.timing.reloc = now() - tr0;
+        if (this.relocTimeline) advanceTimeline(this.relocTimeline, r.diagnostics, frameId, input.timestamp);
         const d = r.pose ? poseDelta(r.pose, tracker.pose) : { translation: 0, rotationDeg: 0 };
         this.relocDiagnostics = r.diagnostics;
         this.relocDiagnosticsAge = 0;
@@ -535,6 +582,7 @@ export class VisionEngine {
           ...this.relocStatus,
           diagnostics: r.diagnostics,
           framesSinceAttempt: 0,
+          searchStage: r.diagnostics.searchStage,
           attempt: r.success ? "candidate" : "fail",
           inlierCount: r.inlierCount,
           candidatesTried: r.candidatesTried,
@@ -554,10 +602,9 @@ export class VisionEngine {
           // v12 §10–§11: an acceptable candidate (error above the strict bound)
           // is never applied at once — it needs at least one confirmation
           // frame whatever the immediate-apply rule says.
-          const level = r.level ?? "strong";
+          const level: "strong" | "acceptable" = r.level === "acceptable" ? "acceptable" : "strong";
           const needed = requiredConfirmations(level, rc.confirmationFrames);
-          const immediate =
-            needed <= 0 || (level === "strong" && r.inlierCount >= rc.immediateInliers && r.meanReprojectionErrorPx <= rc.immediateMaxErrorPx);
+          const immediate = candidateAction(level, r.inlierCount, r.meanReprojectionErrorPx, rc, needed) === "apply";
           if (pending) {
             // Confirmation: the new candidate must land where the pending one did.
             const c = poseDelta(r.pose, pending.result.pose!);
@@ -612,7 +659,12 @@ export class VisionEngine {
           this.relocStatus.postDeltaTranslation = 0;
           this.relocStatus.postDeltaRotationDeg = 0;
           this.relocStatus.postInconsistent = false;
+          if (this.relocTimeline) completeTimeline(this.relocTimeline, frameId, input.timestamp);
         }
+        // v14 §24: the stage the search stands at after this attempt.
+        this.relocStatus.searchStage = relocalizedNow ? "applied" : this.pendingReloc ? "confirming" : r.diagnostics.searchStage;
+        this.relocStatus.pendingKeyframeId = this.pendingReloc ? this.pendingReloc.result.keyframeId : -1;
+        this.relocStatus.candidateAgeFrames = this.pendingReloc ? frameId - this.pendingReloc.frameId : -1;
       }
 
       // Plane-relative pose (experimental): a *candidate* for the canonical
@@ -652,6 +704,14 @@ export class VisionEngine {
         this.relocStatus.postInconsistent = mon.inconsistent;
         if (mon.framesLeft <= 0) this.relocMonitor = null;
       }
+      // v14 §45: a lost episode starts on the first frame the map PnP does
+      // not locate the camera after it did (the timeline is measured from
+      // here; relocalization attempts begin in the next frame).
+      if (this.worldEstablished && !res.tracked && this.prevFramesSinceTracked === 0 && !relocalizedNow) {
+        this.relocTimeline = emptyRelocalizationTimeline(frameId, input.timestamp);
+        this.relocStatus.timeline = this.relocTimeline;
+      }
+      this.prevFramesSinceTracked = tracker.framesSinceTracked;
       if (res.tracked) {
         this.relocAttemptsSinceLost = 0;
         if (!relocalizedNow) {
@@ -659,6 +719,28 @@ export class VisionEngine {
           this.relocDiagnostics = null;
           this.relocStatus.diagnostics = null;
           this.relocStatus.framesSinceAttempt = -1;
+          this.relocStatus.searchStage = "idle";
+        }
+        // v14 §3–§6: while the located pose is weak (not a trusted PnP solve,
+        // or fast motion) keep the keyframe ranking warm so that the first
+        // lost frame starts from it. Rate-limited to the attempt period; no
+        // LK, no PnP, no pose or visibility change (v13 decides visibility).
+        const prepare = shouldPrepareRelocalization({
+          worldEstablished: this.worldEstablished,
+          tracked: true,
+          trusted: sel.map?.trusted ?? false,
+          motionLevel: this.lastMotion.level,
+        });
+        if (prepare && this.relocalizer.count > 0) {
+          this.relocStatus.preparing = true;
+          if (!relocalizedNow) this.relocStatus.searchStage = "prepare";
+          if (this.relocPreparedFrame < 0 || frameId - this.relocPreparedFrame >= Math.max(1, this.config.relocalization.attemptEveryNFrames)) {
+            const tp0 = now();
+            this.relocalizer.prepare(this.curPyramid, frameId);
+            this.timing.reloc += now() - tp0;
+            this.relocPreparedFrame = frameId;
+          }
+          this.relocStatus.preparedAgeFrames = frameId - this.relocPreparedFrame;
         }
         if (external) {
           // Plane bookkeeping (streaks, off-plane flags, confidence) is
@@ -707,6 +789,8 @@ export class VisionEngine {
         this.pendingReloc = null;
         this.relocMonitor = null;
         this.relocDiagnostics = null;
+        this.relocTimeline = null;
+        this.relocPreparedFrame = -1;
         this.worldEstablished = false;
       }
       this.sourceHistory = (
@@ -1404,5 +1488,11 @@ function emptyReloc(): RelocalizationOutput {
     postInconsistent: false,
     diagnostics: null,
     framesSinceAttempt: -1,
+    searchStage: "idle",
+    preparing: false,
+    preparedAgeFrames: -1,
+    pendingKeyframeId: -1,
+    candidateAgeFrames: -1,
+    timeline: null,
   };
 }

@@ -4,9 +4,10 @@ import { refinePosePnP } from "../math/PnP";
 import { rotationDistance, type RigidTransform } from "../math/Pose";
 import { FeatureTracker, TrackStatus } from "./FeatureTracker";
 import type { ImagePyramid } from "./ImagePyramid";
-import { clonePyramid, downsampleToCoarse, type Keyframe, type KeyframeObservation } from "./Keyframe";
+import { clonePyramid, type CoarseImage, downsampleToCoarse, type Keyframe, type KeyframeObservation } from "./Keyframe";
 import type { LandmarkMap } from "./LandmarkMap";
 import { poseDelta } from "./PoseValidation";
+import { emptyLkStatusCounts, type LkFailureReason, lkFailureReason, type LkStatusCounts, type RelocalizationSearchStage } from "./RelocalizationSchedule";
 import type { Track } from "./types";
 
 /**
@@ -14,14 +15,18 @@ import type { Track } from "./types";
  *
  * Relocalization strategy (short-term loss, the target use case):
  *
- *   1. candidate keyframes, most recent first
- *   2. coarse global alignment: best integer shift between the keyframe's
- *      and the current frame's low-resolution images (zero-mean NCC)
+ *   1. rank *all* keyframes by coarse visual similarity (zero-mean NCC shift
+ *      search on a 1/16 image, v14 §8–§12); keyframes in a retry cooldown
+ *      whose view has not changed are skipped (v14 §21–§22)
+ *   2. for the top K only: refine the shift on the 1/8 image (the coarse
+ *      score `coarseMinScore` gates)
  *   3. pyramidal LK from the keyframe image to the current image for the
  *      keyframe's landmark observations, initialized with the coarse shift
+ *      (relocalization-specific LK thresholds, v14 §28–§30)
  *   4. PnP (LM + Huber) from the keyframe pose on the surviving 2D–3D pairs
- *   5. global validation (inliers, error, inlier ratio, spatial distribution)
- *      → candidate; the caller confirms and applies it
+ *   5. global validation (inliers, error, inlier ratio, spatial distribution,
+ *      NCC, jump) → candidate; the search stops at the first strong one
+ *      (v14 §18); the caller confirms and applies it
  *
  * No descriptors are needed because the keyframe image itself is matched;
  * this covers blur, brief occlusion and the camera coming back to a view
@@ -40,6 +45,8 @@ export type RelocalizationRejectCode =
   | "poor_spatial_distribution"
   | "pose_jump"
   | "confirmation_failed"
+  | "stale_candidate"
+  | "retry_cooldown"
   | "invalid_pose";
 
 /**
@@ -143,9 +150,17 @@ export interface RelocValidationDiagnostics {
 export interface RelocalizationKeyframeTrial {
   keyframeId: number;
   stage: RelocalizationStage;
+  /** Ranking score on the 1/16 image (v14 §10). */
+  rankScore: number;
+  /** Refined coarse NCC on the 1/8 image (−1 when the refinement did not run). */
   coarseScore: number;
   /** LK-tracked / observations (0 when LK did not run). */
   lkRatio: number;
+  /** LK breakdown (v14 §49): observations tried, kept, per-status rejects and the dominant failure. */
+  lkObservations: number;
+  lkTracked: number;
+  lkStatus: LkStatusCounts;
+  lkFailureReason: LkFailureReason | null;
   inlierCount: number;
   meanReprojectionErrorPx: number;
   inlierRatio: number;
@@ -349,6 +364,21 @@ export function spatialCoverageOf(xs: ArrayLike<number>, ys: ArrayLike<number>, 
 export interface RelocalizationDiagnostics {
   /** Keyframes in the store at the time of the attempt. */
   keyframes: number;
+  /**
+   * Ranking of every keyframe by coarse similarity (v14 §8–§12, §46), best
+   * first: which were selected for LK and which were held back by the
+   * retry cooldown (§21–§22).
+   */
+  ranked: RankedKeyframe[];
+  /** Keyframes sent to LK / PnP in this attempt (the search budget, §16). */
+  lkCandidates: number;
+  pnpCandidates: number;
+  /** Keyframes skipped because they failed recently on an unchanged view (§21). */
+  retrySuppressed: number;
+  /** Furthest stage any keyframe reached in this attempt (§24). */
+  searchStage: RelocalizationSearchStage;
+  /** The ranking came from a preparation made while still tracking (§3–§6, §33). */
+  usedPreparedRanking: boolean;
   candidatesTried: number;
   coarseTested: number;
   coarsePassed: number;
@@ -457,9 +487,29 @@ export function spatialCellCount(xs: ArrayLike<number>, ys: ArrayLike<number>, n
   return count;
 }
 
+/** One keyframe in the ranking of an attempt (v14 §9–§12). */
+export interface RankedKeyframe {
+  keyframeId: number;
+  /** Zero-mean NCC on the 1/16 image at the best shift (−1…1). */
+  rankScore: number;
+  /** Best 1/16 shift (its pixels). */
+  dx: number;
+  dy: number;
+  /** Sent to the 1/8 refinement / LK in this attempt. */
+  selected: boolean;
+  /** Held back by the retry cooldown (failed recently, view unchanged). */
+  suppressed: boolean;
+}
+
 export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDiagnostics {
   return {
     keyframes,
+    ranked: [],
+    lkCandidates: 0,
+    pnpCandidates: 0,
+    retrySuppressed: 0,
+    searchStage: "coarse",
+    usedPreparedRanking: false,
     candidatesTried: 0,
     coarseTested: 0,
     coarsePassed: 0,
@@ -500,28 +550,77 @@ function betterTrial(a: RelocalizationKeyframeTrial, b: RelocalizationKeyframeTr
   return a.coarseScore > b.coarseScore;
 }
 
+/** Options of one relocalization attempt (v14). */
+export interface RelocalizeOptions {
+  /** Current frame id (retry cooldowns, prepared-ranking age); omit to disable both. */
+  frameId?: number;
+  /** First attempt of a lost episode: may try `lkCandidatesFirstAttempt` keyframes (v14 §17). */
+  firstAttempt?: boolean;
+  /** Keyframe to rank first whatever its score — the pending candidate's keyframe (confirmation, v14 §33). */
+  preferKeyframeId?: number;
+}
+
+/** Retry bookkeeping per keyframe (v14 §21–§22, §34). */
+interface KeyframeRetryState {
+  /** Frame of the last failed trial and the 1/16 image it failed on. */
+  failedFrame: number;
+  failedRank: CoarseImage;
+  cooldownUntil: number;
+  lastStage: RelocalizationStage;
+  lastSuccessFrame: number;
+}
+
+/** A ranking kept from a tracked frame (v14 §3–§6, §33). */
+export interface RelocalizationPreparation {
+  frameId: number;
+  ranked: RankedKeyframe[];
+  rank: CoarseImage;
+}
+
 export class Relocalizer {
   readonly keyframes: Keyframe[] = [];
   private nextId = 1;
   private lastKeyframePose: RigidTransform | null = null;
   private lastKeyframeFrame = -Infinity;
   private readonly tracker: FeatureTracker;
-  /** Round-robin cursor so that successive attempts cover every keyframe, not only the most recent ones. */
-  private candidateCursor = 0;
-  private scratchCoarse: { width: number; height: number; data: Uint8Array; mean: number; norm: number } | null = null;
+  private scratchCoarse: CoarseImage | null = null;
+  private readonly retry = new Map<number, KeyframeRetryState>();
+  private prepared: RelocalizationPreparation | null = null;
 
   constructor(
     private readonly config: RelocalizationConfig,
     trackerConfig: ConstructorParameters<typeof FeatureTracker>[0],
   ) {
-    this.tracker = new FeatureTracker({ ...trackerConfig, maxIterations: trackerConfig.maxIterations + 10 });
+    // Relocalization-specific LK (v14 §28–§30): keyframe → current frame
+    // bridges seconds and a viewpoint change, so it gets its own FB / residual
+    // bounds and more iterations; the engine's frame-to-frame tracker keeps
+    // its configuration. Every check (FB, residual, texture, bounds, gate)
+    // still runs.
+    this.tracker = new FeatureTracker({
+      ...trackerConfig,
+      maxIterations: trackerConfig.maxIterations + 10,
+      forwardBackwardThreshold: config.lkForwardBackwardPx > 0 ? config.lkForwardBackwardPx : trackerConfig.forwardBackwardThreshold,
+      maxResidual: config.lkMaxResidual > 0 ? config.lkMaxResidual : trackerConfig.maxResidual,
+    });
   }
 
   reset(): void {
     this.keyframes.length = 0;
     this.lastKeyframePose = null;
     this.lastKeyframeFrame = -Infinity;
-    this.candidateCursor = 0;
+    this.retry.clear();
+    this.prepared = null;
+  }
+
+  /** Ranking prepared on a tracked frame, if any (diagnostics). */
+  get preparation(): RelocalizationPreparation | null {
+    return this.prepared;
+  }
+
+  /** Retry state of a keyframe (tests / diagnostics). */
+  retryStateOf(keyframeId: number): { cooldownUntil: number; lastStage: RelocalizationStage; lastSuccessFrame: number } | null {
+    const s = this.retry.get(keyframeId);
+    return s ? { cooldownUntil: s.cooldownUntil, lastStage: s.lastStage, lastSuccessFrame: s.lastSuccessFrame } : null;
   }
 
   get count(): number {
@@ -550,23 +649,125 @@ export class Relocalizer {
       if (t.landmarkId >= 0) observations.push({ landmarkId: t.landmarkId, x: t.x, y: t.y });
     }
     const coarseSrc = pyramid.levels[Math.min(2, pyramid.levels.length - 1)];
+    const coarse = downsampleToCoarse(coarseSrc);
     const kf: Keyframe = {
       id: this.nextId++,
       frameId,
       timestamp,
       pose: { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) },
       pyramid: clonePyramid(pyramid),
-      coarse: downsampleToCoarse(coarseSrc),
+      coarse,
+      rank: downsampleToCoarse(coarse),
       observations,
     };
     this.keyframes.push(kf);
     if (this.keyframes.length > this.config.maxKeyframes) {
       // Drop the oldest, but always keep the first (map origin view).
-      this.keyframes.splice(1, 1);
+      const dropped = this.keyframes.splice(1, 1);
+      for (const d of dropped) this.retry.delete(d.id);
     }
     this.lastKeyframePose = kf.pose;
     this.lastKeyframeFrame = frameId;
+    this.prepared = null;
     return kf;
+  }
+
+  /** 1/8 and 1/16 images of the current frame. */
+  private coarseImagesOf(current: ImagePyramid): { coarse: CoarseImage; rank: CoarseImage } {
+    const coarseSrc = current.levels[Math.min(2, current.levels.length - 1)];
+    const coarse = downsampleToCoarse(coarseSrc);
+    return { coarse, rank: downsampleToCoarse(coarse) };
+  }
+
+  /**
+   * Rank every keyframe by coarse similarity to `rank` (the current 1/16
+   * image), best first (v14 §8–§12). Nothing is excluded here: age, the lost
+   * pose and earlier failures only show up as `selected` / `suppressed`
+   * later. `preferKeyframeId` is put first regardless of its score.
+   */
+  private rankKeyframes(rank: CoarseImage, preferKeyframeId?: number): RankedKeyframe[] {
+    const radius = this.config.rankSearchRadius;
+    const ranked: RankedKeyframe[] = this.keyframes.map((kf) => {
+      const s = coarseShift(kf.rank, rank, radius);
+      return { keyframeId: kf.id, rankScore: s.score, dx: s.dx, dy: s.dy, selected: false, suppressed: false };
+    });
+    const recency = new Map<number, number>();
+    this.keyframes.forEach((kf, i) => recency.set(kf.id, i));
+    ranked.sort((a, b) => {
+      if (a.keyframeId === preferKeyframeId) return -1;
+      if (b.keyframeId === preferKeyframeId) return 1;
+      if (a.rankScore !== b.rankScore) return b.rankScore - a.rankScore;
+      return (recency.get(b.keyframeId) ?? 0) - (recency.get(a.keyframeId) ?? 0);
+    });
+    return ranked;
+  }
+
+  /**
+   * Preparation while still tracking (v14 §3–§6, §33): rank the keyframes
+   * against the current frame so that the first attempt after a loss starts
+   * from a ranking instead of computing one. Cheap (1/16 images), no LK, no
+   * PnP, no pose change.
+   */
+  prepare(current: ImagePyramid, frameId: number): RelocalizationPreparation | null {
+    if (this.keyframes.length === 0) {
+      this.prepared = null;
+      return null;
+    }
+    const { rank } = this.coarseImagesOf(current);
+    this.prepared = { frameId, ranked: this.rankKeyframes(rank), rank };
+    return this.prepared;
+  }
+
+  /**
+   * Whether the ranking prepared earlier still describes this frame: made
+   * within the attempt period and on a view that has not changed (zero-shift
+   * NCC between the two 1/16 images, v14 §33).
+   */
+  private preparedRankingFor(rank: CoarseImage, frameId: number | undefined): RankedKeyframe[] | null {
+    const p = this.prepared;
+    if (!p || frameId === undefined) return null;
+    const age = frameId - p.frameId;
+    if (age < 0 || age > Math.max(1, this.config.attemptEveryNFrames)) return null;
+    if (coarseShift(p.rank, rank, 0).score < this.config.retryImageChangeScore) return null;
+    // Copy with fresh selection flags; the cached scores order the candidates.
+    return p.ranked.map((r) => ({ ...r, selected: false, suppressed: false }));
+  }
+
+  /**
+   * Retry cooldown (v14 §21–§22, §34): a keyframe that failed within
+   * `retryCooldownFrames` is skipped only while the view it failed on is
+   * still what the camera sees; a changed image (or camera motion that
+   * changes it) makes it eligible again at once.
+   */
+  private suppressed(kf: Keyframe, rank: CoarseImage, frameId: number | undefined): boolean {
+    if (frameId === undefined) return false;
+    const s = this.retry.get(kf.id);
+    if (!s || frameId >= s.cooldownUntil) return false;
+    return coarseShift(s.failedRank, rank, 0).score >= this.config.retryImageChangeScore;
+  }
+
+  private noteFailure(kf: Keyframe, rank: CoarseImage, frameId: number | undefined, stage: RelocalizationStage): void {
+    if (frameId === undefined) return;
+    const prev = this.retry.get(kf.id);
+    this.retry.set(kf.id, {
+      failedFrame: frameId,
+      failedRank: rank,
+      cooldownUntil: frameId + Math.max(0, this.config.retryCooldownFrames),
+      lastStage: stage,
+      lastSuccessFrame: prev?.lastSuccessFrame ?? -1,
+    });
+  }
+
+  private noteSuccess(kf: Keyframe, frameId: number | undefined): void {
+    if (frameId === undefined) return;
+    const prev = this.retry.get(kf.id);
+    this.retry.set(kf.id, {
+      failedFrame: prev?.failedFrame ?? -1,
+      failedRank: prev?.failedRank ?? kf.rank,
+      cooldownUntil: -1,
+      lastStage: "ok",
+      lastSuccessFrame: frameId,
+    });
   }
 
   /**
@@ -588,6 +789,7 @@ export class Relocalizer {
     k: CameraIntrinsics,
     heldPose: RigidTransform | null = null,
     sceneDepth = 0,
+    opts: RelocalizeOptions = {},
   ): RelocalizationResult {
     const cfg = this.config;
     const diag = emptyRelocalizationDiagnostics(this.keyframes.length);
@@ -603,21 +805,51 @@ export class Relocalizer {
       return fail;
     }
 
-    const coarseSrc = current.levels[Math.min(2, current.levels.length - 1)];
-    const curCoarse = downsampleToCoarse(coarseSrc);
+    const { coarse: curCoarse, rank: curRank } = this.coarseImagesOf(current);
     this.scratchCoarse = curCoarse;
     const coarseScale = current.width / curCoarse.width;
     const f = (k.fx + k.fy) / 2;
+    const frameId = opts.frameId;
 
-    // Candidates: most recent first, then round-robin through the rest on
-    // the following attempts so that the view the camera returns to is
-    // eventually tried even when it is an old keyframe.
-    const ordered = [...this.keyframes].reverse();
-    const candidates: Keyframe[] = [];
-    for (let i = 0; i < Math.min(cfg.candidatesPerFrame, ordered.length); i++) {
-      candidates.push(ordered[(this.candidateCursor + i) % ordered.length]);
+    // ---- stage 0: rank every keyframe by coarse similarity (v14 §8–§12) ----
+    // The ranking prepared on the last tracked frames is reused when the
+    // view has not changed (§33); otherwise it is computed now. The lost /
+    // held pose plays no part (§13–§15): visual similarity orders the
+    // candidates, the pending candidate's keyframe is kept first so that its
+    // confirmation is tried.
+    const preparedRanking = this.preparedRankingFor(curRank, frameId);
+    const ranked = preparedRanking ?? this.rankKeyframes(curRank, opts.preferKeyframeId);
+    if (preparedRanking && opts.preferKeyframeId !== undefined) {
+      const i = ranked.findIndex((r) => r.keyframeId === opts.preferKeyframeId);
+      if (i > 0) ranked.unshift(...ranked.splice(i, 1));
     }
-    this.candidateCursor = (this.candidateCursor + candidates.length) % Math.max(1, ordered.length);
+    diag.usedPreparedRanking = preparedRanking !== null;
+    diag.ranked = ranked;
+    // `bestCoarseScore` stays the best *refined* (1/8) NCC among the keyframes
+    // tried, as before (v6); the ranking scores live in `ranked`.
+    // Search budget (§16–§17): the top K not in a retry cooldown go to LK.
+    const budget = Math.max(1, opts.firstAttempt ? cfg.lkCandidatesFirstAttempt : cfg.maxLkCandidatesPerFrame);
+    const byId = new Map<number, Keyframe>();
+    for (const kf of this.keyframes) byId.set(kf.id, kf);
+    const candidates: { kf: Keyframe; rank: RankedKeyframe }[] = [];
+    for (const r of ranked) {
+      if (candidates.length >= budget) break;
+      const kf = byId.get(r.keyframeId);
+      if (!kf) continue;
+      if (this.suppressed(kf, curRank, frameId)) {
+        r.suppressed = true;
+        diag.retrySuppressed++;
+        continue;
+      }
+      r.selected = true;
+      candidates.push({ kf, rank: r });
+    }
+    diag.lkCandidates = candidates.length;
+    if (candidates.length === 0) {
+      diag.rejectCode = "retry_cooldown";
+      diag.rejectReason = `all ${ranked.length} keyframes in retry cooldown (view unchanged)`;
+      return { ...fail, candidatesTried: 0, reason: diag.rejectReason, rejectCode: "retry_cooldown", diagnostics: diag };
+    }
 
     let best: RelocalizationResult | null = null;
     // The rejected candidate that got furthest, with its reason.
@@ -634,13 +866,18 @@ export class Relocalizer {
       }
     };
 
-    for (const kf of candidates) {
+    for (const { kf, rank } of candidates) {
       diag.candidatesTried++;
       const trial: RelocalizationKeyframeTrial = {
         keyframeId: kf.id,
         stage: "coarse",
+        rankScore: rank.rankScore,
         coarseScore: -1,
         lkRatio: 0,
+        lkObservations: 0,
+        lkTracked: 0,
+        lkStatus: emptyLkStatusCounts(),
+        lkFailureReason: null,
         inlierCount: 0,
         meanReprojectionErrorPx: 0,
         inlierRatio: 0,
@@ -649,12 +886,23 @@ export class Relocalizer {
         validation: null,
       };
 
-      // ---- stage 1: coarse NCC alignment ----
+      // ---- stage 1: coarse NCC alignment, refined around the ranked shift (v14 §10) ----
+      // A prepared ranking orders the candidates, but the shift it found is
+      // a frame or two old: re-measure it for the selected keyframes so the
+      // 1/8 refinement starts from this frame's alignment.
+      if (preparedRanking) {
+        const fresh = coarseShift(kf.rank, curRank, cfg.rankSearchRadius);
+        rank.dx = fresh.dx;
+        rank.dy = fresh.dy;
+        rank.rankScore = fresh.score;
+        trial.rankScore = fresh.score;
+      }
       diag.coarseTested++;
-      const shift = coarseShift(kf.coarse, curCoarse, cfg.coarseSearchRadius);
+      const shift = coarseShiftAround(kf.coarse, curCoarse, rank.dx * 2, rank.dy * 2, cfg.coarseRefineRadius);
       trial.coarseScore = shift.score;
       diag.bestCoarseScore = Math.max(diag.bestCoarseScore, shift.score);
       if (shift.score < cfg.coarseMinScore) {
+        this.noteFailure(kf, curRank, frameId, "coarse");
         record(trial, { matchScore: shift.score }, `score ${shift.score.toFixed(2)} < ${cfg.coarseMinScore} (kf ${kf.id})`);
         continue;
       }
@@ -662,11 +910,15 @@ export class Relocalizer {
       const sx = shift.dx * coarseScale;
       const sy = shift.dy * coarseScale;
 
-      // ---- stage 2: LK from keyframe → current with the coarse shift as the initial guess ----
+      // ---- stage 2: LK from keyframe → current with the coarse shift as the initial guess (v14 §26–§27) ----
+      // The keyframe observation positions are *not* used as the start in
+      // the current frame: each starts at its position plus the global
+      // coarse shift, and the displacement gate is measured from there.
       const obs = kf.observations.filter((o) => map.get(o.landmarkId) !== undefined);
       const n = obs.length;
       if (n < cfg.minInliers) {
         trial.stage = "landmarks";
+        this.noteFailure(kf, curRank, frameId, "landmarks");
         record(trial, { matchScore: shift.score }, `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`);
         continue;
       }
@@ -680,19 +932,43 @@ export class Relocalizer {
         guesses[i * 2 + 1] = obs[i].y + sy;
       }
       const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, cfg.lkMaxDisplacementPx);
+      trial.lkObservations = n;
+      trial.lkTracked = res.okCount;
       trial.lkRatio = res.okCount / n;
+      // Per-status breakdown (v14 §49): says whether the keyframe, the initial
+      // guess or the search window is what fails.
+      const st = trial.lkStatus;
+      for (let i = 0; i < n; i++) {
+        switch (res.status[i]) {
+          case TrackStatus.OK: st.ok++; break;
+          case TrackStatus.OUT_OF_BOUNDS: st.outOfBounds++; break;
+          case TrackStatus.LOW_TEXTURE: st.lowTexture++; break;
+          case TrackStatus.HIGH_RESIDUAL: st.highResidual++; break;
+          case TrackStatus.FB_ERROR: st.fbError++; break;
+          case TrackStatus.TOO_FAR: st.tooFar++; break;
+        }
+      }
       if (res.okCount < cfg.minInliers) {
         trial.stage = "lk";
+        trial.lkFailureReason = lkFailureReason(st);
+        this.noteFailure(kf, curRank, frameId, "lk");
         record(
           trial,
           { matchScore: shift.score, lkRatio: trial.lkRatio },
-          `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (score ${shift.score.toFixed(2)})`,
+          `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (${trial.lkFailureReason}: fb ${st.fbError} res ${st.highResidual} far ${st.tooFar} oob ${st.outOfBounds} tex ${st.lowTexture}; score ${shift.score.toFixed(2)})`,
         );
         continue;
       }
       diag.lkPassed++;
 
-      // ---- stage 3: PnP from the keyframe pose ----
+      // ---- stage 3: PnP from the keyframe pose (budget §16) ----
+      if (diag.pnpCandidates >= Math.max(1, cfg.maxPnpCandidatesPerFrame)) {
+        // Over budget for this frame: the keyframe stays eligible (no cooldown).
+        trial.stage = "lk";
+        record(trial, { matchScore: shift.score, lkRatio: trial.lkRatio }, `kf ${kf.id}: PnP budget (${cfg.maxPnpCandidatesPerFrame}) spent this frame`);
+        continue;
+      }
+      diag.pnpCandidates++;
       diag.pnpTested++;
       const m = res.okCount;
       const pts3 = new Float64Array(m * 3);
@@ -822,11 +1098,13 @@ export class Relocalizer {
                       : validation.rejectReason === "rotation_jump"
                         ? `kf ${kf.id}: rotation jump ${validation.rotationJumpDeg.toFixed(1)} > ${validation.maxRotationJumpDeg}° (reloc limit)${relaxedNote}`
                         : `kf ${kf.id}: inliers in ${trial.spatialCells}/9 cells < ${cfg.minSpatialCells}, coverage ${trial.spatialCoverage.toFixed(2)} < ${cfg.minSpatialCoverage}${relaxedNote}`;
+        this.noteFailure(kf, curRank, frameId, trial.stage);
         record(trial, candidate, reason);
         continue;
       }
       diag.validated++;
       if (validation.level === "acceptable") diag.validatedAcceptable++;
+      this.noteSuccess(kf, frameId);
       record(trial, candidate, null);
       candidate.success = true;
       // Among validated candidates a strong one beats an acceptable one
@@ -834,8 +1112,12 @@ export class Relocalizer {
       const strongBeatsAcceptable = best !== null && best.level === "strong" && candidate.level === "acceptable";
       const acceptableLosesToStrong = best !== null && best.level === "acceptable" && candidate.level === "strong";
       if (!best || acceptableLosesToStrong || (!strongBeatsAcceptable && candidate.inlierCount > best.inlierCount)) best = candidate;
-      if (candidate.inlierCount >= cfg.goodInliers && candidate.level === "strong") break;
+      // Early success (v14 §18): a strong candidate ends the search; an
+      // acceptable one lets the remaining selected keyframes try for a
+      // strong one (the confirmation still follows either way).
+      if (candidate.level === "strong") break;
     }
+    diag.searchStage = diag.validated > 0 ? "validation" : diag.pnpTested > 0 ? "pnp" : diag.lkTested > 0 ? "lk" : "coarse";
     if (best) {
       return { ...best, candidatesTried: diag.candidatesTried, diagnostics: diag };
     }
@@ -864,15 +1146,30 @@ export function coarseShift(
   b: { width: number; height: number; data: Uint8Array; mean: number },
   radius: number,
 ): { dx: number; dy: number; score: number } {
+  return coarseShiftAround(a, b, 0, 0, radius);
+}
+
+/**
+ * Same search restricted to shifts within `radius` of (cx, cy) — the 1/8
+ * refinement around the shift found on the 1/16 ranking image (v14 §10).
+ * Radius 0 evaluates the single shift (cx, cy).
+ */
+export function coarseShiftAround(
+  a: { width: number; height: number; data: Uint8Array; mean: number },
+  b: { width: number; height: number; data: Uint8Array; mean: number },
+  cx: number,
+  cy: number,
+  radius: number,
+): { dx: number; dy: number; score: number } {
   const w = a.width;
   const h = a.height;
   let best = { dx: 0, dy: 0, score: -1 };
   const am = a.mean;
   const bm = b.mean;
-  for (let dy = -radius; dy <= radius; dy++) {
+  for (let dy = cy - radius; dy <= cy + radius; dy++) {
     const y0 = Math.max(0, dy);
     const y1 = Math.min(h, h + dy);
-    for (let dx = -radius; dx <= radius; dx++) {
+    for (let dx = cx - radius; dx <= cx + radius; dx++) {
       const x0 = Math.max(0, dx);
       const x1 = Math.min(w, w + dx);
       if (x1 - x0 < w / 2 || y1 - y0 < h / 2) continue;

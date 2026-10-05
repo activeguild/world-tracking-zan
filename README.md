@@ -305,6 +305,29 @@ the world anchor, the map and the keyframes; the render loop, camera and
 relocalization keep running. The 10 s `holdPoseOnLostMs` hold is gone. HUD
 `OBJECT`: `Visible NO / Reason RELOCALIZING`, `Obj1 hidden`.
 
+Relocalization recovery speed (v14): the goal is to reach the *right*
+keyframe sooner, not to pass candidates more easily — PnP, the v12
+validation levels, the confirmation and v13 visibility are untouched.
+Every attempt ranks all keyframes by coarse similarity (zero-mean NCC
+shift search on a 1/16 image, `rankSearchRadius`), only the top
+`maxLkCandidatesPerFrame` (3; 4 on the first attempt) get the 1/8
+refinement (`coarseRefineRadius`) → LK → PnP; a strong candidate stops the
+search. Keyframe → current LK has its own forward-backward / residual
+bounds (`lkForwardBackwardPx` 2.0, `lkMaxResidual`); the frame-to-frame
+tracker is unchanged. A keyframe that failed is not retried on an
+unchanged view for `retryCooldownFrames` (image change = zero-shift NCC
+vs the view it failed on below `retryImageChangeScore`); the lost pose
+never picks a keyframe. While tracking is weak (PnP below the trusted
+quality or fast motion) the ranking is kept warm (`prepare`) so the first
+lost frame starts from it. Diagnostics: per-keyframe LK status counts and
+a failure reason (`high_fb_error | high_lk_error | too_far | out_of_bounds
+| low_texture | insufficient_tracks`), the ranking, the search stage
+(`prepare | coarse | lk | pnp | validation | confirming | applied`), the
+pending candidate's age (`candidateMaxAgeFrames`) and an episode timeline
+(ms since the loss of the first coarse match / LK / PnP / validation /
+applied pose). `src/vision/RelocalizationSchedule.ts` holds the pure
+scheduling functions.
+
 ## Tests
 
 ```bash
@@ -344,7 +367,8 @@ src/
              OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
              LandmarkMap, MapTracker (init / PnP / triangulation), PlaneDetector,
              PlaneRecovery (plane re-seed after fast motion), PlaneTracker (experimental plane-relative pose),
-             Keyframe, Relocalizer (coarse NCC shift + LK + PnP), VisionEngine, TrackingQuality, types
+             Keyframe, Relocalizer (keyframe ranking + coarse NCC shift + LK + PnP),
+             RelocalizationSchedule (prepare / attempt / retry / timeline), VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
              HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)

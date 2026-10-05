@@ -23,7 +23,7 @@ export interface HudCandidate {
   rejectDetail: string | null;
 }
 
-/** Stage counters of the last relocalization attempt (v6 §1, §5). */
+/** Stage counters of the last relocalization attempt (v6 §1, §5; v14 §23, §46–§48). */
 export interface HudRelocDiagnostics {
   keyframes: number;
   tried: number;
@@ -33,6 +33,12 @@ export interface HudRelocDiagnostics {
   pnpPassed: number;
   validated: number;
   bestCoarseScore: number;
+  /** v14: ranking of all keyframes (best first), the LK / PnP budget used and the keyframes held back by the retry cooldown. */
+  ranked: { keyframeId: number; score: number; selected: boolean; suppressed: boolean }[];
+  lkCandidates: number;
+  pnpCandidates: number;
+  retrySuppressed: number;
+  usedPreparedRanking: boolean;
   best: {
     keyframeId: number;
     stage: string;
@@ -41,6 +47,8 @@ export interface HudRelocDiagnostics {
     inlierRatio: number;
     spatialCells: number;
     coarseScore: number;
+    /** v14 §49: LK breakdown of the best candidate. */
+    lk: { observations: number; tracked: number; fb: number; residual: number; far: number; oob: number; texture: number; reason: string | null };
     /** Per-condition validation of the best candidate (v9 §21), null before PnP. */
     validation: {
       inliers: number;
@@ -236,6 +244,19 @@ export interface HudStats {
     postInconsistent: boolean;
     /** Last attempt of the current lost episode (null while tracking). */
     diag: HudRelocDiagnostics | null;
+    /** v14 §24, §47: search stage, preparation, pending candidate age and the episode timeline (ms since the loss, −1 = not yet). */
+    searchStage: string;
+    preparing: boolean;
+    pendingKeyframeId: number;
+    candidateAgeFrames: number;
+    timeline: {
+      attempts: number;
+      firstCoarseMs: number;
+      firstLkMs: number;
+      firstPnpMs: number;
+      validationMs: number;
+      confirmationMs: number;
+    } | null;
   } | null;
   /** Frame-to-frame motion level and LK diagnostics (v7 §12–§13). */
   motion?: {
@@ -388,16 +409,44 @@ export class DebugOverlay {
       rows.push(section("RELOC"));
       // v10 §28: why we are here — only an established world is relocalized into.
       if (lost) rows.push(row("Reason", s.worldEstablished ? "WORLD_LOST" : "scan continues (no world)"));
+      // v14 §24, §47: where the search stands (prepare / coarse / lk / pnp /
+      // validation / confirming / applied) before the stage counters.
+      rows.push(
+        row(
+          "Stage",
+          `${r.searchStage.toUpperCase()}${r.preparing ? " (tracking)" : ""}${r.pendingKeyframeId >= 0 ? `  cand KF${r.pendingKeyframeId} age ${r.candidateAgeFrames}f` : ""}`,
+          r.searchStage === "confirming" || r.searchStage === "applied" ? undefined : lost ? "hud-warn" : undefined,
+        ),
+      );
       const d = r.diag;
       if (d) {
-        rows.push(row("KF", `${d.keyframes} / try ${d.tried}${d.age > 0 ? `  (${d.age}f ago)` : ""}`));
-        rows.push(row("NCC", `${d.coarsePassed}  best ${d.bestCoarseScore.toFixed(2)}`));
-        rows.push(row("LK", `${d.lkPassed}`));
+        // v14 §23, §36: total keyframes, how many were ranked (all), sent to LK
+        // / PnP (the budget), validated, held back by the retry cooldown.
+        rows.push(row("KF", `${d.keyframes}  ranked ${d.ranked.length}  lk ${d.lkCandidates}  pnp ${d.pnpCandidates}  val ${d.validated}${d.retrySuppressed > 0 ? `  retry ${d.retrySuppressed}` : ""}${d.age > 0 ? `  (${d.age}f ago)` : ""}`));
+        if (d.ranked.length > 0) {
+          const top = d.ranked
+            .slice(0, 4)
+            .map((k) => `KF${k.keyframeId} ${k.score.toFixed(2)}${k.suppressed ? "~" : k.selected ? "" : "·"}`)
+            .join("  ");
+          rows.push(row("Rank", `${top}${d.usedPreparedRanking ? "  (prepared)" : ""}`));
+        }
+        rows.push(row("NCC", `${d.coarsePassed}/${d.tried}  best ${d.bestCoarseScore.toFixed(2)}`));
+        rows.push(row("LK", `${d.lkPassed}/${d.lkCandidates}`));
         rows.push(row("PnP", `${d.pnpTested} ran / ${d.pnpPassed} ok`));
         rows.push(row("VAL", `${d.validated}`, d.validated === 0 && d.tried > 0 ? "hud-warn" : undefined));
         if (d.best) {
           const b = d.best;
           rows.push(row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}`));
+          // v14 §48–§49: the LK breakdown says whether the keyframe, the initial guess or the window fails.
+          if (b.lk.observations > 0) {
+            rows.push(
+              row(
+                "LKpts",
+                `${b.lk.tracked}/${b.lk.observations}${b.lk.reason ? `  ${b.lk.reason}` : ""}  fb ${b.lk.fb} res ${b.lk.residual} far ${b.lk.far} oob ${b.lk.oob} tex ${b.lk.texture}`,
+                b.lk.reason ? "hud-warn" : undefined,
+              ),
+            );
+          }
           const v = b.validation;
           if (v) {
             // v9 §21: every condition with its value, its threshold and PASS / FAIL.
@@ -443,8 +492,16 @@ export class DebugOverlay {
         rows.push(row("Jump", `${cm(r.jumpM)} / ${r.jumpDeg.toFixed(1)}°`));
       }
       if (r.attempt === "fail" && r.rejectCode === "confirmation_failed") rows.push(row("Fail", "confirmation", "hud-warn"));
+      if (r.attempt === "fail" && r.rejectCode === "stale_candidate") rows.push(row("Fail", "stale candidate", "hud-warn"));
+      if (r.attempt === "fail" && r.rejectCode === "retry_cooldown") rows.push(row("Fail", "retry cooldown (view unchanged)", "hud-warn"));
       if (r.postM > 0 || r.postInconsistent) {
         rows.push(row("Post", `map Δ ${cm(r.postM)} / ${r.postDeg.toFixed(1)}°${r.postInconsistent ? "  INCONSISTENT" : ""}`, r.postInconsistent ? "hud-warn" : undefined));
+      }
+      // v14 §45–§47, §55: ms since the loss at which each stage first succeeded.
+      const tl = r.timeline;
+      if (tl) {
+        const t = (ms: number) => (ms < 0 ? "-" : `${Math.round(ms)}`);
+        rows.push(row("Time", `try ${tl.attempts}  ncc ${t(tl.firstCoarseMs)}  lk ${t(tl.firstLkMs)}  pnp ${t(tl.firstPnpMs)}  val ${t(tl.validationMs)}  apply ${t(tl.confirmationMs)} ms`));
       }
     }
 

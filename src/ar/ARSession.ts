@@ -644,26 +644,40 @@ export class ARSession {
     // v5 §8, §18: every relocalization candidate, what was applied, what was
     // rejected (once per reject code), and how the map PnP agreed afterwards.
     const rl = r.relocalization;
+    // v14 §45–§46, §55: the episode timeline (ms since the loss) once the pose is applied.
+    const tl = rl.timeline;
+    const timeline =
+      tl && rl.attempt === "success"
+        ? `\ntimeline (ms since lost) = attempts ${tl.attempts}  first coarse ${tl.firstCoarseMatchMs}  lk ${tl.firstLkSuccessMs}  pnp ${tl.firstPnpSuccessMs}  validation ${tl.validationSuccessMs}  applied ${tl.confirmationSuccessMs}`
+        : "";
     if (rl.attempt === "candidate" || rl.attempt === "success") {
       this.logger.info(
         `RELOCALIZATION ${rl.attempt === "success" ? "APPLIED" : "CANDIDATE"} at frame ${r.frameId} (kf ${rl.keyframeId})\n` +
           `translation = ${len(rl.jumpTranslation)}\nrotation = ${rl.jumpRotationDeg.toFixed(1)}deg\n` +
           `inliers = ${rl.inlierCount}\nerror = ${rl.meanReprojectionErrorPx.toFixed(2)}px${rl.level === "acceptable" ? ` (ACCEPTABLE: relaxed ≤ ${this.config.relocalization.relaxedMeanErrorPx}px, confirmation required)` : rl.level === "strong" ? " (STRONG)" : ""}\nmatch = ${rl.matchScore.toFixed(2)}\n` +
-          `inlier ratio = ${rl.inlierRatio.toFixed(2)}\ncells = ${rl.spatialCells}/9`,
+          `inlier ratio = ${rl.inlierRatio.toFixed(2)}\ncells = ${rl.spatialCells}/9${timeline}`,
       );
       this.loggedRelocReject = null;
     } else if (rl.attempt === "fail") {
       // v6 §1–§5: where the keyframes dropped out (NCC → LK → PnP → VAL) and
       // the best of them, so a failing relocalization can be diagnosed from
-      // the console without the HUD.
+      // the console without the HUD. v14 §23, §48–§49: the ranking, the LK
+      // breakdown of the best candidate and the retry suppression too.
       const d = rl.diagnostics;
-      const key = `${rl.rejectCode}:${d?.best?.stage ?? ""}`;
+      const key = `${rl.rejectCode}:${d?.best?.stage ?? ""}:${d?.best?.lkFailureReason ?? ""}`;
       if (rl.rejectCode && key !== this.loggedRelocReject) {
+        const b = d?.best;
+        const lk = b && b.lkObservations > 0
+          ? `\nlk (best) = ${b.lkTracked}/${b.lkObservations}${b.lkFailureReason ? ` ${b.lkFailureReason}` : ""}  fb ${b.lkStatus.fbError} res ${b.lkStatus.highResidual} far ${b.lkStatus.tooFar} oob ${b.lkStatus.outOfBounds} tex ${b.lkStatus.lowTexture}`
+          : "";
         const stages = d
-          ? `\nkeyframes = ${d.keyframes}  tried = ${d.candidatesTried}\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
-            (d.best
-              ? `\nbest = KF${d.best.keyframeId} stage ${d.best.stage}  ${d.best.inlierCount}i  ${d.best.meanReprojectionErrorPx.toFixed(2)}px  ratio ${d.best.inlierRatio.toFixed(2)}  cells ${d.best.spatialCells}/9  ncc ${d.best.coarseScore.toFixed(2)}`
+          ? `\nkeyframes = ${d.keyframes}  ranked = ${d.ranked.length}  lk budget = ${d.lkCandidates}  pnp budget = ${d.pnpCandidates}  retry suppressed = ${d.retrySuppressed}${d.usedPreparedRanking ? "  (prepared ranking)" : ""}` +
+            `\nranking = ${d.ranked.map((k) => `KF${k.keyframeId}:${k.rankScore.toFixed(2)}${k.suppressed ? "~" : k.selected ? "" : "·"}`).join(" ")}` +
+            `\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
+            (b
+              ? `\nbest = KF${b.keyframeId} stage ${b.stage}  ${b.inlierCount}i  ${b.meanReprojectionErrorPx.toFixed(2)}px  ratio ${b.inlierRatio.toFixed(2)}  cells ${b.spatialCells}/9  ncc ${b.coarseScore.toFixed(2)}`
               : "") +
+            lk +
             `\ntrials = ${d.trials.map((t) => `KF${t.keyframeId}:${t.stage}${t.inlierCount ? `(${t.inlierCount}i)` : ""}`).join(" ")}`
           : "";
         this.logger.info(`RELOC REJECT at frame ${r.frameId}\nreason = ${rl.rejectCode}${rl.reason ? `\ndetail = ${rl.reason}` : ""}${stages}`);

@@ -255,6 +255,11 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
     pnpPassed: d.pnpPassed,
     validated: d.validated,
     bestCoarseScore: d.bestCoarseScore,
+    ranked: d.ranked.map((k) => ({ keyframeId: k.keyframeId, score: k.rankScore, selected: k.selected, suppressed: k.suppressed })),
+    lkCandidates: d.lkCandidates,
+    pnpCandidates: d.pnpCandidates,
+    retrySuppressed: d.retrySuppressed,
+    usedPreparedRanking: d.usedPreparedRanking,
     best: b
       ? {
           keyframeId: b.keyframeId,
@@ -264,6 +269,16 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
           inlierRatio: b.inlierRatio,
           spatialCells: b.spatialCells,
           coarseScore: b.coarseScore,
+          lk: {
+            observations: b.lkObservations,
+            tracked: b.lkTracked,
+            fb: b.lkStatus.fbError,
+            residual: b.lkStatus.highResidual,
+            far: b.lkStatus.tooFar,
+            oob: b.lkStatus.outOfBounds,
+            texture: b.lkStatus.lowTexture,
+            reason: b.lkFailureReason,
+          },
           validation: b.validation
             ? {
                 inliers: b.validation.inliers,
@@ -455,6 +470,20 @@ function refreshHud(): void {
           postDeg: s.relocalization.postDeltaRotationDeg,
           postInconsistent: s.relocalization.postInconsistent,
           diag: hudRelocDiagnostics(s.relocalization.diagnostics, s.relocalization.framesSinceAttempt),
+          searchStage: s.relocalization.searchStage,
+          preparing: s.relocalization.preparing,
+          pendingKeyframeId: s.relocalization.pendingKeyframeId,
+          candidateAgeFrames: s.relocalization.candidateAgeFrames,
+          timeline: s.relocalization.timeline
+            ? {
+                attempts: s.relocalization.timeline.attempts,
+                firstCoarseMs: s.relocalization.timeline.firstCoarseMatchMs,
+                firstLkMs: s.relocalization.timeline.firstLkSuccessMs,
+                firstPnpMs: s.relocalization.timeline.firstPnpSuccessMs,
+                validationMs: s.relocalization.timeline.validationSuccessMs,
+                confirmationMs: s.relocalization.timeline.confirmationSuccessMs,
+              }
+            : null,
         }
       : null,
     build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",

@@ -3,6 +3,7 @@ import type { TrackingState } from "../ar/ARState";
 import type { TrackingQuality } from "./TrackingQuality";
 import type { PoseRejection } from "./PoseValidation";
 import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
+import type { RelocalizationSearchStage, RelocalizationTimeline } from "./RelocalizationSchedule";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -356,6 +357,25 @@ export interface RelocalizationOutput {
    */
   diagnostics: RelocalizationDiagnostics | null;
   framesSinceAttempt: number;
+  /**
+   * v14 §24: where the relocalization stands this frame — `idle`,
+   * `prepare` (tracking, keyframes ranked in the background), the furthest
+   * stage of this frame's attempt, `confirming`, `applied`.
+   */
+  searchStage: RelocalizationSearchStage;
+  /** Preparation active this frame (v14 §3–§6); never hides objects or changes the pose. */
+  preparing: boolean;
+  /** Frames since the keyframe ranking was last prepared (−1 = none). */
+  preparedAgeFrames: number;
+  /** Keyframe of the candidate waiting for confirmation (−1 = none) and its age in frames (v14 §43–§44). */
+  pendingKeyframeId: number;
+  candidateAgeFrames: number;
+  /**
+   * Timing of the current (or last) lost episode (v14 §45–§46): frame /
+   * ms since the loss of the first coarse match, LK success, PnP success,
+   * validation and the applied pose. Measured for comparison, not a target.
+   */
+  timeline: RelocalizationTimeline | null;
 }
 
 /**

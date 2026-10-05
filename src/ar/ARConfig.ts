@@ -337,20 +337,63 @@ export interface RelocalizationConfig {
   keyframeRotationDeg: number;
   /** Median landmark displacement since the last keyframe (px) that triggers a new one. */
   keyframeParallaxPx: number;
-  /** Keyframe candidates tried per lost frame. */
-  candidatesPerFrame: number;
-  /** Coarse search radius (pixels of the coarse image ≈ level-0 / 8). */
+  /**
+   * Keyframe ranking (v14 §8–§12): every attempt ranks *all* keyframes by a
+   * cheap coarse similarity (zero-mean NCC on a 1/16 image, shift search of
+   * this radius in its pixels — the same ±level-0 range as
+   * `coarseSearchRadius` on the 1/8 image) and only the best
+   * `maxLkCandidatesPerFrame` go on to the 1/8 refinement, LK and PnP. No
+   * keyframe is excluded by its age or by the lost pose (§13–§15, §35).
+   */
+  rankSearchRadius: number;
+  /**
+   * Refinement of the ranked shift on the 1/8 coarse image (radius in its
+   * pixels around 2 × the rank shift); its score is the coarse NCC that
+   * `coarseMinScore` gates and that v12's relaxed range requires.
+   */
+  coarseRefineRadius: number;
+  /** Coarse search radius (pixels of the coarse image ≈ level-0 / 8); kept for the full search used in tests / fallback. */
   coarseSearchRadius: number;
   /** Minimum NCC score of the coarse alignment to proceed. */
   coarseMinScore: number;
+  /**
+   * Search budget per attempt (v14 §16–§17): keyframes sent to LK (the top
+   * of the ranking) and to PnP; the first attempt of a lost episode may try
+   * more (`lkCandidatesFirstAttempt`). Never every keyframe (§11).
+   */
+  maxLkCandidatesPerFrame: number;
+  lkCandidatesFirstAttempt: number;
+  maxPnpCandidatesPerFrame: number;
   /** LK displacement gate around the coarse guess (px). */
   lkMaxDisplacementPx: number;
+  /**
+   * Relocalization-specific LK thresholds (v14 §28–§30): keyframe → current
+   * frame LK bridges seconds and a viewpoint change, so its forward-backward
+   * tolerance and residual bound are its own; the normal tracker's values
+   * are untouched. The checks themselves (FB, residual, texture, bounds,
+   * displacement) all stay in force, and PnP + validation remain the
+   * verifiers. Initial candidate values.
+   */
+  lkForwardBackwardPx: number;
+  lkMaxResidual: number;
+  /**
+   * Retry scheduling (v14 §21–§22, §34): a keyframe that failed is not sent
+   * to LK again for this many frames *unless the image changed* — the
+   * current 1/16 image vs the one it failed on has a zero-shift NCC below
+   * `retryImageChangeScore`. It stays ranked and visible in the diagnostics.
+   */
+  retryCooldownFrames: number;
+  retryImageChangeScore: number;
+  /**
+   * A pending (validated, unconfirmed) candidate older than this many frames
+   * is dropped and recomputed (v14 §43–§44): a stale candidate is never
+   * applied as the current pose.
+   */
+  candidateMaxAgeFrames: number;
   pnpHuberPx: number;
   pnpInlierPx: number;
   /** Inliers needed to accept a relocalization. */
   minInliers: number;
-  /** Stop trying more candidates once this many inliers are found. */
-  goodInliers: number;
   /** Strict reprojection bound: a candidate at or below this is `strong` (v12 §3.1). */
   maxMeanErrorPx: number;
   /**
@@ -663,17 +706,36 @@ export const DEFAULT_CONFIG: ARConfig = {
     keyframeMaxFrameGap: 90,
     keyframeRotationDeg: 10,
     keyframeParallaxPx: 40,
-    candidatesPerFrame: 2,
+    // v14 §10–§11: rank all keyframes on the 1/16 image (±12 px there = the
+    // ±192 level-0 px the old ±24 px search on the 1/8 image covered, at
+    // ~1/8 of its cost per keyframe), refine the top ones on the 1/8 image.
+    rankSearchRadius: 12,
+    coarseRefineRadius: 2,
     coarseSearchRadius: 24,
     // The PnP acceptance (≥ 25 inliers, ≤ 1.5 px) is the real verifier; the
     // coarse score only saves work. 0.45 refused views that came back with a
     // few degrees of rotation.
     coarseMinScore: 0.25,
+    // v14 §16–§17: top 3 keyframes per attempt (4 on the first attempt of an
+    // episode), never all 8 through LK / PnP.
+    maxLkCandidatesPerFrame: 3,
+    lkCandidatesFirstAttempt: 4,
+    maxPnpCandidatesPerFrame: 3,
     lkMaxDisplacementPx: 40,
+    // v14 §28–§30: keyframe → current LK after seconds and a viewpoint change
+    // is not frame-to-frame LK; its forward-backward tolerance is its own
+    // (the tracker keeps 1.0 px). PnP (6 px) and validation still decide.
+    lkForwardBackwardPx: 2.0,
+    lkMaxResidual: 30,
+    // v14 §21–§22: a failed keyframe waits two attempt periods (3 frames
+    // each) unless the image changed (NCC vs the frame it failed on < 0.9).
+    retryCooldownFrames: 6,
+    retryImageChangeScore: 0.9,
+    // v14 §43–§44: a candidate is confirmed in the next frame or dropped.
+    candidateMaxAgeFrames: 2,
     pnpHuberPx: 4,
     pnpInlierPx: 6,
     minInliers: 25,
-    goodInliers: 60,
     maxMeanErrorPx: 1.5,
     // Keyframe→current LK after a loss is naturally noisier than the
     // per-frame LK; between 1.5 and 3 px the other conditions decide (v12).
