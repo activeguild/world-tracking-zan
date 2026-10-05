@@ -169,9 +169,20 @@ tracked frames.
 
 Fast motion: 4 LK pyramid levels and constant-velocity seeding
 (`tracker.pyramidLevels`, `tracker.predictMotion`) roughly double the per-frame
-displacement that stays trackable; a weakly supported PnP solve that jumps the
-camera implausibly far is rejected and the pose held (`landmarks.jumpReject*`,
-`JUMP` on the HUD's PnP row).
+displacement that stays trackable.
+
+Temporal gate (v4): three independent judgements decide about a pose
+candidate — PnP quality (inliers / error, "trusted"), temporal continuity
+(translation / rotation vs the previous canonical pose) and map ↔ plane
+agreement. *Trusted never skips the gate*: a well-supported solve that moves
+the camera implausibly far in one frame is a different pose, not fast motion,
+and is rejected (`landmarks.jumpReject*`, `JUMP` on the HUD's PnP row, the
+structured reason on the `MAP cand` / `PLANE cand` rows). While lost the
+reference pose is a prediction, so the limits widen with the lost frames
+(`jumpRejectLostGrowthPerFrame`); relocalization re-seeds the pose from a
+keyframe-verified match and is not gated against the held pose. The plane
+tracker's probation / off-plane state is updated only from an accepted
+candidate, against the canonical pose.
 
 ## Tests
 

@@ -18,9 +18,11 @@ import type {
   PlaneOutput,
   PlanePoseOutput,
   PlaneSearchOutput,
+  PoseCandidateReport,
   PoseOutput,
   RelocalizationOutput,
 } from "../vision/types";
+import type { PoseRejectCode } from "../vision/PoseValidation";
 import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
@@ -202,6 +204,8 @@ export class ARSession {
   private frameTimestampMs = 0;
   private poseTimestampMs = 0;
   private translationHeldLogged = false;
+  private loggedSource: MapPoseOutput["source"] | null = null;
+  private loggedReject: { map: PoseRejectCode | null; plane: PoseRejectCode | null } = { map: null, plane: null };
   private lastWorldUpdateMs = 0;
   private planePose: PlanePoseOutput | null = null;
   private planeAnchored = false;
@@ -536,6 +540,7 @@ export class ARSession {
       this.translationHeldLogged = false;
       this.logger.info(`PnP recovered at frame ${r.frameId} (${r.mapPose?.source ?? "none"})`);
     }
+    this.logPoseSelection(r);
     this.quality = r.quality;
     this.pose = r.pose;
     this.mapPose = r.mapPose;
@@ -580,6 +585,51 @@ export class ARSession {
       ...(this.worldAnchor.isReady ? { poseAgeMs: this.poseAgeMs } : {}),
     });
     this.emit("frame", r);
+  }
+
+  /**
+   * v4 §26–§27: source changes and candidate rejections, with the measured
+   * delta and the limit in force (world meters once the world exists, map
+   * units before), once per episode rather than every frame.
+   */
+  private logPoseSelection(r: VisionResult): void {
+    const m = r.mapPose;
+    if (!m || !this.logger.enabled) return;
+    const scale = this.worldAnchor.frame?.scale ?? 0;
+    const len = (mapUnits: number) => (scale > 0 ? `${(mapUnits * scale).toFixed(3)}m` : `${mapUnits.toFixed(3)}u`);
+    if (r.relocalization.attempt === "success") {
+      this.logger.info(
+        `RELOCALIZED at frame ${r.frameId} (${r.relocalization.inlierCount} inliers)\n` +
+          `jump from held pose = ${len(r.relocalization.jumpTranslation)} / ${r.relocalization.jumpRotationDeg.toFixed(1)}deg`,
+      );
+    }
+    if (m.framesSinceTracked === 0 && m.source !== "propagated") {
+      if (this.loggedSource !== null && this.loggedSource !== m.source) {
+        this.logger.info(
+          `SOURCE ${this.loggedSource.toUpperCase()} -> ${m.source.toUpperCase()} at frame ${r.frameId}\n` +
+            `map/plane delta = ${len(m.sourceDeltaTranslation)}\nrotation delta = ${m.sourceDeltaRotationDeg.toFixed(1)}deg`,
+        );
+      }
+      this.loggedSource = m.source;
+    }
+    const logReject = (label: "MAP" | "PLANE", c: PoseCandidateReport | null, key: "map" | "plane") => {
+      const rej = c?.reject ?? null;
+      const code = rej?.code ?? null;
+      // Cooldown and "nothing to solve" are not rejections worth a line.
+      const notable = code !== null && code !== "source_cooldown" && code !== "insufficient_observations";
+      if (notable && this.loggedReject[key] !== code) {
+        const isLength = code === "translation_jump" || (code === "map_plane_disagreement" && rej!.reason.includes("translation"));
+        const isAngle = code === "rotation_jump" || (code === "map_plane_disagreement" && rej!.reason.includes("rotation"));
+        const fmt = (v: number) => (isLength ? len(v) : isAngle ? `${v.toFixed(1)}deg` : v.toFixed(2));
+        this.logger.info(
+          `${label} REJECT at frame ${r.frameId}\nreason = ${code}\ndelta = ${fmt(rej!.delta)}\nlimit = ${fmt(rej!.limit)}` +
+            (c ? `\ninliers = ${c.inlierCount}  error = ${c.reprojectionErrorPx.toFixed(2)}px${c.trusted ? "  (trusted)" : ""}` : ""),
+        );
+      }
+      this.loggedReject[key] = notable ? code : null;
+    };
+    logReject("MAP", m.mapCandidate, "map");
+    logReject("PLANE", m.planeCandidate, "plane");
   }
 
   private setState(next: TrackingState): void {

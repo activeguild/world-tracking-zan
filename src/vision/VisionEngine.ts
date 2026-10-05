@@ -364,6 +364,8 @@ export class VisionEngine {
       lastSuccessFrame: this.relocLastSuccessFrame,
       successCount: this.relocSuccessCount,
       reason: null,
+      jumpTranslation: 0,
+      jumpRotationDeg: 0,
     };
 
     if (!tracker.initialized) {
@@ -394,7 +396,11 @@ export class VisionEngine {
         this.relocStatus.candidatesTried = r.candidatesTried;
         this.relocStatus.reason = r.reason;
         if (r.success && r.pose) {
-          tracker.applyRelocalization(r.pose);
+          // Re-seeds the canonical pose (verified against the map by the
+          // relocalizer, not by the temporal gate — see MapTracker.applyRelocalization).
+          const d = tracker.applyRelocalization(r.pose);
+          this.relocStatus.jumpTranslation = d.translation;
+          this.relocStatus.jumpRotationDeg = d.rotationDeg;
           this.injectRelocalizedTracks(r.tracks, frameId, r.pose);
           rotationPrior = null; // the relocalized pose is the prior
           this.relocSuccessCount++;
@@ -424,6 +430,15 @@ export class VisionEngine {
       this.lastPoseSource = res.tracked ? sel.source : "propagated";
       if (res.tracked) {
         this.relocAttemptsSinceLost = 0;
+        if (external) {
+          // Plane bookkeeping (streaks, off-plane flags, confidence) is
+          // updated only when the plane candidate passed validation, and
+          // always against the *canonical* pose: a rejected plane pose must
+          // not strengthen the plane state (v4 §12–§13). A candidate held
+          // back only by the source cooldown is valid.
+          const rej = sel.planeRejection;
+          if (!rej || rej.code === "source_cooldown") this.planeTracker.commit(this.tracks, tracker.pose, k);
+        }
         if (this.planeTracker.anchored) {
           // New plane points only from a trusted *map* pose, never from the
           // plane pose itself (no pose → point → pose feedback, v3 §8–§11),
@@ -480,6 +495,10 @@ export class VisionEngine {
         mapInlierCount: tracker.selection.mapInlierCount,
         planeInlierCount: tracker.selection.planeInlierCount,
         rejectReason: tracker.selection.planeReject ?? tracker.selection.mapReject,
+        mapCandidate: tracker.selection.map,
+        planeCandidate: tracker.selection.plane,
+        gateMaxTranslation: tracker.selection.limits.maxTranslation,
+        gateMaxRotationDeg: tracker.selection.limits.maxRotationDeg,
         sourceDeltaTranslation: tracker.selection.sourceDeltaTranslation,
         sourceDeltaRotationDeg: tracker.selection.sourceDeltaRotationDeg,
         sourceHistory: this.sourceHistory,
@@ -952,6 +971,7 @@ function now(): number {
 function toPlanePoseOutput(r: PlaneTracker["result"]): PlanePoseOutput {
   return {
     tracked: r.tracked,
+    accepted: r.accepted,
     inlierCount: r.inlierCount,
     candidateCount: r.candidateCount,
     confirmedCount: r.confirmedCount,
@@ -962,5 +982,15 @@ function toPlanePoseOutput(r: PlaneTracker["result"]): PlanePoseOutput {
 }
 
 function emptyReloc(): RelocalizationOutput {
-  return { keyframes: 0, attempt: "none", inlierCount: 0, candidatesTried: 0, lastSuccessFrame: -1, successCount: 0, reason: null };
+  return {
+    keyframes: 0,
+    attempt: "none",
+    inlierCount: 0,
+    candidatesTried: 0,
+    lastSuccessFrame: -1,
+    successCount: 0,
+    reason: null,
+    jumpTranslation: 0,
+    jumpRotationDeg: 0,
+  };
 }

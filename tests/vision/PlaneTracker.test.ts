@@ -114,8 +114,11 @@ describe("PlaneTracker", () => {
         next.push(t);
       }
       live = next;
-      const res = tracker.update(live, prior, K);
+      let res = tracker.update(live, prior, K);
       expect(res.tracked, `frame ${f}`).toBe(true);
+      expect(res.accepted).toBe(false); // a candidate only; the caller validates…
+      res = tracker.commit(live, res.pose!, K); // …and commits the accepted pose
+      expect(res.accepted).toBe(true);
       prior = res.pose!;
       lastInliers = res.inlierCount;
 
@@ -166,6 +169,40 @@ describe("PlaneTracker", () => {
     const res = tracker.update(tracks, identity, K);
     expect(res.tracked).toBe(false);
     expect(res.candidateCount).toBe(4);
+  });
+
+  it("a rejected candidate leaves the plane state untouched (v4 §12–§13, AC-4)", () => {
+    const rng = createRng(33);
+    const cfg = resolveConfig().planeTracking;
+    const tracker = new PlaneTracker(cfg);
+    const identity: RigidTransform = { rotation: mat3Identity(), translation: new Float64Array(3) };
+    const pts = deskPoints(rng, 80);
+    const tracks: Track[] = [];
+    for (let i = 0; i < 80; i++) {
+      const uv = project(identity, [pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]]);
+      if (uv) tracks.push(makeTrack(i + 1, uv[0], uv[1]));
+    }
+    tracker.setAnchor(PLANE, identity, 0);
+    tracker.lift(tracks, identity, K, () => false);
+    const before = tracks.map((t) => ({ streak: t.planeStreak, outliers: t.planeOutliers, off: t.offPlane, p: t.planePoint }));
+
+    // Solve only: the candidate exists but nothing in the tracks changed.
+    const res = tracker.update(tracks, identity, K);
+    expect(res.tracked).toBe(true);
+    expect(res.accepted).toBe(false);
+    tracks.forEach((t, i) => {
+      expect(t.planeStreak).toBe(before[i].streak);
+      expect(t.planeOutliers).toBe(before[i].outliers);
+      expect(t.offPlane).toBe(before[i].off);
+      expect(t.planePoint).toBe(before[i].p);
+    });
+    // The result reports the solve, not a confirmed state.
+    expect(tracker.result.accepted).toBe(false);
+
+    // Commit with the canonical pose: streaks advance exactly once.
+    tracker.commit(tracks, identity, K);
+    tracks.forEach((t, i) => expect(t.planeStreak).toBe(before[i].streak + 1));
+    expect(tracker.result.accepted).toBe(true);
   });
 
   it("does not lift grazing rays or points far beyond the anchor distance", () => {

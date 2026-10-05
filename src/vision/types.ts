@@ -1,6 +1,7 @@
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import type { TrackingState } from "../ar/ARState";
 import type { TrackingQuality } from "./TrackingQuality";
+import type { PoseRejection } from "./PoseValidation";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -90,6 +91,22 @@ export interface PlaneOutput {
   usedGravity: boolean;
 }
 
+/**
+ * Diagnostics of one pose candidate (修正指示書 v4 §8, §25): PnP quality,
+ * continuity against the previous canonical pose, and why it was not used.
+ */
+export interface PoseCandidateReport {
+  inlierCount: number;
+  reprojectionErrorPx: number;
+  /** Camera-center / rotation difference to the previous canonical pose (map units / deg). */
+  deltaTranslation: number;
+  deltaRotationDeg: number;
+  /** PnP quality only ("trusted", v4 §2): it never skips the temporal gate. */
+  trusted: boolean;
+  /** Structured rejection, null when the candidate was accepted (it may still not be the chosen source). */
+  reject: PoseRejection | null;
+}
+
 /** Camera pose in the map frame with consistent (but arbitrary) scale. */
 export interface MapPoseOutput {
   /** X_cam = R · X_map + t (row-major R). */
@@ -123,6 +140,12 @@ export interface MapPoseOutput {
   planeInlierCount: number;
   /** Why a candidate was not adopted this frame (plane first, then map), null when nothing was rejected. */
   rejectReason: string | null;
+  /** Per-candidate diagnostics (null when the estimator produced nothing this frame). */
+  mapCandidate: PoseCandidateReport | null;
+  planeCandidate: PoseCandidateReport | null;
+  /** Temporal-gate limits used this frame (map units / deg). */
+  gateMaxTranslation: number;
+  gateMaxRotationDeg: number;
   /** Map vs plane candidate difference when both existed (map units / degrees). */
   sourceDeltaTranslation: number;
   sourceDeltaRotationDeg: number;
@@ -148,7 +171,10 @@ export interface PlaneAnchorOutput {
 
 /** Quality of the plane-relative pose (修正指示書 §9 HomographyQuality). */
 export interface PlanePoseOutput {
+  /** The plane PnP produced a candidate this frame. */
   tracked: boolean;
+  /** The candidate passed validation and the plane bookkeeping was updated with the canonical pose (v4 §12–§13). */
+  accepted: boolean;
   inlierCount: number;
   candidateCount: number;
   confirmedCount: number;
@@ -182,6 +208,9 @@ export interface RelocalizationOutput {
   successCount: number;
   /** Why the last attempt failed (best candidate's stage), null when none / success. */
   reason: string | null;
+  /** On success: how far the relocalized pose was from the held / predicted pose it replaced (map units / deg). */
+  jumpTranslation: number;
+  jumpRotationDeg: number;
 }
 
 /**

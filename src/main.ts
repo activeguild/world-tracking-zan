@@ -2,8 +2,9 @@ import { ARSession } from "./ar/ARSession";
 import { ARError, TrackingState } from "./ar/ARState";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type * as THREE from "three";
-import { DebugOverlay } from "./debug/DebugOverlay";
+import { DebugOverlay, type HudCandidate } from "./debug/DebugOverlay";
 import { rotationToEulerDeg } from "./math/Pose";
+import type { PoseCandidateReport } from "./vision/types";
 import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
 import "./style.css";
@@ -197,6 +198,29 @@ function userMessageFor(state: TrackingState, lowFeature: boolean): string {
   }
 }
 
+/** Candidate diagnostics in display units (v4 §25); `scale` NaN before the world exists. */
+function hudCandidate(c: PoseCandidateReport | null, scale: number): HudCandidate | null {
+  if (!c) return null;
+  const rej = c.reject;
+  let detail: string | null = null;
+  if (rej) {
+    const isLength = rej.code === "translation_jump" || (rej.code === "map_plane_disagreement" && rej.reason.includes("translation"));
+    const isAngle = rej.code === "rotation_jump" || (rej.code === "map_plane_disagreement" && rej.reason.includes("rotation"));
+    if (isLength) detail = Number.isFinite(scale) ? `${(rej.delta * scale * 100).toFixed(1)} > ${(rej.limit * scale * 100).toFixed(1)} cm` : `${rej.delta.toFixed(3)} > ${rej.limit.toFixed(3)} u`;
+    else if (isAngle) detail = `${rej.delta.toFixed(1)} > ${rej.limit.toFixed(1)}°`;
+    else if (Number.isFinite(rej.delta)) detail = `${rej.delta} < ${rej.limit}`;
+  }
+  return {
+    inliers: c.inlierCount,
+    errorPx: c.reprojectionErrorPx,
+    deltaM: Number.isFinite(scale) ? c.deltaTranslation * scale : NaN,
+    deltaDeg: c.deltaRotationDeg,
+    trusted: c.trusted,
+    rejectCode: rej?.code ?? null,
+    rejectDetail: detail,
+  };
+}
+
 // HUD refresh loop (independent of vision rate).
 function refreshHud(): void {
   const s = session.getStats();
@@ -240,6 +264,10 @@ function refreshHud(): void {
           mapInliers: s.mapPose.mapInlierCount,
           planeInliers: s.mapPose.planeInlierCount,
           rejectReason: s.mapPose.rejectReason,
+          mapCandidate: hudCandidate(s.mapPose.mapCandidate, s.worldReady ? s.worldScale : NaN),
+          planeCandidate: hudCandidate(s.mapPose.planeCandidate, s.worldReady ? s.worldScale : NaN),
+          gateMaxM: s.worldReady ? s.mapPose.gateMaxTranslation * s.worldScale : NaN,
+          gateMaxDeg: s.mapPose.gateMaxRotationDeg,
           sourceDeltaM: s.worldReady ? s.mapPose.sourceDeltaTranslation * s.worldScale : NaN,
           sourceDeltaDeg: s.mapPose.sourceDeltaRotationDeg,
           history: s.mapPose.sourceHistory,
@@ -283,6 +311,8 @@ function refreshHud(): void {
           inliers: s.relocalization.inlierCount,
           successes: s.relocalization.successCount,
           reason: s.relocalization.reason,
+          jumpM: s.worldReady ? s.relocalization.jumpTranslation * s.worldScale : NaN,
+          jumpDeg: s.relocalization.jumpRotationDeg,
         }
       : null,
     build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",

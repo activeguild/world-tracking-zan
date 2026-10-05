@@ -207,6 +207,22 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v4 対応 — Trusted でも Jump Gate を通す（2026-10-05、実機確認待ち）
+
+判定を 3 種類に分離（§8–§9）: A. PnP 品質（inlier / 誤差 = `trusted`）、B. 時系列連続性（前フレームの正準 Pose との並進・回転差 = Jump Gate）、C. Map / Plane 一致。**Trusted ≠ 連続** なので A は B を代替しない。
+
+- **Trusted バイパス廃止（P0、AC-1 / AC-2）**: `MapTracker.update` の `if (!trusted(c)) validate(...)` を撤廃し、Map PnP・平面 PnP の両候補を無条件に `validatePoseCandidate(candidate, this._pose, limits)` に通す。`jumpRejectTrustedInliers` / `jumpRejectTrustedErrorPx` は候補の品質ラベル（HUD の `TRUSTED`）としてのみ残す。Map と Plane 両方あるときの `plane vs map` 一致判定（§6–§7）は維持
+- **失探中のゲート幅**: 失探中の基準 Pose は予測 / 保持値で不確かさが増えるため、上限を `1 + jumpRejectLostGrowthPerFrame(0.1) × 失探フレーム数` 倍に広げる（10 フレームで 2 倍、再関連付けの上限 90 フレームで 10 倍 ≈ 机スケールで 40 cm）。品質によるバイパスではなく、常にゲートを評価して実測値と上限を出す。合成テスト: 全 Landmark が追えている 0.4 unit の瞬間移動（旧実装では trusted として即採用）は拒否され、同じ姿勢の証拠が続くと 10 フレーム以内に復帰する
+- **再局所化はゲート対象外**（§19 の「再局所化の仕組みは維持」）: Keyframe PnP（inlier ≥ 25・誤差 ≤ 1.5 px・粗相関）で Map に対して大域的に検証済みの Pose を正準 Pose の再シードとし、次フレームから再びゲートの基準にする。保持姿勢との差は `RelocalizationOutput.jumpTranslation / jumpRotationDeg` としてログ・HUD に出す（最初は再局所化もゲートに通したが、ループ映像のカットで 1.5 s 失探し続けることが分かり撤回）
+- **構造化した拒否理由（§11）**: `PoseRejection { code, reason, delta, limit }`、`code` は `translation_jump | rotation_jump | insufficient_observations | insufficient_inliers | high_reprojection_error | map_plane_disagreement | source_cooldown | invalid_pose`。`jumpRejected` は Map または Plane の jump コードで真（§10、文字列検索ではなく `isJumpRejection`）。`PoseSelection.map / plane`（`PoseCandidateReport`: inlier、誤差、前 Pose との Δ、trusted、reject）と `limits` を `MapPoseOutput.mapCandidate / planeCandidate / gateMax*` で出力
+- **PlaneTracker の状態更新を分離（§12–§13、AC-4）**: `update()` は解くだけで Track を変更しない（候補、`accepted: false`）。候補がゲートと一致判定を通ったフレームでのみ `commit(tracks, canonicalPose)` が probation / off-plane / confidence を更新する（基準は常に正準 Pose。クールダウンだけで見送られた候補は有効扱い）。拒否された平面 Pose は平面状態を一切強化しない。PlanePoint の生成条件（Map source・inlier ≥ 20・誤差 ≤ 1.5 px・切替後 10 フレーム）は維持（§14、AC-5）
+- **`MapTracker.setPose()` 削除**（§18 無条件 override の経路をコードから消す）
+- **HUD（§25）**: TRACKING 節を `SOURCE MAP|PLANE|LOST + 履歴` / `MAP cand in 42 err 1.80px Δ 1.2 cm / 0.8° TRUSTED reject -` / `PLANE cand … reject translation_jump (31.0 > 8.0 cm)` / `Gate ≤ 8.0 cm / 20° map↔plane Δ` / `LOST N ms` に変更。Keyframes 行の reloc success に `jump X cm / Y°`
+- **ログ（§26–§27）**: `SOURCE MAP -> PLANE … map/plane delta = 0.032m / rotation delta = 1.2deg`、`PLANE REJECT … reason = translation_jump / delta = 0.31m / limit = 0.08m / inliers = 60 error = 0.50px (trusted)`（コードが変わったときに 1 回）、`RELOCALIZED … jump from held pose = …`
+- **確認（§34）**: ARCamera だけが `camera.position` を書き、ARObject は `place()` / 自身の移動 API のみ（grep で確認、AC-7）。WorldAnchor は mapFrameId ごとに 1 回生成。短時間 Lost での ARObject 削除なし（`holdPoseOnLostMs` 10 s、AC-6）
+- **変更しなかったもの（§30）**: FOV、`assumedPlaneDistanceMeters`、One Euro、WorldAnchor、ARObject 配置、FramePresenter、FAST / LK / RANSAC / PnP
+- テスト 148 件: trusted な Map 候補の瞬間移動が拒否され後で復帰 / trusted な Plane 候補の並進・回転ジャンプが拒否され `jumpRejected` が真 / PlaneTracker の拒否候補が状態を変えない / 合成机シーケンスで MAP → PLANE 切替フレームの Δ が 2 cm 未満・両候補とも reject なし（Test 4、AC-3）/ validatePoseCandidate の構造化理由。ブラウザテストはカットを再局所化で跨ぎ全サンプル `PLANE_FOUND`
+
 ### 修正指示書 v3 対応 — Camera Pose の 1 本化・Tracking Lost の扱い（2026-10-03、実機確認待ち）
 
 - **Pose 候補 → 共通検証 → 正準 Pose**（§1–§6）: `src/vision/PoseValidation.ts` に `validatePoseCandidate(candidate, reference, limits)`（並進・回転の連続性、拒否理由つき）。`MapTracker.update` は Landmark PnP と平面 PnP（`external` 候補、品質つき）を両方「候補」として同じ上限（Landmark 中央奥行き 8% / 前フレーム移動量 3 倍 / 20°）で前フレームの採用姿勢と照合し、平面候補はさらに Map 候補との差でも照合する。`poseOverride` の無条件採用は廃止。Three.js に渡る Pose は `MapTracker.pose` の 1 本のみ

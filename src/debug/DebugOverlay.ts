@@ -7,6 +7,19 @@
  *   OBJECT    world positions of the placed objects (must not follow the camera)
  *   TIMING    frame timestamp, pose timestamp, pose age
  */
+/** One pose candidate on the HUD (v4 §25). */
+export interface HudCandidate {
+  inliers: number;
+  errorPx: number;
+  /** Continuity vs the previous canonical pose (world meters, NaN before the world exists / deg). */
+  deltaM: number;
+  deltaDeg: number;
+  trusted: boolean;
+  /** Rejection code (null when accepted) and its measured value / limit in display units. */
+  rejectCode: string | null;
+  rejectDetail: string | null;
+}
+
 export interface HudStats {
   renderFps: number;
   visionFps: number;
@@ -48,10 +61,16 @@ export interface HudStats {
     translationPredicted: boolean;
     jumpRejected: boolean;
     source: string;
-    /** Pose-source diagnostics (v3 §19–§21). */
+    /** Pose-source diagnostics (v3 §19–§21, v4 §25). */
     mapInliers: number;
     planeInliers: number;
     rejectReason: string | null;
+    /** Per-candidate diagnostics; deltas in world meters (NaN before the world exists). */
+    mapCandidate: HudCandidate | null;
+    planeCandidate: HudCandidate | null;
+    /** Temporal-gate limits in force (world meters / deg). */
+    gateMaxM: number;
+    gateMaxDeg: number;
     /** Map vs plane candidate difference in world meters (NaN before the world exists). */
     sourceDeltaM: number;
     sourceDeltaDeg: number;
@@ -83,7 +102,16 @@ export interface HudStats {
   objects?: { id: number; position: number[] }[];
   /** Frame capture time, pose arrival time, render-time pose age (ms). */
   timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
-  reloc?: { keyframes: number; attempt: string; inliers: number; successes: number; reason: string | null } | null;
+  reloc?: {
+    keyframes: number;
+    attempt: string;
+    inliers: number;
+    successes: number;
+    reason: string | null;
+    /** On success: distance from the held pose (world meters, NaN before the world exists) / deg. */
+    jumpM: number;
+    jumpDeg: number;
+  } | null;
   /** Build identifier (phase + commit + time) so testers can confirm the deployed version. */
   build?: string;
 }
@@ -95,6 +123,17 @@ function fmt(deg: number): string {
 function xyz(p: ArrayLike<number>): string {
   const f = (v: number) => (v >= 0 ? " " : "") + v.toFixed(3);
   return `X ${f(p[0])}  Y ${f(p[1])}  Z ${f(p[2])}`;
+}
+
+/** `in 42  err 1.80px  Δ 1.2 cm / 0.8°  TRUSTED  reject translation_jump (31.0 > 8.0 cm)` */
+function candidate(c: HudCandidate | null): string {
+  if (!c) return "—";
+  const d = Number.isFinite(c.deltaM) ? `${(c.deltaM * 100).toFixed(1)} cm` : "—";
+  return (
+    `in ${c.inliers}  err ${c.errorPx.toFixed(2)}px  Δ ${d} / ${c.deltaDeg.toFixed(1)}°` +
+    (c.trusted ? "  TRUSTED" : "") +
+    `  reject ${c.rejectCode ? `${c.rejectCode}${c.rejectDetail ? ` (${c.rejectDetail})` : ""}` : "-"}`
+  );
 }
 
 export class DebugOverlay {
@@ -124,19 +163,28 @@ export class DebugOverlay {
       m
         ? `PnP         inliers ${m.pnpInliers}  err ${m.reprojPx.toFixed(2)}px  lost ${m.framesSinceTracked}${m.relinked ? `  relink ${m.relinked}` : ""}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`
         : `PnP         —`,
-      `Pose source ${m ? `${m.framesSinceTracked > 0 ? "LOST" : m.source.toUpperCase()}  ${m.history.slice(-24)}` : "—"}`,
+      `SOURCE      ${m ? `${m.framesSinceTracked > 0 ? "LOST" : m.source.toUpperCase()}  ${m.history.slice(-24)}` : "—"}`,
+      `MAP cand    ${m ? candidate(m.mapCandidate) : "—"}`,
+      `PLANE cand  ${m ? candidate(m.planeCandidate) : "—"}`,
       m
-        ? `Sources     map in ${m.mapInliers}  plane in ${m.planeInliers}  Δ ${Number.isFinite(m.sourceDeltaM) ? `${(m.sourceDeltaM * 100).toFixed(1)} cm / ${m.sourceDeltaDeg.toFixed(1)}°` : "—"}`
-        : `Sources     —`,
-      ...(m?.rejectReason ? [`REJECTED    ${m.rejectReason}`] : []),
-      `Lost        ${s.lostMs !== undefined ? `${s.lostMs.toFixed(0)} ms` : "—"}`,
+        ? `Gate        ≤ ${Number.isFinite(m.gateMaxM) ? `${(m.gateMaxM * 100).toFixed(1)} cm` : "—"} / ${m.gateMaxDeg.toFixed(0)}°  map↔plane Δ ${Number.isFinite(m.sourceDeltaM) && m.planeInliers ? `${(m.sourceDeltaM * 100).toFixed(1)} cm / ${m.sourceDeltaDeg.toFixed(1)}°` : "—"}`
+        : `Gate        —`,
+      `LOST        ${s.lostMs !== undefined ? `${s.lostMs.toFixed(0)} ms` : "—"}`,
       ...(s.pose
         ? [
             `Pose R      yaw ${fmt(s.pose.yaw)}°  pitch ${fmt(s.pose.pitch)}°  roll ${fmt(s.pose.roll)}°`,
             `Pose 2view  ${s.pose.model}  t (${s.pose.translationDirection.map((v) => v.toFixed(2)).join(", ")})  parallax ${s.pose.parallaxPx.toFixed(1)}px  conf ${s.pose.confidence.toFixed(2)}/${s.pose.translationConfidence.toFixed(2)}  n=${s.pose.correspondences}`,
           ]
         : [`Pose        —`]),
-      `Keyframes   ${s.reloc ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${s.reloc.attempt === "success" ? ` (${s.reloc.inliers})` : ""}  ok×${s.reloc.successes}` : "—"}`,
+      `Keyframes   ${
+        s.reloc
+          ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${
+              s.reloc.attempt === "success"
+                ? ` (${s.reloc.inliers} in, jump ${Number.isFinite(s.reloc.jumpM) ? `${(s.reloc.jumpM * 100).toFixed(1)} cm` : "—"} / ${s.reloc.jumpDeg.toFixed(1)}°)`
+                : ""
+            }  ok×${s.reloc.successes}`
+          : "—"
+      }`,
       ...(s.reloc?.attempt === "fail" && s.reloc.reason ? [`Reloc fail  ${s.reloc.reason}`] : []),
       `=== CAMERA ===`,
       `map C       ${m ? xyz(m.cameraCenter) : "—"}`,

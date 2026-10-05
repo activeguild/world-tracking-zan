@@ -184,9 +184,28 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4, 修正
     }
     const last = r.outs[r.outs.length - 1];
     expect(last.planePose!.tracked).toBe(true);
+    expect(last.planePose!.accepted).toBe(true);
     expect(last.planePose!.inlierCount).toBeGreaterThanOrEqual(40);
     expect(last.planePose!.inlierRatio).toBeGreaterThan(0.7);
     expect(last.planePose!.reprojectionErrorPx).toBeLessThan(1.5);
+
+    // v4 Test 4 / AC-3: the MAP → PLANE switch is not a world jump. Every
+    // frame's canonical pose moves by at most the simulated camera motion,
+    // including the switch frame, and both candidates passed the gate there.
+    let switchFrame = -1;
+    for (let B = r.A + 1; B < r.outs.length; B++) {
+      const mp = r.outs[B].mapPose!;
+      expect(mp.deltaRotationDeg, `frame ${B} Δrot`).toBeLessThan(1);
+      expect(mp.deltaTranslation * r.anchor.frame!.scale, `frame ${B} Δt`).toBeLessThan(0.02);
+      expect(mp.jumpRejected, `frame ${B} jump`).toBe(false);
+      if (switchFrame < 0 && mp.source === "plane" && r.outs[B - 1].mapPose!.source === "map") switchFrame = B;
+    }
+    expect(switchFrame).toBeGreaterThan(0);
+    const sw = r.outs[switchFrame].mapPose!;
+    expect(sw.mapCandidate?.reject).toBeNull();
+    expect(sw.planeCandidate?.reject).toBeNull();
+    expect(sw.sourceDeltaTranslation * r.anchor.frame!.scale).toBeLessThan(0.02);
+    console.log(`[world] MAP → PLANE at frame ${switchFrame}: map/plane Δ ${(sw.sourceDeltaTranslation * r.anchor.frame!.scale * 100).toFixed(2)} cm / ${sw.sourceDeltaRotationDeg.toFixed(2)}°`);
 
     expect(r.heights[0]).toBeCloseTo(0.5, 3);
     for (let i = 1; i < r.heights.length; i++) {

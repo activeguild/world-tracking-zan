@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mat3Identity } from "../../src/math/Matrix";
 import { rotationAxisAngle, type RigidTransform } from "../../src/math/Pose";
-import { cameraCenterOf, poseDelta, validatePoseCandidate } from "../../src/vision/PoseValidation";
+import { cameraCenterOf, isJumpRejection, poseDelta, validatePoseCandidate } from "../../src/vision/PoseValidation";
 import { poseFromCenter } from "../helpers/scene";
 
 /** v3 §2–§6: one validation for every pose candidate. */
@@ -18,11 +18,13 @@ describe("validatePoseCandidate", () => {
     expect(v.rotationDeltaDeg).toBeCloseTo((0.02 * 180) / Math.PI, 6);
   });
 
-  it("rejects a translation jump and names the candidate", () => {
+  it("rejects a translation jump and names the candidate (structured: code, delta, limit)", () => {
     const v = validatePoseCandidate(poseFromCenter(mat3Identity(), [0.3, 0, 0]), ref, limits, "plane");
     expect(v.accepted).toBe(false);
     expect(v.reason).toMatch(/^plane translation jump/);
     expect(v.translationDelta).toBeCloseTo(0.3, 9);
+    expect(v.rejection).toEqual({ code: "translation_jump", reason: v.reason, delta: v.translationDelta, limit: 0.1 });
+    expect(isJumpRejection(v.rejection)).toBe(true);
   });
 
   it("rejects a rotation jump", () => {
@@ -30,6 +32,16 @@ describe("validatePoseCandidate", () => {
     expect(v.accepted).toBe(false);
     expect(v.reason).toMatch(/^map rotation jump/);
     expect(v.rotationDeltaDeg).toBeCloseTo((0.2 * 180) / Math.PI, 6);
+    expect(v.rejection?.code).toBe("rotation_jump");
+    expect(v.rejection?.limit).toBe(5);
+  });
+
+  it("the same check between two candidates reports a disagreement, not a jump (v4 §8 C ≠ B)", () => {
+    const v = validatePoseCandidate(poseFromCenter(mat3Identity(), [0.3, 0, 0]), ref, limits, "plane vs map", true);
+    expect(v.accepted).toBe(false);
+    expect(v.rejection?.code).toBe("map_plane_disagreement");
+    expect(isJumpRejection(v.rejection)).toBe(false);
+    expect(isJumpRejection(null)).toBe(false);
   });
 
   it("camera center and pose delta are symmetric", () => {

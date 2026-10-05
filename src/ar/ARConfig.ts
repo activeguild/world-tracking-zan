@@ -190,19 +190,25 @@ export interface LandmarkConfig {
    */
   enableLandmarkDepthRefinement: boolean;
   /**
-   * Pose jump gate (修正指示書 v2 §8). A PnP result is rejected (pose held, frame
-   * counted as lost) when the camera center moves more than
+   * Temporal jump gate (修正指示書 v2 §8, v4 §2–§5). Every pose candidate (map
+   * PnP and plane PnP alike) is rejected (frame counted as lost, pose
+   * propagated) when its camera center is more than
    * max(jumpRejectDepthRatio × median landmark depth, jumpRejectSpeedFactor ×
-   * previous frame's displacement) or rotates more than jumpRejectRotationDeg,
-   * unless the solve is trusted (≥ jumpRejectTrustedInliers inliers and mean
-   * error ≤ jumpRejectTrustedErrorPx): a well-supported pose is believed even
-   * when the motion is fast.
+   * previous frame's displacement) away from the current pose or rotated
+   * more than jumpRejectRotationDeg from it. There is no quality bypass:
+   * jumpRejectTrustedInliers / jumpRejectTrustedErrorPx only *label* a
+   * candidate as trusted (good PnP) on the HUD — trusted ≠ continuous (v4 §9).
+   * While lost, the reference is a predicted / held pose whose uncertainty
+   * grows, so both limits grow by jumpRejectLostGrowthPerFrame × lost frames
+   * (recovery from a long loss otherwise could never pass; the recovery
+   * inlier threshold still applies).
    */
   jumpRejectDepthRatio: number;
   jumpRejectSpeedFactor: number;
   jumpRejectRotationDeg: number;
   jumpRejectTrustedInliers: number;
   jumpRejectTrustedErrorPx: number;
+  jumpRejectLostGrowthPerFrame: number;
   /**
    * Hysteresis between pose sources (v3 §7): after the canonical pose
    * switched source (map ↔ plane), switching back waits this many frames
@@ -510,6 +516,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     jumpRejectRotationDeg: 20,
     jumpRejectTrustedInliers: 40,
     jumpRejectTrustedErrorPx: 1.5,
+    // 10 lost frames double the gate; 90 frames (the re-association horizon)
+    // make it 10× — about 40 cm at the desk scale.
+    jumpRejectLostGrowthPerFrame: 0.1,
     sourceSwitchCooldownFrames: 15,
     // FAST re-detects a corner within ~1 px; a tight radius keeps chance
     // matches on unrelated texture rare.

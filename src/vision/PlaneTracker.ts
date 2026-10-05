@@ -44,7 +44,14 @@ export interface PlaneAnchor {
 }
 
 export interface PlaneTrackingResult {
+  /** The plane PnP produced a pose candidate. */
   tracked: boolean;
+  /**
+   * The candidate was validated by the caller and the plane bookkeeping was
+   * updated with the canonical pose (`commit`). A rejected candidate leaves
+   * every streak / off-plane flag untouched (v4 §12–§13).
+   */
+  accepted: boolean;
   pose: RigidTransform | null;
   /** Plane points whose reprojection passed the gate. */
   inlierCount: number;
@@ -59,6 +66,7 @@ export interface PlaneTrackingResult {
 
 const NOT_TRACKED: PlaneTrackingResult = {
   tracked: false,
+  accepted: false,
   pose: null,
   inlierCount: 0,
   candidateCount: 0,
@@ -150,11 +158,27 @@ export class PlaneTracker {
     return lifted;
   }
 
+  /** Lifted, not-yet-rejected plane points. */
+  private candidatesOf(tracks: readonly Track[]): { candidates: Track[]; confirmedCount: number } {
+    const candidates: Track[] = [];
+    let confirmedCount = 0;
+    for (const t of tracks) {
+      if (!t.planePoint || t.offPlane) continue;
+      candidates.push(t);
+      if (t.planeStreak >= this.config.probationFrames) confirmedCount++;
+    }
+    return { candidates, confirmedCount };
+  }
+
   /**
-   * Plane-relative pose for the current frame from the lifted tracks.
-   * `prior` is the pose prediction (previous pose, optionally rotated by
-   * the frame-to-frame rotation). Updates each candidate's probation /
-   * off-plane bookkeeping when a pose was found.
+   * Plane-relative pose *candidate* for the current frame from the lifted
+   * tracks. `prior` is the pose prediction (previous pose, optionally
+   * rotated by the frame-to-frame rotation).
+   *
+   * This only solves; it mutates no track. The caller validates the
+   * candidate (temporal gate, agreement with the map) and, when it was
+   * accepted, calls `commit()` with the canonical pose. A candidate that
+   * was rejected must not strengthen any plane point's standing (v4 §12–§13).
    */
   update(tracks: readonly Track[], prior: RigidTransform, k: CameraIntrinsics): PlaneTrackingResult {
     const a = this._anchor;
@@ -162,13 +186,7 @@ export class PlaneTracker {
     const cfg = this.config;
     const f = (k.fx + k.fy) / 2;
 
-    const candidates: Track[] = [];
-    let confirmedCount = 0;
-    for (const t of tracks) {
-      if (!t.planePoint || t.offPlane) continue;
-      candidates.push(t);
-      if (t.planeStreak >= cfg.probationFrames) confirmedCount++;
-    }
+    const { candidates, confirmedCount } = this.candidatesOf(tracks);
     const useConfirmedOnly = confirmedCount >= cfg.minInliers;
     const solveSet = useConfirmedOnly ? candidates.filter((t) => t.planeStreak >= cfg.probationFrames) : candidates;
     if (solveSet.length < 6) {
@@ -194,9 +212,33 @@ export class PlaneTracker {
     if (res.inlierCount < cfg.minInliers) {
       return (this.lastResult = { ...NOT_TRACKED, candidateCount: candidates.length, confirmedCount });
     }
+    const meanErrorPx = res.meanError * f;
+    this.lastResult = {
+      tracked: true,
+      accepted: false,
+      pose: res.pose,
+      inlierCount: res.inlierCount,
+      candidateCount: candidates.length,
+      confirmedCount,
+      inlierRatio: candidates.length ? res.inlierCount / candidates.length : 0,
+      meanErrorPx,
+      confidence: Math.min(1, res.inlierCount / cfg.goodInliers) * Math.max(0, 1 - meanErrorPx / cfg.pnpInlierPx),
+    };
+    return this.lastResult;
+  }
 
-    // Gate every candidate with the solved pose and update probation.
-    const pose = res.pose;
+  /**
+   * The candidate of this frame was accepted: gate every plane point with
+   * the *canonical* pose (the plane pose itself, or the map pose it agreed
+   * with) and update probation / off-plane bookkeeping. Only this method
+   * changes the plane state, so a rejected candidate never does.
+   */
+  commit(tracks: readonly Track[], pose: RigidTransform, k: CameraIntrinsics): PlaneTrackingResult {
+    const a = this._anchor;
+    if (!a) return (this.lastResult = NOT_TRACKED);
+    const cfg = this.config;
+    const f = (k.fx + k.fy) / 2;
+    const { candidates, confirmedCount } = this.candidatesOf(tracks);
     const gateSq = (cfg.pnpInlierPx / f) ** 2;
     const r = pose.rotation;
     const tt = pose.translation;
@@ -231,11 +273,11 @@ export class PlaneTracker {
     }
     const meanErrorPx = inliers ? (errSum / inliers) * f : 0;
     const inlierRatio = candidates.length ? inliers / candidates.length : 0;
-    const confidence =
-      Math.min(1, inliers / cfg.goodInliers) * Math.max(0, 1 - meanErrorPx / cfg.pnpInlierPx);
+    const confidence = Math.min(1, inliers / cfg.goodInliers) * Math.max(0, 1 - meanErrorPx / cfg.pnpInlierPx);
     this.lastResult = {
-      tracked: true,
-      pose,
+      tracked: this.lastResult.tracked,
+      accepted: true,
+      pose: this.lastResult.pose,
       inlierCount: inliers,
       candidateCount: candidates.length,
       confirmedCount,

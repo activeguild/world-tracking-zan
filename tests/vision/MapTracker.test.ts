@@ -109,7 +109,7 @@ describe("MapTracker", () => {
     }
   });
 
-  it("jump gate (v2 §8): rejects an implausible pose from a weak solve, accepts the same motion when well supported", () => {
+  it("temporal gate (v2 §8, v4 §2–§4): rejects an implausible pose whether the solve is weak or trusted; the lost-widened gate lets a genuine jump through later", () => {
     const cfg = DEFAULT_CONFIG.landmarks;
     const f0 = 8;
     // The camera suddenly appears 0.4 units (≈ 90 px of image shift) to the side.
@@ -164,14 +164,102 @@ describe("MapTracker", () => {
     expect(Math.hypot(after[0] - centerBefore[0], after[1] - centerBefore[1], after[2] - centerBefore[2])).toBeLessThan(0.3);
 
     // Trusted solve: every landmark track sees the jumped camera (many
-    // inliers, small error) → accepted as genuine fast motion.
+    // inliers, small error). Trusted = good PnP, not continuity (AC-1): the
+    // gate still rejects it, and the camera does not follow the jump.
     const b = setup(31);
+    const centerB = Array.from(b.tracker.cameraCenter());
     const all = b.step(b.landmarkIds, jumped(f0 + 2));
     const resAll = b.tracker.update(all, f0 + 2, TEST_K, null);
-    expect(resAll.tracked).toBe(true);
-    expect(resAll.jumpRejected).toBe(false);
-    expect(resAll.inlierCount).toBeGreaterThanOrEqual(cfg.jumpRejectTrustedInliers);
-    expect(deg(rotationDistance(b.tracker.pose.rotation, jumped(f0 + 2).rotation))).toBeLessThan(0.5);
+    expect(resAll.tracked).toBe(false);
+    expect(resAll.jumpRejected).toBe(true);
+    const selB = b.tracker.selection;
+    expect(selB.map).not.toBeNull();
+    expect(selB.map!.trusted).toBe(true);
+    expect(selB.map!.inlierCount).toBeGreaterThanOrEqual(cfg.jumpRejectTrustedInliers);
+    expect(selB.map!.reject?.code).toBe("translation_jump");
+    expect(selB.map!.reject!.delta).toBeGreaterThan(selB.map!.reject!.limit);
+    expect(selB.mapReject).toMatch(/^map translation jump/);
+    const afterB = Array.from(b.tracker.cameraCenter());
+    expect(Math.hypot(afterB[0] - centerB[0], afterB[1] - centerB[1], afterB[2] - centerB[2])).toBeLessThan(0.3);
+
+    // If the camera really is there, the evidence persists while the held
+    // pose's uncertainty grows: the gate widens with the lost frames and the
+    // pose is recovered (with the recovery inlier threshold), rather than
+    // never again.
+    let recoveredAt = -1;
+    for (let f = f0 + 3; f <= f0 + 30; f++) {
+      const live = b.step(b.landmarkIds, jumped(f));
+      const r = b.tracker.update(live, f, TEST_K, null);
+      if (r.tracked) {
+        recoveredAt = f;
+        break;
+      }
+    }
+    expect(recoveredAt).toBeGreaterThan(0);
+    expect(recoveredAt - (f0 + 2)).toBeLessThanOrEqual(1 / cfg.jumpRejectLostGrowthPerFrame + 2);
+    expect(deg(rotationDistance(b.tracker.pose.rotation, jumped(recoveredAt).rotation))).toBeLessThan(0.5);
+    console.log(`[gate] trusted jump rejected (${selB.mapReject}); recovered after ${recoveredAt - (f0 + 2)} lost frames`);
+  });
+
+  it("temporal gate on the plane candidate (v4 §5, AC-2): a trusted plane pose that jumps is rejected and jumpRejected reports it", () => {
+    const cfg = DEFAULT_CONFIG.landmarks;
+    const f0 = 8;
+    const { rng, points } = makeScene(41);
+    const tracker = new MapTracker(cfg);
+    const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(42));
+    const tracks = makeTracks(points, cameraAt(f0), cameraAt(0), 0, rng);
+    const rel = estimator.estimate(
+      Float64Array.from(tracks, (t) => t.refX), Float64Array.from(tracks, (t) => t.refY),
+      Float64Array.from(tracks, (t) => t.x), Float64Array.from(tracks, (t) => t.y),
+      tracks.length, TEST_K,
+    );
+    expect(tracker.tryInitialize(tracks, rel, 0, f0, TEST_K)).toBe(true);
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    const step = (f: number): Track[] => {
+      const next: Track[] = [];
+      for (const t of byId.values()) {
+        const p = project(points, cameraAt(f), t.id - 1, 0.3, rng);
+        if (!p) continue;
+        t.prevX = t.x; t.prevY = t.y; t.x = p[0]; t.y = p[1];
+        next.push(t);
+      }
+      return next;
+    };
+    const scale = 1 / Math.hypot(0.03 * f0, 0.005 * f0, 0.01 * f0);
+    const inMapUnits = (p: RigidTransform): RigidTransform => ({ rotation: p.rotation, translation: Float64Array.from(p.translation, (v) => v * scale) });
+    // Two normal frames (map source).
+    for (let f = f0 + 1; f <= f0 + 2; f++) expect(tracker.update(step(f), f, TEST_K, null).tracked).toBe(true);
+
+    // 1) A *trusted* plane candidate (60 inliers, 0.5 px) 0.5 units off:
+    //    rejected by the temporal gate before any agreement check — not by
+    //    being compared with the map.
+    const f = f0 + 3;
+    const live = step(f);
+    const centerBefore = Array.from(tracker.cameraCenter());
+    const wrong = inMapUnits(poseFromCenter(rotationAxisAngle([0, 1, 0], 0.004 * f), [0.03 * f + 0.5, 0.005 * f, 0.01 * f]));
+    const res = tracker.update(live, f, TEST_K, null, { pose: wrong, inlierCount: 60, meanErrorPx: 0.5 });
+    expect(res.tracked).toBe(true); // the map candidate carries the frame
+    expect(tracker.selection.source).toBe("map");
+    const sel = tracker.selection;
+    expect(sel.plane!.trusted).toBe(true);
+    expect(sel.plane!.reject?.code).toBe("translation_jump");
+    expect(sel.planeRejection?.code).toBe("translation_jump");
+    expect(res.jumpRejected).toBe(true); // v4 §10: plane jumps count too
+    expect(sel.mapRejection).toBeNull();
+    const after = Array.from(tracker.cameraCenter());
+    expect(Math.hypot(after[0] - centerBefore[0], after[1] - centerBefore[1], after[2] - centerBefore[2])).toBeLessThan(0.3);
+
+    // 2) A plane candidate that is continuous with the pose but rotated 25°
+    //    from the map candidate: temporal gate passes on translation, and the
+    //    rotation limit (20°) fails → rotation_jump, not adopted.
+    const f2 = f0 + 4;
+    const live2 = step(f2);
+    const twisted = inMapUnits(poseFromCenter(rotationAxisAngle([0, 1, 0], 0.004 * f2 + (25 * Math.PI) / 180), [0.03 * f2, 0.005 * f2, 0.01 * f2]));
+    const res2 = tracker.update(live2, f2, TEST_K, null, { pose: twisted, inlierCount: 60, meanErrorPx: 0.5 });
+    expect(res2.tracked).toBe(true);
+    expect(tracker.selection.source).toBe("map");
+    expect(tracker.selection.planeRejection?.code).toBe("rotation_jump");
+    expect(res2.jumpRejected).toBe(true);
   });
 
   it("plane candidate (v3 §3–§7): validated like the map candidate, compared with it, adopted only after the cooldown", () => {
@@ -235,6 +323,7 @@ describe("MapTracker", () => {
     expect(res.tracked).toBe(true);
     expect(tracker.selection.source).toBe("map");
     expect(tracker.selection.planeReject).toMatch(/plane/);
+    expect(tracker.selection.planeRejection?.code).toMatch(/translation_jump|map_plane_disagreement/);
     const after = Array.from(tracker.cameraCenter());
     expect(Math.hypot(after[0] - centerBefore[0], after[1] - centerBefore[1], after[2] - centerBefore[2])).toBeLessThan(0.3);
   });

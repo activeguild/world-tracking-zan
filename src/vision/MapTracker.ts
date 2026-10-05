@@ -4,16 +4,18 @@ import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../ma
 import { refinePosePnP } from "../math/PnP";
 import { composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
 import {
+  isJumpRejection,
   poseDelta,
   validatePoseCandidate,
   type PoseCandidate,
+  type PoseRejection,
   type PoseSource,
   type PoseValidationLimits,
 } from "./PoseValidation";
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
-import type { Track } from "./types";
+import type { PoseCandidateReport, Track } from "./types";
 
 /**
  * SLAM-lite front end (spec §19–§20, Phase 3):
@@ -56,7 +58,7 @@ export interface ExternalPoseCandidate {
   meanErrorPx: number;
 }
 
-/** How the canonical pose of the last frame was chosen (v3 §19–§21). */
+/** How the canonical pose of the last frame was chosen (v3 §19–§21, v4 §8–§11). */
 export interface PoseSelection {
   source: PoseSource;
   mapInlierCount: number;
@@ -65,9 +67,17 @@ export interface PoseSelection {
   mapReject: string | null;
   /** Why the plane candidate was not used (null when used or absent). */
   planeReject: string | null;
+  /** Structured rejections (v4 §11). */
+  mapRejection: PoseRejection | null;
+  planeRejection: PoseRejection | null;
+  /** Per-candidate diagnostics (null when the estimator produced nothing). */
+  map: PoseCandidateReport | null;
+  plane: PoseCandidateReport | null;
   /** Map vs plane candidate difference when both existed (map units / deg). */
   sourceDeltaTranslation: number;
   sourceDeltaRotationDeg: number;
+  /** Temporal-gate limits of this frame. */
+  limits: PoseValidationLimits;
 }
 
 const EMPTY_SELECTION: PoseSelection = {
@@ -76,8 +86,13 @@ const EMPTY_SELECTION: PoseSelection = {
   planeInlierCount: 0,
   mapReject: null,
   planeReject: null,
+  mapRejection: null,
+  planeRejection: null,
+  map: null,
+  plane: null,
   sourceDeltaTranslation: 0,
   sourceDeltaRotationDeg: 0,
+  limits: { maxTranslation: 0, maxRotationDeg: 0 },
 };
 
 const EMPTY_RESULT: MapTrackingResult = {
@@ -107,6 +122,8 @@ export class MapTracker {
   private framesSinceSwitch = 0;
   /** Camera-center velocity of the last tracked frame (map units / frame). */
   private readonly velocity = new Float64Array(3);
+  /** Median depth of the observed landmarks in the last frame that had any (gate scale). */
+  private lastDepth = 0;
 
   // scratch
   private pts3 = new Float64Array(0);
@@ -149,20 +166,38 @@ export class MapTracker {
 
   /**
    * Phase 5: a relocalization found the camera in the existing map. The
-   * pose becomes the PnP prior of the following `update()`.
+   * pose re-seeds the canonical pose and becomes the PnP prior of the
+   * following `update()`.
+   *
+   * It is deliberately *not* run through the temporal gate (v4 §19 keeps
+   * relocalization as is): the gate's reference while lost is a held /
+   * predicted pose that is by definition no longer valid, and the
+   * relocalized pose was verified globally against the map instead
+   * (keyframe PnP inliers ≥ `relocalization.minInliers`, mean error ≤
+   * `maxMeanErrorPx`, coarse NCC). From the next frame on every candidate
+   * is gated against it again. Returns the delta to the pose it replaced,
+   * for the log / HUD.
    */
-  applyRelocalization(pose: RigidTransform): void {
+  applyRelocalization(pose: RigidTransform): { translation: number; rotationDeg: number } {
+    const d = poseDelta(pose, this._pose);
     this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
     this._framesSinceTracked = 0;
+    return d;
   }
 
   /**
-   * Phase 2 of 修正指示書: an external (plane-relative) estimator provides the
-   * pose for the current frame; the map bookkeeping below uses it as is.
+   * Temporal-gate limits (judgement B): max(depth fraction, speed factor ×
+   * last displacement), widened while lost because the reference pose is a
+   * prediction whose uncertainty grows with every lost frame.
    */
-  setPose(pose: RigidTransform): void {
-    this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
-    this._framesSinceTracked = 0;
+  private gateLimits(depth = this.lastDepth): PoseValidationLimits {
+    const cfg = this.config;
+    const lostGrowth = 1 + cfg.jumpRejectLostGrowthPerFrame * this._framesSinceTracked;
+    return {
+      maxTranslation:
+        Math.max(cfg.jumpRejectDepthRatio * Math.max(depth, 1e-9), cfg.jumpRejectSpeedFactor * this.lastResult.poseDeltaTranslation) * lostGrowth,
+      maxRotationDeg: Math.min(180, cfg.jumpRejectRotationDeg * lostGrowth),
+    };
   }
 
   reset(tracks: readonly Track[]): void {
@@ -176,6 +211,7 @@ export class MapTracker {
     this.currentSource = "map";
     this.framesSinceSwitch = 0;
     this.velocity.fill(0);
+    this.lastDepth = 0;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -322,30 +358,46 @@ export class MapTracker {
     // ---- PnP observations ----
     let { n, obsTracks } = this.collectObservations(tracks, k);
 
-    // ---- Pose candidates → validation → canonical pose (v3 §1–§7) ----
+    // ---- Pose candidates → validation → canonical pose (v3 §1–§7, v4 §2–§9) ----
     //
-    //   landmark PnP  ─┐
-    //   plane PnP     ─┼─→ candidates → validatePoseCandidate() → this._pose
-    //   propagation   ─┘
+    //   landmark PnP ─→ PnP quality ─→ temporal gate ─┐
+    //   plane PnP    ─→ PnP quality ─→ temporal gate ─┼→ agreement → selection → this._pose
+    //   propagation  ───────────────────────────────────┘
     //
-    // Neither estimator writes the pose directly. Both are checked against
-    // the previous accepted pose with the same limits (jump gate), the plane
-    // candidate additionally against the map candidate when both exist, and
-    // switching between sources is damped by a cooldown.
+    // Neither estimator writes the pose directly. Every candidate is checked
+    // against the previous canonical pose with the same limits (temporal
+    // gate) — a *trusted* solve (many inliers, small error) is a statement
+    // about PnP quality, not about continuity, and never skips the gate
+    // (v4 §2–§3). The plane candidate is additionally compared with the map
+    // candidate when both exist, and switching sources is damped by a cooldown.
     const prior: RigidTransform = rotationPrior
       ? { rotation: mat3Multiply(rotationPrior, this._pose.rotation), translation: this._pose.translation }
       : this._pose;
-    const depth = n > 0 ? this.medianDepth(prior, n) : 0;
-    const limits: PoseValidationLimits = {
-      maxTranslation: Math.max(cfg.jumpRejectDepthRatio * Math.max(depth, 1e-9), cfg.jumpRejectSpeedFactor * this.lastResult.poseDeltaTranslation),
-      maxRotationDeg: cfg.jumpRejectRotationDeg,
-    };
+    const depth = n > 0 ? this.medianDepth(prior, n) : this.lastDepth;
+    this.lastDepth = depth;
+    // While lost the reference is a predicted / held pose whose uncertainty
+    // grows with every frame; the limits grow with it (still a gate: the
+    // measured delta and the limit in force are reported either way).
+    const limits = this.gateLimits(depth);
+    // Judgement A (PnP quality): kept as information on the candidate only.
     const trusted = (c: { inlierCount: number; reprojectionErrorPx: number }) =>
       c.inlierCount >= cfg.jumpRejectTrustedInliers && c.reprojectionErrorPx <= cfg.jumpRejectTrustedErrorPx;
+    const report = (c: { inlierCount: number; reprojectionErrorPx: number }, pose: RigidTransform, reject: PoseRejection | null): PoseCandidateReport => {
+      const d = poseDelta(pose, this._pose);
+      return {
+        inlierCount: c.inlierCount,
+        reprojectionErrorPx: c.reprojectionErrorPx,
+        deltaTranslation: d.translation,
+        deltaRotationDeg: d.rotationDeg,
+        trusted: trusted(c),
+        reject,
+      };
+    };
 
     // Candidate 1: landmark PnP (mature landmarks only when enough of them, v2 §27).
     let mapCandidate: PoseCandidate | null = null;
-    let mapReject: string | null = null;
+    let mapRejection: PoseRejection | null = null;
+    let mapReport: PoseCandidateReport | null = null;
     let guidedFrom = 0;
     let guidedLinks = 0;
     // Solve PnP on the current observations (mature landmarks only when
@@ -397,65 +449,88 @@ export class MapTracker {
           if (res.inlierCount >= minInliers) break;
         }
       }
+      const quality = { inlierCount: res.inlierCount, reprojectionErrorPx: res.meanError * f };
       if (res.inlierCount >= minInliers) {
-        mapCandidate = { pose: res.pose, source: "map", inlierCount: res.inlierCount, reprojectionErrorPx: res.meanError * f };
-        // Jump gate (v2 §8): a weakly supported solve that moves the camera
-        // implausibly far in one frame is a wrong pose, not fast motion.
-        if (!trusted(mapCandidate)) {
-          const v = validatePoseCandidate(res.pose, this._pose, limits, "map");
-          if (!v.accepted) {
-            mapReject = v.reason;
-            mapCandidate = null;
-          }
+        // Judgement B (temporal gate, v2 §8 / v4 §2–§4): always, trusted or
+        // not. A solve that moves the camera implausibly far in one frame is
+        // a different pose, not fast motion — however many inliers agree.
+        const v = validatePoseCandidate(res.pose, this._pose, limits, "map");
+        if (v.accepted) {
+          mapCandidate = { pose: res.pose, source: "map", ...quality };
+        } else {
+          mapRejection = v.rejection;
         }
       } else {
-        mapReject = `map inliers ${res.inlierCount} < ${minInliers}${guidedFrom ? ` (guided from ${guidedFrom})` : ""}`;
+        mapRejection = {
+          code: "insufficient_inliers",
+          reason: `map inliers ${res.inlierCount} < ${minInliers}${guidedFrom ? ` (guided from ${guidedFrom})` : ""}`,
+          delta: res.inlierCount,
+          limit: minInliers,
+        };
       }
+      mapReport = report(quality, res.pose, mapRejection);
     } else if (n > 0) {
-      mapReject = `map observations ${n} < ${minObservations}`;
+      mapRejection = {
+        code: "insufficient_observations",
+        reason: `map observations ${n} < ${minObservations}`,
+        delta: n,
+        limit: minObservations,
+      };
+      mapReport = report({ inlierCount: 0, reprojectionErrorPx: 0 }, this._pose, mapRejection);
     }
 
-    // Candidate 2: plane-relative PnP (external). Same gate, plus agreement
-    // with the map candidate (v3 §3–§6); never an unconditional override.
+    // Candidate 2: plane-relative PnP (external). Same gate — always, the
+    // plane PnP in particular can be tight yet wrong (planar / homography
+    // ambiguity, v4 §5) — plus agreement with the map candidate (judgement
+    // C, v3 §3–§6 / v4 §6–§7); never an unconditional override.
     let planeCandidate: PoseCandidate | null = null;
-    let planeReject: string | null = null;
+    let planeRejection: PoseRejection | null = null;
+    let planeReport: PoseCandidateReport | null = null;
     let sourceDelta = { translation: 0, rotationDeg: 0 };
     if (external) {
-      planeCandidate = { pose: external.pose, source: "plane", inlierCount: external.inlierCount, reprojectionErrorPx: external.meanErrorPx };
-      if (!trusted(planeCandidate)) {
-        const v = validatePoseCandidate(external.pose, this._pose, limits, "plane");
-        if (!v.accepted) {
-          planeReject = v.reason;
-          planeCandidate = null;
-        }
+      const quality = { inlierCount: external.inlierCount, reprojectionErrorPx: external.meanErrorPx };
+      const v = validatePoseCandidate(external.pose, this._pose, limits, "plane");
+      if (v.accepted) {
+        planeCandidate = { pose: external.pose, source: "plane", ...quality };
+      } else {
+        planeRejection = v.rejection;
       }
       if (planeCandidate && mapCandidate) {
         sourceDelta = poseDelta(mapCandidate.pose, planeCandidate.pose);
-        const agree = validatePoseCandidate(planeCandidate.pose, mapCandidate.pose, limits, "plane vs map");
+        const agree = validatePoseCandidate(planeCandidate.pose, mapCandidate.pose, limits, "plane vs map", true);
         if (!agree.accepted) {
-          planeReject = agree.reason;
+          planeRejection = agree.rejection;
           planeCandidate = null;
         }
       }
+      planeReport = report(quality, external.pose, planeRejection);
     }
 
-    // Selection with hysteresis (v3 §7): the plane estimator is preferred when
-    // it produced a valid candidate, but switching back to it from the map
-    // waits for the cooldown unless the map has nothing.
+    // Selection with hysteresis (v3 §7, v4 §15–§16): only *validated*
+    // candidates reach this point. The plane estimator is preferred when it
+    // produced one, but switching back to it from the map waits for the
+    // cooldown unless the map has nothing.
     let chosen: PoseCandidate | null = null;
     if (planeCandidate && (this.currentSource === "plane" || !mapCandidate || this.framesSinceSwitch >= cfg.sourceSwitchCooldownFrames)) {
       chosen = planeCandidate;
     } else if (mapCandidate) {
       chosen = mapCandidate;
     }
-    if (chosen && planeCandidate && chosen !== planeCandidate && !planeReject) {
-      planeReject = `cooldown ${this.framesSinceSwitch}/${cfg.sourceSwitchCooldownFrames}`;
+    if (chosen && planeCandidate && chosen !== planeCandidate && !planeRejection) {
+      planeRejection = {
+        code: "source_cooldown",
+        reason: `cooldown ${this.framesSinceSwitch}/${cfg.sourceSwitchCooldownFrames}`,
+        delta: this.framesSinceSwitch,
+        limit: cfg.sourceSwitchCooldownFrames,
+      };
+      if (planeReport) planeReport = { ...planeReport, reject: planeRejection };
     }
 
     let tracked = false;
     let inlierCount = 0;
     let meanErrPx = 0;
-    const jumpRejected = mapReject !== null && mapReject.includes("jump");
+    // v4 §10: a jump of either candidate is a jump.
+    const jumpRejected = isJumpRejection(mapRejection) || isJumpRejection(planeRejection);
     if (chosen) {
       tracked = true;
       if (chosen.source !== this.currentSource) {
@@ -540,10 +615,15 @@ export class MapTracker {
       source: chosen ? chosen.source : "propagated",
       mapInlierCount: mapCandidate ? mapCandidate.inlierCount : 0,
       planeInlierCount: external ? external.inlierCount : 0,
-      mapReject,
-      planeReject,
+      mapReject: mapRejection?.reason ?? null,
+      planeReject: planeRejection?.reason ?? null,
+      mapRejection,
+      planeRejection,
+      map: mapReport,
+      plane: planeReport,
       sourceDeltaTranslation: sourceDelta.translation,
       sourceDeltaRotationDeg: sourceDelta.rotationDeg,
+      limits,
     };
 
     // ---- Anchors for tracks the map has not seen yet ----
