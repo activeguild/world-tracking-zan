@@ -179,10 +179,24 @@ the camera implausibly far in one frame is a different pose, not fast motion,
 and is rejected (`landmarks.jumpReject*`, `JUMP` on the HUD's PnP row, the
 structured reason on the `MAP cand` / `PLANE cand` rows). While lost the
 reference pose is a prediction, so the limits widen with the lost frames
-(`jumpRejectLostGrowthPerFrame`); relocalization re-seeds the pose from a
-keyframe-verified match and is not gated against the held pose. The plane
-tracker's probation / off-plane state is updated only from an accepted
-candidate, against the canonical pose.
+(`jumpRejectLostGrowthPerFrame`, capped at `jumpRejectMaxLostGrowth`); after
+`longLostFrames` the normal recovery needs `minRecoveryInliersLong` inliers.
+The plane tracker's probation / off-plane state is updated only from an
+accepted candidate, against the canonical pose.
+
+Relocalization (v5): a keyframe match is a *candidate* that must pass a global
+validation — PnP inliers, reprojection error, coarse match score, inlier ratio
+and the spatial distribution of the inliers over a 3×3 grid
+(`relocalization.minInlierRatio`, `minSpatialCells`) — and, unless it is
+clearly high quality (`immediateInliers`, `immediateMaxErrorPx`), a
+confirmation frame in which the next attempt reproduces the same pose
+(`confirmationFrames`, `confirmTranslationDepthRatio`, `confirmRotationDeg`).
+It is not gated against the held pose (a correct return can be far from it);
+instead the map PnP of the following `postRelocMonitorFrames` is compared with
+the relocalized pose (`postDelta*`, `postInconsistent`). The HUD `RELOC` rows
+show the candidate's quality, its jump from the held pose, the structured
+reject code and the post-relocalization agreement; `R` marks it in the source
+history.
 
 ## Tests
 

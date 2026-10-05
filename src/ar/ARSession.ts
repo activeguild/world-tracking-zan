@@ -206,6 +206,8 @@ export class ARSession {
   private translationHeldLogged = false;
   private loggedSource: MapPoseOutput["source"] | null = null;
   private loggedReject: { map: PoseRejectCode | null; plane: PoseRejectCode | null } = { map: null, plane: null };
+  private loggedRelocReject: string | null = null;
+  private loggedRelocInconsistent = false;
   private lastWorldUpdateMs = 0;
   private planePose: PlanePoseOutput | null = null;
   private planeAnchored = false;
@@ -597,12 +599,29 @@ export class ARSession {
     if (!m || !this.logger.enabled) return;
     const scale = this.worldAnchor.frame?.scale ?? 0;
     const len = (mapUnits: number) => (scale > 0 ? `${(mapUnits * scale).toFixed(3)}m` : `${mapUnits.toFixed(3)}u`);
-    if (r.relocalization.attempt === "success") {
+    // v5 §8, §18: every relocalization candidate, what was applied, what was
+    // rejected (once per reject code), and how the map PnP agreed afterwards.
+    const rl = r.relocalization;
+    if (rl.attempt === "candidate" || rl.attempt === "success") {
       this.logger.info(
-        `RELOCALIZED at frame ${r.frameId} (${r.relocalization.inlierCount} inliers)\n` +
-          `jump from held pose = ${len(r.relocalization.jumpTranslation)} / ${r.relocalization.jumpRotationDeg.toFixed(1)}deg`,
+        `RELOCALIZATION ${rl.attempt === "success" ? "APPLIED" : "CANDIDATE"} at frame ${r.frameId} (kf ${rl.keyframeId})\n` +
+          `translation = ${len(rl.jumpTranslation)}\nrotation = ${rl.jumpRotationDeg.toFixed(1)}deg\n` +
+          `inliers = ${rl.inlierCount}\nerror = ${rl.meanReprojectionErrorPx.toFixed(2)}px\nmatch = ${rl.matchScore.toFixed(2)}\n` +
+          `inlier ratio = ${rl.inlierRatio.toFixed(2)}\ncells = ${rl.spatialCells}/9`,
+      );
+      this.loggedRelocReject = null;
+    } else if (rl.attempt === "fail") {
+      if (rl.rejectCode && rl.rejectCode !== this.loggedRelocReject) {
+        this.logger.info(`RELOC REJECT at frame ${r.frameId}\nreason = ${rl.rejectCode}${rl.reason ? `\ndetail = ${rl.reason}` : ""}`);
+      }
+      this.loggedRelocReject = rl.rejectCode;
+    }
+    if (rl.postInconsistent && !this.loggedRelocInconsistent) {
+      this.logger.warn(
+        `RELOC INCONSISTENT at frame ${r.frameId}: map PnP after relocalization Δ ${len(rl.postDeltaTranslation)} / ${rl.postDeltaRotationDeg.toFixed(1)}deg`,
       );
     }
+    this.loggedRelocInconsistent = rl.postInconsistent;
     if (m.framesSinceTracked === 0 && m.source !== "propagated") {
       if (this.loggedSource !== null && this.loggedSource !== m.source) {
         this.logger.info(

@@ -77,6 +77,8 @@ export interface HudStats {
     history: string;
     /** Landmarks re-linked to tracks this frame. */
     relinked: number;
+    /** Pose re-seeded by a relocalization (this frame or its monitoring window). */
+    relocalized: boolean;
   } | null;
   /** How long tracking has been lost (ms). */
   lostMs?: number;
@@ -104,13 +106,24 @@ export interface HudStats {
   timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
   reloc?: {
     keyframes: number;
+    /** none / candidate / success / fail (v5 §18). */
     attempt: string;
     inliers: number;
+    errorPx: number;
+    match: number;
+    inlierRatio: number;
+    spatialCells: number;
+    keyframeId: number;
     successes: number;
     reason: string | null;
-    /** On success: distance from the held pose (world meters, NaN before the world exists) / deg. */
+    rejectCode: string | null;
+    /** Candidate / applied pose distance from the held pose (world meters, NaN before the world exists) / deg. */
     jumpM: number;
     jumpDeg: number;
+    /** Map PnP vs relocalized pose over the frames after the last relocalization. */
+    postM: number;
+    postDeg: number;
+    postInconsistent: boolean;
   } | null;
   /** Build identifier (phase + commit + time) so testers can confirm the deployed version. */
   build?: string;
@@ -176,16 +189,21 @@ export class DebugOverlay {
             `Pose 2view  ${s.pose.model}  t (${s.pose.translationDirection.map((v) => v.toFixed(2)).join(", ")})  parallax ${s.pose.parallaxPx.toFixed(1)}px  conf ${s.pose.confidence.toFixed(2)}/${s.pose.translationConfidence.toFixed(2)}  n=${s.pose.correspondences}`,
           ]
         : [`Pose        —`]),
-      `Keyframes   ${
-        s.reloc
-          ? `${s.reloc.keyframes}  reloc ${s.reloc.attempt}${
-              s.reloc.attempt === "success"
-                ? ` (${s.reloc.inliers} in, jump ${Number.isFinite(s.reloc.jumpM) ? `${(s.reloc.jumpM * 100).toFixed(1)} cm` : "—"} / ${s.reloc.jumpDeg.toFixed(1)}°)`
-                : ""
-            }  ok×${s.reloc.successes}`
-          : "—"
-      }`,
-      ...(s.reloc?.attempt === "fail" && s.reloc.reason ? [`Reloc fail  ${s.reloc.reason}`] : []),
+      `RELOC       ${s.reloc ? `${s.reloc.attempt}  kf ${s.reloc.keyframes}  ok×${s.reloc.successes}${m?.relocalized ? "  RELOCALIZED" : ""}` : "—"}`,
+      ...(s.reloc && s.reloc.attempt !== "none"
+        ? [
+            `  cand      in ${s.reloc.inliers}  err ${s.reloc.errorPx.toFixed(2)}px  match ${s.reloc.match.toFixed(2)}  ratio ${s.reloc.inlierRatio.toFixed(2)}  cells ${s.reloc.spatialCells}/9  kf ${s.reloc.keyframeId}`,
+            `  jump      ${Number.isFinite(s.reloc.jumpM) ? `${(s.reloc.jumpM * 100).toFixed(1)} cm` : "—"} / ${s.reloc.jumpDeg.toFixed(1)}°`,
+          ]
+        : []),
+      ...(s.reloc?.attempt === "fail" && (s.reloc.rejectCode || s.reloc.reason)
+        ? [`  REJECT    ${s.reloc.rejectCode ?? ""}${s.reloc.reason ? `  ${s.reloc.reason}` : ""}`]
+        : []),
+      ...(s.reloc && (s.reloc.postM > 0 || s.reloc.postInconsistent)
+        ? [
+            `  post      map Δ ${Number.isFinite(s.reloc.postM) ? `${(s.reloc.postM * 100).toFixed(1)} cm` : "—"} / ${s.reloc.postDeg.toFixed(1)}°${s.reloc.postInconsistent ? "  INCONSISTENT" : ""}`,
+          ]
+        : []),
       `=== CAMERA ===`,
       `map C       ${m ? xyz(m.cameraCenter) : "—"}`,
       `world C     ${s.cameraWorld ? xyz(s.cameraWorld) : "—"}`,

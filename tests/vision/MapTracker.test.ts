@@ -201,6 +201,75 @@ describe("MapTracker", () => {
     console.log(`[gate] trusted jump rejected (${selB.mapReject}); recovered after ${recoveredAt - (f0 + 2)} lost frames`);
   });
 
+  it("lost-time gate growth is capped and a long loss demands more inliers (v5 §13–§14, AC-5 / AC-6)", () => {
+    const cfg = DEFAULT_CONFIG.landmarks;
+    const f0 = 8;
+    const { rng, points } = makeScene(41);
+    const tracker = new MapTracker(cfg);
+    const estimator = new PoseEstimator(DEFAULT_CONFIG.pose, DEFAULT_CONFIG.ransac, createRng(42));
+    const tracks = makeTracks(points, cameraAt(f0), cameraAt(0), 0, rng);
+    const rel = estimator.estimate(
+      Float64Array.from(tracks, (t) => t.refX), Float64Array.from(tracks, (t) => t.refY),
+      Float64Array.from(tracks, (t) => t.x), Float64Array.from(tracks, (t) => t.y),
+      tracks.length, TEST_K,
+    );
+    expect(tracker.tryInitialize(tracks, rel, 0, f0, TEST_K)).toBe(true);
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    const step = (ids: Iterable<number>, pose: RigidTransform): Track[] => {
+      const next: Track[] = [];
+      for (const id of ids) {
+        const t = byId.get(id);
+        if (!t) continue;
+        const p = project(points, pose, id - 1, 0.3, rng);
+        if (!p) continue;
+        t.prevX = t.x; t.prevY = t.y; t.x = p[0]; t.y = p[1];
+        next.push(t);
+      }
+      return next;
+    };
+    for (let f = f0 + 1; f <= f0 + 3; f++) expect(tracker.update(step(byId.keys(), cameraAt(f)), f, TEST_K, null).tracked).toBe(true);
+    const landmarkIds = [...byId.values()].filter((t) => t.landmarkId >= 0).map((t) => t.id);
+    expect(landmarkIds.length).toBeGreaterThan(60);
+
+    // The camera "teleports" 1.0 unit (≈ 3.9 map units) with every landmark
+    // still seen: a trusted solve, rejected by the gate. The gate widens with
+    // the lost frames but only up to the cap, so this jump never passes
+    // through normal PnP (relocalization is the way back, AC-6).
+    const far = (f: number): RigidTransform => poseFromCenter(rotationAxisAngle([0, 1, 0], 0.004 * f), [0.03 * f + 1.0, 0.005 * f, 0.01 * f]);
+    const limits: number[] = [];
+    let f = f0 + 3;
+    for (let i = 1; i <= 45; i++) {
+      f++;
+      const r = tracker.update(step(landmarkIds, far(f)), f, TEST_K, null);
+      expect(r.tracked, `lost frame ${i}`).toBe(false);
+      limits.push(tracker.selection.limits.maxTranslation);
+      const rej = tracker.selection.mapRejection;
+      expect(rej).not.toBeNull();
+      if (i <= cfg.longLostFrames) {
+        expect(rej!.code, `lost frame ${i}`).toBe("translation_jump");
+        expect(rej!.delta).toBeGreaterThan(rej!.limit);
+      }
+    }
+    // Capped: the limit stops growing once 1 + 0.1·frames reaches the cap
+    // (the base — the median landmark depth — wobbles by < 1% between frames).
+    const capAt = Math.ceil((cfg.jumpRejectMaxLostGrowth - 1) / cfg.jumpRejectLostGrowthPerFrame);
+    expect(limits[capAt + 5] / limits[capAt]).toBeCloseTo(1, 1);
+    expect(limits[44] / limits[capAt]).toBeCloseTo(1, 1);
+    // The first lost frame is gated with growth 1 (the reference pose was tracked one frame ago).
+    expect(limits[capAt] / limits[0]).toBeCloseTo(cfg.jumpRejectMaxLostGrowth, 1);
+
+    // Long loss: with only a few links the required inliers rise to
+    // minRecoveryInliersLong (insufficient_inliers names that limit).
+    f++;
+    const few = step(landmarkIds.slice(0, 30), cameraAt(f));
+    const r = tracker.update(few, f, TEST_K, null);
+    expect(r.tracked).toBe(false);
+    const rej = tracker.selection.mapRejection!;
+    expect(rej.code).toBe("insufficient_inliers");
+    expect(rej.limit).toBe(cfg.minRecoveryInliersLong);
+    console.log(`[gate-cap] limit ${limits[0].toFixed(3)} → ${limits[44].toFixed(3)} (cap ×${cfg.jumpRejectMaxLostGrowth}); long-lost reject: ${rej.reason}`);
+  });
+
   it("temporal gate on the plane candidate (v4 §5, AC-2): a trusted plane pose that jumps is rejected and jumpRejected reports it", () => {
     const cfg = DEFAULT_CONFIG.landmarks;
     const f0 = 8;

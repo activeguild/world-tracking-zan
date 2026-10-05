@@ -207,6 +207,19 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v5 対応 — Relocalization の候補化・大域検証・確認（2026-10-05、実機確認待ち）
+
+通常 Tracking = 時系列連続性重視（Temporal Gate）、Relocalization = 大域的な幾何整合性重視（Global Validation）の 2 本立て（§2、§34）。再局所化は通常の Jump Gate では拒否しないが、成功を無条件に信頼もしない。
+
+- **P0: 候補 → 検証 → Apply（§3–§7、AC-1 / AC-2 / AC-3）**: `Relocalizer.relocalize()` は Keyframe マッチの結果を *候補*（`RelocalizationResult`: pose、inlier、誤差、`matchScore`（粗 NCC）、`lkRatio`、`inlierRatio`（PnP inlier / LK 追跡数）、`spatialCells`（3×3 グリッドの占有セル数）、`rejectCode`）として返し、`success` は大域検証を通過した意味。検証は inlier ≥ 25・誤差 ≤ 1.5 px（既存）に加え、`relocalization.minInlierRatio`（0.5）と `minSpatialCells`（4、AC-4: 一隅に固まった inlier は不採用）。拒否理由は `RelocalizationRejectCode`（`no_keyframes | low_match_score | insufficient_landmarks | lk_failed | insufficient_inliers | high_reprojection_error | low_inlier_ratio | poor_spatial_distribution | confirmation_failed | invalid_pose`、§19）
+- **P2: 確認フレーム（§10–§11）**: 検証済み候補は、明らかに高品質（`immediateInliers` 60 以上かつ誤差 `immediateMaxErrorPx` 1.0 px 以下）なら即 Apply。それ以外は `pendingReloc` に保持し、次フレーム（スケジュールに関係なく毎フレーム試行）の候補が `confirmTranslationDepthRatio`（奥行きの 5%）/ `confirmRotationDeg`（5°）以内に再現されたとき Apply（`confirmationFrames` 1）。再現されなければ `confirmation_failed` で破棄（新しい候補は自身の確認を開始）。通常 PnP で先に復帰した場合は候補を捨てる
+- **P0: 失探ゲート幅の上限（§13、AC-5）**: `lostGrowth = min(jumpRejectMaxLostGrowth(3), 1 + 0.1 × 失探フレーム)`。20 フレーム以降は 3 倍（机スケールで約 12 cm）で頭打ちし、それ以上のずれは再局所化だけが戻せる
+- **長時間失探の通常 PnP を厳しく（§12、§14、AC-6）**: `longLostFrames`（30）を超えたら復帰に `minRecoveryInliersLong`（40）を要求（通常の復帰は 24）。古い Pose + 広いゲート + 少数 inlier での再シードを防ぐ
+- **P1: Relocalization 後の整合性監視（§16–§17、AC-7）**: Apply 後 `postRelocMonitorFrames`（3）フレーム、Map PnP の Pose と再局所化 Pose の差の最大値（`postDeltaTranslation / RotationDeg`）を記録し、Map 候補がゲートで jump 拒否されたら `postInconsistent`。合成テスト: 95 フレームの失探から `candidate → success` で復帰、その後の Map Δ 0.145 map 単位（奥行きの約 0.6%）/ 0.01°
+- **P1: 診断（§8、§18、§20–§21、AC-9）**: `RelocalizationOutput` に `attempt: none | candidate | success | fail`、`rejectCode`、品質値、`keyframeId`、保持姿勢からの `jumpTranslation / RotationDeg`、`post*`。`MapPoseOutput.relocalized`（Apply フレームと監視期間中 true）。Source 履歴に `R`（例 `MMMM··RMMM`）。HUD: `RELOC success kf 4 ok×1 RELOCALIZED` / `cand in 54 err 1.7px match 0.91 ratio 0.80 cells 6/9 kf 12` / `jump 82 cm / 18.4°` / `REJECT poor_spatial_distribution …` / `post map Δ 2 cm / 1.1° [INCONSISTENT]`。ログ: `RELOCALIZATION CANDIDATE|APPLIED … translation / rotation / inliers / error / match / inlier ratio / cells`、`RELOC REJECT reason = <code>`（コードが変わったとき）、`RELOC INCONSISTENT`（warn）
+- **維持したもの**: `injectRelocalizedTracks`（§15）、PlaneTracker の `候補 → Gate → 一致 → 選択 → commit` 順（§23）、PlanePoint 生成条件（§24）、ARObject / WorldAnchor / FramePresenter / FAST / LK / RANSAC / PnP / FOV / スケール / One Euro（§22、§31）
+- テスト 155 件（+7）: `spatialCellCount`、一隅に固まった inlier の `poor_spatial_distribution` 拒否（inlier・誤差は合格）、良い分布は採用、別シーンは拒否、確認フレーム（`candidate` の次フレームで `success`、`relocalized` と `R`、監視期間の整合）、高品質候補の即 Apply、ゲート上限（45 フレーム失探しても 1.0 unit の瞬間移動は `translation_jump` のまま、上限到達後に limit が一定）、長時間失探の `insufficient_inliers … < 40`。ブラウザテスト: カットを `RELOCALIZATION APPLIED`（181 inlier、即 Apply）で跨ぎ全サンプル `PLANE_FOUND`
+
 ### 修正指示書 v4 対応 — Trusted でも Jump Gate を通す（2026-10-05、実機確認待ち）
 
 判定を 3 種類に分離（§8–§9）: A. PnP 品質（inlier / 誤差 = `trusted`）、B. 時系列連続性（前フレームの正準 Pose との並進・回転差 = Jump Gate）、C. Map / Plane 一致。**Trusted ≠ 連続** なので A は B を代替しない。

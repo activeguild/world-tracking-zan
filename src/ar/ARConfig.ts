@@ -209,6 +209,16 @@ export interface LandmarkConfig {
   jumpRejectTrustedInliers: number;
   jumpRejectTrustedErrorPx: number;
   jumpRejectLostGrowthPerFrame: number;
+  /** Cap of the lost-time growth factor (v5 §13): beyond it only relocalization can bring the camera back. */
+  jumpRejectMaxLostGrowth: number;
+  /**
+   * Long loss (v5 §12–§14): after this many lost frames the normal PnP
+   * recovery needs minRecoveryInliersLong inliers (instead of
+   * minRecoveryInliers), so a stale pose, a widened gate and a few links do
+   * not re-seed the camera; relocalization is the preferred way back.
+   */
+  longLostFrames: number;
+  minRecoveryInliersLong: number;
   /**
    * Hysteresis between pose sources (v3 §7): after the canonical pose
    * switched source (map ↔ plane), switching back waits this many frames
@@ -314,6 +324,29 @@ export interface RelocalizationConfig {
   minAttemptsBeforeReset: number;
   /** Try to relocalize every N lost frames (cost control). */
   attemptEveryNFrames: number;
+  /**
+   * Global validation of a relocalization candidate (修正指示書 v5 §5–§7):
+   * besides minInliers / maxMeanErrorPx / coarseMinScore, the PnP inliers
+   * must be at least this fraction of the LK-tracked observations …
+   */
+  minInlierRatio: number;
+  /** … and occupy at least this many cells of a 3×3 grid over the image (spatial distribution, v5 §6). */
+  minSpatialCells: number;
+  /**
+   * Confirmation (v5 §10–§11): a validated candidate is applied at once only
+   * when it is clearly high quality (≥ immediateInliers inliers and mean
+   * error ≤ immediateMaxErrorPx); otherwise it is held and applied when the
+   * next frame's relocalization lands within confirmTranslationDepthRatio ×
+   * scene depth / confirmRotationDeg of it. 0 confirmation frames = always
+   * apply at once.
+   */
+  confirmationFrames: number;
+  immediateInliers: number;
+  immediateMaxErrorPx: number;
+  confirmTranslationDepthRatio: number;
+  confirmRotationDeg: number;
+  /** Frames after a relocalization during which the map PnP is compared with the relocalized pose (v5 §16–§17). */
+  postRelocMonitorFrames: number;
 }
 
 /** World anchoring, hit test and rendering (spec §25–§30, §33–§34, Phase 4). */
@@ -519,6 +552,10 @@ export const DEFAULT_CONFIG: ARConfig = {
     // 10 lost frames double the gate; 90 frames (the re-association horizon)
     // make it 10× — about 40 cm at the desk scale.
     jumpRejectLostGrowthPerFrame: 0.1,
+    // Capped at 3× (20 lost frames): about 12 cm at the desk scale.
+    jumpRejectMaxLostGrowth: 3,
+    longLostFrames: 30,
+    minRecoveryInliersLong: 40,
     sourceSwitchCooldownFrames: 15,
     // FAST re-detects a corner within ~1 px; a tight radius keeps chance
     // matches on unrelated texture rare.
@@ -554,6 +591,14 @@ export const DEFAULT_CONFIG: ARConfig = {
     // Every 3rd frame: relocalization attempts dominated the lost-frame cost
     // (67 ms on iPhone); guided re-association now carries the quick recoveries.
     attemptEveryNFrames: 3,
+    minInlierRatio: 0.5,
+    minSpatialCells: 4,
+    confirmationFrames: 1,
+    immediateInliers: 60,
+    immediateMaxErrorPx: 1.0,
+    confirmTranslationDepthRatio: 0.05,
+    confirmRotationDeg: 5,
+    postRelocMonitorFrames: 3,
   },
   plane: {
     inlierThresholdRatio: 0.05,

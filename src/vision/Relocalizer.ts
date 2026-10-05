@@ -26,13 +26,40 @@ import type { Track } from "./types";
  * this covers blur, brief occlusion and the camera coming back to a view
  * it has seen, but not large viewpoint changes (deferred, spec §2).
  */
+/** Structured reasons a relocalization candidate was not accepted (修正指示書 v5 §19). */
+export type RelocalizationRejectCode =
+  | "no_keyframes"
+  | "low_match_score"
+  | "insufficient_landmarks"
+  | "lk_failed"
+  | "insufficient_inliers"
+  | "high_reprojection_error"
+  | "low_inlier_ratio"
+  | "poor_spatial_distribution"
+  | "confirmation_failed"
+  | "invalid_pose";
+
+/**
+ * A relocalization *candidate* (v5 §4): the best keyframe match of this
+ * attempt with every quality measure the validation looked at. `success`
+ * means it passed the global validation (v5 §5–§7); the caller still decides
+ * when to apply it (confirmation, v5 §10–§11).
+ */
 export interface RelocalizationResult {
   success: boolean;
   keyframeId: number;
-  /** Pose in the map frame when successful. */
+  /** Pose in the map frame (also for a rejected candidate that got as far as PnP). */
   pose: RigidTransform | null;
   inlierCount: number;
   meanReprojectionErrorPx: number;
+  /** Coarse NCC score of the keyframe match (−1…1). */
+  matchScore: number;
+  /** LK-tracked observations / keyframe observations. */
+  lkRatio: number;
+  /** PnP inliers / LK-tracked observations. */
+  inlierRatio: number;
+  /** Cells of a 3×3 grid over the image that contain PnP inliers (1…9). */
+  spatialCells: number;
   /** Coarse shift found (level-0 pixels). */
   shiftX: number;
   shiftY: number;
@@ -41,6 +68,20 @@ export interface RelocalizationResult {
   candidatesTried: number;
   /** Why the attempt failed (best candidate's stage), null on success. */
   reason: string | null;
+  rejectCode: RelocalizationRejectCode | null;
+}
+
+/** Number of occupied cells of a 3×3 grid over a width×height image. */
+export function spatialCellCount(xs: ArrayLike<number>, ys: ArrayLike<number>, n: number, width: number, height: number): number {
+  let mask = 0;
+  for (let i = 0; i < n; i++) {
+    const cx = Math.min(2, Math.max(0, Math.floor((xs[i] * 3) / width)));
+    const cy = Math.min(2, Math.max(0, Math.floor((ys[i] * 3) / height)));
+    mask |= 1 << (cy * 3 + cx);
+  }
+  let count = 0;
+  for (let b = 0; b < 9; b++) if (mask & (1 << b)) count++;
+  return count;
 }
 
 export class Relocalizer {
@@ -119,7 +160,8 @@ export class Relocalizer {
     const cfg = this.config;
     const fail: RelocalizationResult = {
       success: false, keyframeId: -1, pose: null, inlierCount: 0, meanReprojectionErrorPx: 0,
-      shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0, reason: "no keyframes",
+      matchScore: -1, lkRatio: 0, inlierRatio: 0, spatialCells: 0,
+      shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0, reason: "no keyframes", rejectCode: "no_keyframes",
     };
     if (this.keyframes.length === 0) return fail;
 
@@ -139,16 +181,23 @@ export class Relocalizer {
     this.candidateCursor = (this.candidateCursor + candidates.length) % Math.max(1, ordered.length);
     let tried = 0;
     let best: RelocalizationResult | null = null;
-    let reason = "";
-    let bestScore = -1;
+    // The rejected candidate that got furthest (for the reason / diagnostics).
+    let rejected: RelocalizationResult = { ...fail, reason: "" };
+    let rejectedStage = -1;
+    const reject = (stage: number, partial: Partial<RelocalizationResult>, code: RelocalizationRejectCode, reason: string) => {
+      if (stage < rejectedStage) return;
+      rejectedStage = stage;
+      rejected = { ...fail, ...partial, success: false, reason, rejectCode: code };
+    };
     for (const kf of candidates) {
       tried++;
       const shift = coarseShift(kf.coarse, curCoarse, cfg.coarseSearchRadius);
-      if (shift.score > bestScore) {
-        bestScore = shift.score;
-        reason = `score ${shift.score.toFixed(2)} < ${cfg.coarseMinScore} (kf ${kf.id})`;
+      if (shift.score < cfg.coarseMinScore) {
+        if (rejectedStage <= 0 && shift.score > rejected.matchScore) {
+          reject(0, { keyframeId: kf.id, matchScore: shift.score }, "low_match_score", `score ${shift.score.toFixed(2)} < ${cfg.coarseMinScore} (kf ${kf.id})`);
+        }
+        continue;
       }
-      if (shift.score < cfg.coarseMinScore) continue;
       const sx = shift.dx * coarseScale;
       const sy = shift.dy * coarseScale;
 
@@ -156,7 +205,7 @@ export class Relocalizer {
       const obs = kf.observations.filter((o) => map.get(o.landmarkId) !== undefined);
       const n = obs.length;
       if (n < cfg.minInliers) {
-        reason = `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`;
+        reject(1, { keyframeId: kf.id, matchScore: shift.score }, "insufficient_landmarks", `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`);
         continue;
       }
       const pts = new Float32Array(n * 2);
@@ -168,8 +217,14 @@ export class Relocalizer {
         guesses[i * 2 + 1] = obs[i].y + sy;
       }
       const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, cfg.lkMaxDisplacementPx);
+      const lkRatio = res.okCount / n;
       if (res.okCount < cfg.minInliers) {
-        reason = `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (score ${shift.score.toFixed(2)})`;
+        reject(
+          2,
+          { keyframeId: kf.id, matchScore: shift.score, lkRatio },
+          "lk_failed",
+          `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (score ${shift.score.toFixed(2)})`,
+        );
         continue;
       }
 
@@ -198,38 +253,69 @@ export class Relocalizer {
         maxIterations: 20,
         epsilon: 1e-7,
       });
-      if (pnp.inlierCount < cfg.minInliers) {
-        reason = `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`;
-        continue;
-      }
-      if (pnp.meanError * f > cfg.maxMeanErrorPx) {
-        reason = `kf ${kf.id}: err ${(pnp.meanError * f).toFixed(2)} > ${cfg.maxMeanErrorPx} px`;
-        continue;
-      }
-
+      // ---- Global validation of the candidate (v5 §5–§7) ----
+      // No single measure decides: PnP support, reprojection error, the
+      // fraction of tracked observations the pose explains, and where the
+      // inliers sit in the image (30 inliers in one corner pin the pose badly
+      // and are typical of a repeated-pattern false match).
       const tracks: RelocalizationResult["tracks"] = [];
+      const inX: number[] = [];
+      const inY: number[] = [];
       for (let q = 0; q < m; q++) {
         if (!pnp.inliers[q]) continue;
         const i = idx[q];
-        tracks.push({ landmarkId: obs[i].landmarkId, x: res.positions[i * 2], y: res.positions[i * 2 + 1] });
+        const x = res.positions[i * 2];
+        const y = res.positions[i * 2 + 1];
+        tracks.push({ landmarkId: obs[i].landmarkId, x, y });
+        inX.push(x);
+        inY.push(y);
       }
-      const result: RelocalizationResult = {
-        success: true,
+      const errPx = pnp.meanError * f;
+      const inlierRatio = pnp.inlierCount / m;
+      const spatialCells = spatialCellCount(inX, inY, inX.length, current.width, current.height);
+      const candidate: RelocalizationResult = {
+        success: false,
         keyframeId: kf.id,
         pose: pnp.pose,
         inlierCount: pnp.inlierCount,
-        meanReprojectionErrorPx: pnp.meanError * f,
+        meanReprojectionErrorPx: errPx,
+        matchScore: shift.score,
+        lkRatio,
+        inlierRatio,
+        spatialCells,
         shiftX: sx,
         shiftY: sy,
         tracks,
         candidatesTried: tried,
         reason: null,
+        rejectCode: null,
       };
-      if (!best || result.inlierCount > best.inlierCount) best = result;
-      if (result.inlierCount >= cfg.goodInliers) break;
+      if (!Number.isFinite(errPx) || pnp.pose.translation.some((v) => !Number.isFinite(v))) {
+        reject(3, candidate, "invalid_pose", `kf ${kf.id}: invalid pose`);
+        continue;
+      }
+      if (pnp.inlierCount < cfg.minInliers) {
+        reject(3, candidate, "insufficient_inliers", `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`);
+        continue;
+      }
+      if (errPx > cfg.maxMeanErrorPx) {
+        reject(4, candidate, "high_reprojection_error", `kf ${kf.id}: err ${errPx.toFixed(2)} > ${cfg.maxMeanErrorPx} px`);
+        continue;
+      }
+      if (inlierRatio < cfg.minInlierRatio) {
+        reject(5, candidate, "low_inlier_ratio", `kf ${kf.id}: inlier ratio ${inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}`);
+        continue;
+      }
+      if (spatialCells < cfg.minSpatialCells) {
+        reject(6, candidate, "poor_spatial_distribution", `kf ${kf.id}: inliers in ${spatialCells}/9 cells < ${cfg.minSpatialCells}`);
+        continue;
+      }
+      candidate.success = true;
+      if (!best || candidate.inlierCount > best.inlierCount) best = candidate;
+      if (candidate.inlierCount >= cfg.goodInliers) break;
     }
-    if (best) return best;
-    return { ...fail, candidatesTried: tried, reason };
+    if (best) return { ...best, candidatesTried: tried };
+    return { ...rejected, candidatesTried: tried };
   }
 
   /** Last coarse image of the current frame (debug). */

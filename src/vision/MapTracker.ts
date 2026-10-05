@@ -164,6 +164,11 @@ export class MapTracker {
     return this.framesSinceSwitch;
   }
 
+  /** Median depth of the observed landmarks in the last frame that had any (map units). */
+  get sceneDepth(): number {
+    return this.lastDepth;
+  }
+
   /**
    * Phase 5: a relocalization found the camera in the existing map. The
    * pose re-seeds the canonical pose and becomes the PnP prior of the
@@ -192,7 +197,8 @@ export class MapTracker {
    */
   private gateLimits(depth = this.lastDepth): PoseValidationLimits {
     const cfg = this.config;
-    const lostGrowth = 1 + cfg.jumpRejectLostGrowthPerFrame * this._framesSinceTracked;
+    // Capped (v5 §13): a long loss does not open the gate indefinitely.
+    const lostGrowth = Math.min(cfg.jumpRejectMaxLostGrowth, 1 + cfg.jumpRejectLostGrowthPerFrame * this._framesSinceTracked);
     return {
       maxTranslation:
         Math.max(cfg.jumpRejectDepthRatio * Math.max(depth, 1e-9), cfg.jumpRejectSpeedFactor * this.lastResult.poseDeltaTranslation) * lostGrowth,
@@ -426,8 +432,15 @@ export class MapTracker {
     const minObservations = this._framesSinceTracked > 0 ? cfg.recoverySeedInliers : 6;
     if (n >= minObservations) {
       let res = solve(prior);
-      // Coming back from a lost frame needs stronger evidence than staying tracked.
-      const minInliers = this._framesSinceTracked > 0 ? cfg.minRecoveryInliers : cfg.minPnPInliers;
+      // Coming back from a lost frame needs stronger evidence than staying
+      // tracked, and a long loss (stale reference pose) even more (v5 §14):
+      // relocalization is the preferred way back then.
+      const minInliers =
+        this._framesSinceTracked > cfg.longLostFrames
+          ? cfg.minRecoveryInliersLong
+          : this._framesSinceTracked > 0
+            ? cfg.minRecoveryInliers
+            : cfg.minPnPInliers;
       if (
         res.inlierCount < minInliers &&
         this._framesSinceTracked > 0 &&

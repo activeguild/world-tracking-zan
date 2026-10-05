@@ -2,6 +2,7 @@ import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import type { TrackingState } from "../ar/ARState";
 import type { TrackingQuality } from "./TrackingQuality";
 import type { PoseRejection } from "./PoseValidation";
+import type { RelocalizationRejectCode } from "./Relocalizer";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -149,8 +150,10 @@ export interface MapPoseOutput {
   /** Map vs plane candidate difference when both existed (map units / degrees). */
   sourceDeltaTranslation: number;
   sourceDeltaRotationDeg: number;
-  /** Last ~50 frames' pose sources, newest last: M = map, P = plane, · = propagated. */
+  /** Last ~50 frames' pose sources, newest last: M = map, P = plane, · = propagated, R = relocalized. */
   sourceHistory: string;
+  /** The pose was re-seeded by a relocalization in this frame or is still within its monitoring window (v5 §20). */
+  relocalized: boolean;
   /**
    * Where this frame's pose came from: "plane" = plane-relative estimate
    * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no
@@ -198,19 +201,39 @@ export interface PlaneSearchOutput {
 
 export interface RelocalizationOutput {
   keyframes: number;
-  /** Result of the attempt made in this frame. */
-  attempt: "none" | "success" | "fail";
+  /**
+   * Result of the attempt made in this frame (v5 §18): `candidate` = passed
+   * the global validation, held for confirmation; `success` = applied to the
+   * canonical pose; `fail` = rejected (see `rejectCode`).
+   */
+  attempt: "none" | "candidate" | "success" | "fail";
   inlierCount: number;
   candidatesTried: number;
   /** Frame id of the last successful relocalization (-1 when none). */
   lastSuccessFrame: number;
-  /** Total successful relocalizations in this session. */
+  /** Total successful (applied) relocalizations in this session. */
   successCount: number;
   /** Why the last attempt failed (best candidate's stage), null when none / success. */
   reason: string | null;
-  /** On success: how far the relocalized pose was from the held / predicted pose it replaced (map units / deg). */
+  rejectCode: RelocalizationRejectCode | null;
+  /** Quality of the candidate of this attempt (v5 §5–§6). */
+  meanReprojectionErrorPx: number;
+  matchScore: number;
+  inlierRatio: number;
+  spatialCells: number;
+  keyframeId: number;
+  /** On candidate / success: how far the candidate pose is from the held / predicted pose (map units / deg). */
   jumpTranslation: number;
   jumpRotationDeg: number;
+  /**
+   * Post-relocalization consistency (v5 §16–§17): largest difference between
+   * the map PnP pose and the relocalized pose over the monitored frames after
+   * the last relocalization (map units / deg), and whether the map PnP
+   * contradicted it (jump-rejected or far off).
+   */
+  postDeltaTranslation: number;
+  postDeltaRotationDeg: number;
+  postInconsistent: boolean;
 }
 
 /**

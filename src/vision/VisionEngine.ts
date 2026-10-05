@@ -8,7 +8,8 @@ import { MapTracker } from "./MapTracker";
 import { PlaneDetector } from "./PlaneDetector";
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
-import { Relocalizer } from "./Relocalizer";
+import { Relocalizer, type RelocalizationResult } from "./Relocalizer";
+import { isJumpRejection, poseDelta } from "./PoseValidation";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
 import {
   LANDMARK_STRIDE,
@@ -25,7 +26,7 @@ import {
 } from "./types";
 import { type Mat3, mat3Identity, mat3Multiply } from "../math/Matrix";
 import { transpose3 } from "../math/Decomposition";
-import { rotationDistance, rotationToQuaternion } from "../math/Pose";
+import { rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
 
 /**
  * Phase 1 vision pipeline (spec §55):
@@ -112,6 +113,17 @@ export class VisionEngine {
   private relocStatus: RelocalizationOutput = emptyReloc();
   private relocSuccessCount = 0;
   private relocLastSuccessFrame = -1;
+  /** Validated candidate waiting to be reproduced in the next frame (v5 §10–§11). */
+  private pendingReloc: { result: RelocalizationResult; frameId: number; confirmations: number } | null = null;
+  /** Map-PnP-vs-relocalized-pose watch for the frames after a relocalization (v5 §16–§17). */
+  private relocMonitor: {
+    pose: RigidTransform;
+    framesLeft: number;
+    maxDeltaTranslation: number;
+    maxDeltaRotationDeg: number;
+    inconsistent: boolean;
+  } | null = null;
+  private lastRelocalized = false;
 
   /** Timing breakdown of the last frame (ms). */
   readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, reloc: 0, total: 0 };
@@ -213,6 +225,9 @@ export class VisionEngine {
     this.relocStatus = emptyReloc();
     this.relocSuccessCount = 0;
     this.relocLastSuccessFrame = -1;
+    this.pendingReloc = null;
+    this.relocMonitor = null;
+    this.lastRelocalized = false;
   }
 
   /** Last pose output (null until a reference frame and enough tracks exist). */
@@ -357,16 +372,16 @@ export class VisionEngine {
 
     this.timing.reloc = 0;
     this.relocStatus = {
+      ...emptyReloc(),
       keyframes: this.relocalizer.count,
-      attempt: "none",
-      inlierCount: 0,
-      candidatesTried: 0,
       lastSuccessFrame: this.relocLastSuccessFrame,
       successCount: this.relocSuccessCount,
-      reason: null,
-      jumpTranslation: 0,
-      jumpRotationDeg: 0,
+      postDeltaTranslation: this.relocMonitor?.maxDeltaTranslation ?? 0,
+      postDeltaRotationDeg: this.relocMonitor?.maxDeltaRotationDeg ?? 0,
+      postInconsistent: this.relocMonitor?.inconsistent ?? false,
     };
+    let relocalizedNow = false;
+    let monitoredThisFrame = false;
 
     if (!tracker.initialized) {
       if (this.lastRelative && this.lastRelativeRefFrame >= 0) {
@@ -382,31 +397,98 @@ export class VisionEngine {
       }
     } else {
       // Phase 5: relocalize when the camera was not located in the previous frame.
+      //
+      //   keyframe match → PnP → global validation (Relocalizer) → candidate
+      //     → confirmation (v5 §10–§11) → applyRelocalization → canonical pose
+      //
+      // A candidate is never written to the pose unvalidated (v5 §3). The
+      // temporal gate is not used here (a correct return after a loss can be
+      // far from the held pose, v5 §9); the delta is diagnostic only.
       const rc = this.config.relocalization;
-      if (
+      const pending = this.pendingReloc;
+      const scheduled =
         tracker.framesSinceTracked >= rc.startAfterLostFrames &&
-        (tracker.framesSinceTracked - rc.startAfterLostFrames) % rc.attemptEveryNFrames === 0
-      ) {
+        (tracker.framesSinceTracked - rc.startAfterLostFrames) % rc.attemptEveryNFrames === 0;
+      if (tracker.framesSinceTracked === 0) {
+        this.pendingReloc = null;
+      } else if (pending !== null || scheduled) {
         const tr0 = now();
         const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k);
         this.timing.reloc = now() - tr0;
-        if (!r.success) this.relocAttemptsSinceLost++;
-        this.relocStatus.attempt = r.success ? "success" : "fail";
-        this.relocStatus.inlierCount = r.inlierCount;
-        this.relocStatus.candidatesTried = r.candidatesTried;
-        this.relocStatus.reason = r.reason;
+        const d = r.pose ? poseDelta(r.pose, tracker.pose) : { translation: 0, rotationDeg: 0 };
+        this.relocStatus = {
+          ...this.relocStatus,
+          attempt: r.success ? "candidate" : "fail",
+          inlierCount: r.inlierCount,
+          candidatesTried: r.candidatesTried,
+          reason: r.reason,
+          rejectCode: r.rejectCode,
+          meanReprojectionErrorPx: r.meanReprojectionErrorPx,
+          matchScore: r.matchScore,
+          inlierRatio: r.inlierRatio,
+          spatialCells: r.spatialCells,
+          keyframeId: r.keyframeId,
+          jumpTranslation: d.translation,
+          jumpRotationDeg: d.rotationDeg,
+        };
+        let apply = false;
         if (r.success && r.pose) {
-          // Re-seeds the canonical pose (verified against the map by the
-          // relocalizer, not by the temporal gate — see MapTracker.applyRelocalization).
-          const d = tracker.applyRelocalization(r.pose);
-          this.relocStatus.jumpTranslation = d.translation;
-          this.relocStatus.jumpRotationDeg = d.rotationDeg;
+          const immediate =
+            rc.confirmationFrames <= 0 || (r.inlierCount >= rc.immediateInliers && r.meanReprojectionErrorPx <= rc.immediateMaxErrorPx);
+          if (pending) {
+            // Confirmation: the new candidate must land where the pending one did.
+            const c = poseDelta(r.pose, pending.result.pose!);
+            const depth = tracker.sceneDepth;
+            const near =
+              c.translation <= rc.confirmTranslationDepthRatio * Math.max(depth, 1e-9) && c.rotationDeg <= rc.confirmRotationDeg;
+            if (near) {
+              pending.confirmations++;
+              apply = pending.confirmations >= rc.confirmationFrames;
+            } else {
+              this.relocStatus.reason = `confirmation failed: Δ ${c.translation.toFixed(3)} / ${c.rotationDeg.toFixed(1)}° vs frame ${pending.frameId}`;
+              this.relocStatus.rejectCode = "confirmation_failed";
+              this.relocStatus.attempt = "fail";
+              this.relocAttemptsSinceLost++;
+              // The newer candidate starts its own confirmation.
+              this.pendingReloc = { result: r, frameId, confirmations: 0 };
+            }
+          } else if (immediate) {
+            apply = true;
+          } else {
+            this.pendingReloc = { result: r, frameId, confirmations: 0 };
+          }
+        } else {
+          this.relocAttemptsSinceLost++;
+          if (pending) {
+            // A candidate that cannot be reproduced in the next frame is dropped.
+            this.relocStatus.rejectCode = "confirmation_failed";
+            this.relocStatus.reason = `confirmation failed: ${r.reason ?? "no candidate"}`;
+            this.pendingReloc = null;
+          }
+        }
+        if (apply && r.pose) {
+          // Re-seeds the canonical pose; from the next frame on the map PnP is
+          // gated against it again and compared with it (monitor below).
+          tracker.applyRelocalization(r.pose);
           this.injectRelocalizedTracks(r.tracks, frameId, r.pose);
           rotationPrior = null; // the relocalized pose is the prior
+          this.pendingReloc = null;
+          relocalizedNow = true;
           this.relocSuccessCount++;
           this.relocLastSuccessFrame = frameId;
+          this.relocStatus.attempt = "success";
           this.relocStatus.lastSuccessFrame = frameId;
           this.relocStatus.successCount = this.relocSuccessCount;
+          this.relocMonitor = {
+            pose: { rotation: Float64Array.from(r.pose.rotation), translation: Float64Array.from(r.pose.translation) },
+            framesLeft: rc.postRelocMonitorFrames,
+            maxDeltaTranslation: 0,
+            maxDeltaRotationDeg: 0,
+            inconsistent: false,
+          };
+          this.relocStatus.postDeltaTranslation = 0;
+          this.relocStatus.postDeltaRotationDeg = 0;
+          this.relocStatus.postInconsistent = false;
         }
       }
 
@@ -428,6 +510,25 @@ export class VisionEngine {
       const res = tracker.update(this.tracks, frameId, k, rotationPrior, external, this.lastImageMotion);
       const sel = tracker.selection;
       this.lastPoseSource = res.tracked ? sel.source : "propagated";
+      // Post-relocalization consistency (v5 §16–§17): the map PnP of the
+      // following frames must agree with the relocalized pose up to the
+      // camera's own motion; a jump-rejected or far-off solve means the
+      // relocalization itself is suspect.
+      const mon = this.relocMonitor;
+      monitoredThisFrame = mon !== null;
+      if (mon && !relocalizedNow) {
+        mon.framesLeft--;
+        if (sel.map) {
+          const dm = poseDelta(tracker.pose, mon.pose);
+          mon.maxDeltaTranslation = Math.max(mon.maxDeltaTranslation, dm.translation);
+          mon.maxDeltaRotationDeg = Math.max(mon.maxDeltaRotationDeg, dm.rotationDeg);
+          if (isJumpRejection(sel.mapRejection)) mon.inconsistent = true;
+        }
+        this.relocStatus.postDeltaTranslation = mon.maxDeltaTranslation;
+        this.relocStatus.postDeltaRotationDeg = mon.maxDeltaRotationDeg;
+        this.relocStatus.postInconsistent = mon.inconsistent;
+        if (mon.framesLeft <= 0) this.relocMonitor = null;
+      }
       if (res.tracked) {
         this.relocAttemptsSinceLost = 0;
         if (external) {
@@ -469,9 +570,14 @@ export class VisionEngine {
         this.lastPlaneAnchor = null;
         this.relocalizer.reset();
         this.relocAttemptsSinceLost = 0;
+        this.pendingReloc = null;
+        this.relocMonitor = null;
       }
-      this.sourceHistory = (this.sourceHistory + (res.tracked ? (sel.source === "plane" ? "P" : "M") : "·")).slice(-50);
+      this.sourceHistory = (
+        this.sourceHistory + (relocalizedNow ? "R" : res.tracked ? (sel.source === "plane" ? "P" : "M") : "·")
+      ).slice(-50);
     }
+    this.lastRelocalized = relocalizedNow || monitoredThisFrame;
     this.lastPlanePose = this.planeTracker.anchored ? toPlanePoseOutput(this.planeTracker.result) : null;
 
     if (tracker.initialized) {
@@ -502,6 +608,7 @@ export class VisionEngine {
         sourceDeltaTranslation: tracker.selection.sourceDeltaTranslation,
         sourceDeltaRotationDeg: tracker.selection.sourceDeltaRotationDeg,
         sourceHistory: this.sourceHistory,
+        relocalized: this.lastRelocalized,
         source: this.lastPoseSource,
       };
     } else {
@@ -990,7 +1097,16 @@ function emptyReloc(): RelocalizationOutput {
     lastSuccessFrame: -1,
     successCount: 0,
     reason: null,
+    rejectCode: null,
+    meanReprojectionErrorPx: 0,
+    matchScore: 0,
+    inlierRatio: 0,
+    spatialCells: 0,
+    keyframeId: -1,
     jumpTranslation: 0,
     jumpRotationDeg: 0,
+    postDeltaTranslation: 0,
+    postDeltaRotationDeg: 0,
+    postInconsistent: false,
   };
 }

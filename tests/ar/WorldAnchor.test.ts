@@ -31,6 +31,7 @@ function mapPose(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     sourceDeltaTranslation: 0,
     sourceDeltaRotationDeg: 0,
     sourceHistory: "M",
+    relocalized: false,
     source: "map",
   };
 }
