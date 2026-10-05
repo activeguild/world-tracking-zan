@@ -207,6 +207,18 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v13 対応 — Lost / Relocalization 中の AR オブジェクト非表示（2026-10-05、実機確認待ち）
+
+実機ログ（`State RELOCALIZING`、`Source LOST`、`Lost 2068ms`、`PnP 0i t HELD`、`Rot yaw +86.8 pitch -35.5 roll +73.6`）のように Camera Pose が信頼できない間も、`world.holdPoseOnLostMs`（10 s、v3 のデバッグ値）で古い Pose のまま Cube が表示され続けていた。**表示状態と World / Map / Anchor / Keyframe の状態を分離**し、オブジェクトは「最後に得た Pose」ではなく「現在の Pose が信頼できるか」に従わせる（§1、§39）。Map reset / World reset / Relocalization / Confirmation / v12 の Validation / PnP / LK / Jump Gate は変更していない（§13、§34）。
+
+- **判定（§3–§11、§16）**: `src/ar/ObjectVisibility.ts` の純関数 `decideObjectVisibility(input) → { visible, reason }`。`reason: TRACKING_ACTIVE | TRACKING_LOST | RELOCALIZING | CONFIRMING | WORLD_NOT_READY | POSE_INVALID`。World 未確立 / 未生成 → `WORLD_NOT_READY`、`RELOCALIZING` → `RELOCALIZING`、`TRACKING_LOST` / `SEARCHING_FEATURES` / World 未確立相当の状態 → `TRACKING_LOST`、非有限 Pose → `POSE_INVALID`、`mapPose.relocalized`（再局所化の Apply フレーム + 事後監視 `postRelocMonitorFrames` の間）→ `CONFIRMING`、`PLANE_FOUND` / `AR_ACTIVE` で `framesSinceTracked === 0` → `TRACKING_ACTIVE`（表示）
+- **ヒステリシス（§5、§9、§11）**: 新しい閾値は追加せず状態機械の `state.mapLostFrameTolerance`（3）を使う。表示中は PnP 失敗が許容フレーム内なら表示を維持（ちらつき防止）、**再表示は Map 由来の新しい Pose（`framesSinceTracked === 0`）のフレームだけ**（保持 Pose での再表示なし）。1 フレームだけの表示（§22）は `relocalized` ウィンドウで防ぐ: Apply フレームは state が WORLD_TRACKING に戻り Pose も新しいが `CONFIRMING` で非表示、監視 3 フレームが閉じた次のフレームで表示
+- **ARWorld / ARObject（§12、§18–§20、§24）**: `ARWorld.updateTracking(tracking, nowMs)`（10 s 保持）を廃止し、`setObjectsVisible(visible)`（冪等、変化時のみ Three.js を触る）と `markTracking(tracking, nowMs)`（`lostDurationMs` 用）に分離。Transform は保持、`root`（World フレーム）は非表示にしない、平面グリッドは非表示に連動（HUD トグルの要求は `planeGridWanted` で記憶）。`ARObject` に `shown` を持たせ、非表示中に `place()` されたオブジェクトも非表示のまま。Render loop / Camera / Relocalization は継続
+- **ARSession**: `updateWorld` で毎フレーム判定し `world.setObjectsVisible`。`ARStats.objectVisibility { visible, reason }`。ログ `OBJECTS hidden (RELOCALIZING) at frame N` は変化時のみ（debug 時）。`world.holdPoseOnLostMs` は未使用（互換のため設定キーは残す）
+- **HUD（§15）**: `=== OBJECT ===` に `Visible YES|NO` / `Reason RELOCALIZING` を追加、非表示中の `ObjN` は `hidden`（Transform は保持しているが古い位置を見せない）。Debug 既定 OFF は維持
+- テスト 210 件（+9）: `decideObjectVisibility` Test 1 / 6（WORLD_TRACKING + 新 Pose → 表示）、Test 2（LOST）、Test 3 / 7（RELOCALIZING、候補合格でも Apply 前は RELOCALIZING）、Test 4 / 5 / 13 / 14 / 15（Apply フレームと監視 3 フレームは `CONFIRMING`、strong / acceptable 共通、1 フレームの表示なし）、Test 9（許容 3 フレーム内の PnP 失敗は表示維持・保持 Pose での再表示なし）、Test 8 / §30（visible → lost → hidden → reloc → confirming → visible を 3 周）、ARWorld（Transform / root / 配置数の保持、冪等、非表示中の配置、非表示中もアニメーション継続 = Test 10–12）。`CameraObjectSeparation` は `new ARWorld()` に更新。ブラウザテスト 2 件合格
+- **実機で読むべきもの（§27–§29、§40）**: 失探中に `OBJECT` 節が `Visible NO / Reason TRACKING_LOST → RELOCALIZING` となり Cube が消えること、再局所化 Apply 後に `CONFIRMING` を経て `Visible YES / TRACKING_ACTIVE` で元の位置に再表示されること、再度失探で再び消えること
+
 ### 修正指示書 v12 対応 — Relocalization Validation の Strong / Acceptable / Reject 化（2026-10-05、実機確認待ち）
 
 実機ログ（`Lost 8443ms`、`KF15 50i 2.44px ncc 0.67`、`Inlier 50/25 OK`、`Error 2.44/1.50px NG`、`Ratio 0.85/0.50 OK`、`Cells 7/9 OK`、`VAL 0`）: 強い候補が再投影誤差の単一閾値だけで落ちていた。**strict 1.5 px は動かさず**、限定的な relaxed 範囲を追加し、複数の品質条件 + Relocalization 専用の Jump 検証 + 既存の確認 / 事後監視で安全性を担保する（§27）。**PnP / LK / NCC 粗ゲート / Plane / Map reset / Keyframe 生成 / 通常 Tracking の Jump Gate は変更していない**（§1、§24）。

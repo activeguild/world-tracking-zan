@@ -208,6 +208,8 @@ export interface HudStats {
   cameraWorld?: number[] | null;
   /** Placed objects' world positions (m); must not move with the camera. */
   objects?: { id: number; position: number[] }[];
+  /** Whether the objects are shown and why not (v13 §15–§16). */
+  objectVisibility?: { visible: boolean; reason: string } | null;
   /** Frame capture time, pose arrival time, render-time pose age (ms). */
   timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
   reloc?: {
@@ -530,8 +532,14 @@ export class DebugOverlay {
 
     // ---- OBJECT ----
     rows.push(section("OBJECT"));
+    const ov = s.objectVisibility;
+    if (ov) {
+      rows.push(row("Visible", ov.visible ? "YES" : "NO", ov.visible ? undefined : "hud-warn"));
+      rows.push(row("Reason", ov.reason));
+    }
     if (s.objects && s.objects.length) {
-      for (const o of s.objects.slice(0, 2)) rows.push(row(`Obj${o.id}`, xyz(o.position)));
+      // Transforms are kept while hidden (v13 §12); the HUD says "hidden" instead of a stale-looking position.
+      for (const o of s.objects.slice(0, 2)) rows.push(row(`Obj${o.id}`, ov && !ov.visible ? "hidden" : xyz(o.position)));
     } else {
       rows.push(row("Obj", "—"));
     }

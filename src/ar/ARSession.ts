@@ -25,6 +25,7 @@ import type {
   MotionDiagnostics,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
+import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
 import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
@@ -138,10 +139,12 @@ export interface ARStats {
   poseStale: boolean;
   /** Three.js camera position in world meters (null before the world exists). */
   cameraWorldPosition: number[] | null;
-  /** How long tracking has been lost (ms), 0 while tracking; objects hold their pose meanwhile. */
+  /** How long tracking has been lost (ms), 0 while tracking. */
   lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
   objects: { id: number; position: number[]; yaw: number }[];
+  /** Whether the placed objects are shown, and why not (v13 §15–§16). */
+  objectVisibility: { visible: boolean; reason: ObjectVisibilityReason };
   /** Focal length in processing pixels. */
   focalPx: number;
   /** Frame-synchronized display active. */
@@ -210,6 +213,7 @@ export class ARSession {
   private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
   private planeRecovery: PlaneRecoveryDiagnostics | null = null;
+  private objectVisibility: ObjectVisibilityDecision = { visible: false, reason: "WORLD_NOT_READY" };
   private loggedPlaneRecoveries = 0;
   private loggedPlaneStage: string | null = null;
   private planeWasFound = false;
@@ -246,7 +250,7 @@ export class ARSession {
     this.worldAnchor = new WorldAnchor({ assumedPlaneDistanceMeters: w.assumedPlaneDistanceMeters });
     this.arCamera = new ARCamera(w.near, w.far, w.positionSmoothing, w.rotationSmoothing, options.threeCamera);
     this.arCamera.setSmoothing(w.smoothing);
-    this.world = new ARWorld(w.holdPoseOnLostMs);
+    this.world = new ARWorld();
     this.externalScene = options.threeScene ?? null;
     this.arRenderer = options.threeCanvas ? new ARRenderer(options.threeCanvas, options.threeScene) : null;
     const scene = this.arRenderer?.scene ?? this.externalScene;
@@ -471,6 +475,7 @@ export class ARSession {
       poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
       lostMs: this.world.lostDurationMs(performance.now()),
+      objectVisibility: this.objectVisibility,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
@@ -781,7 +786,25 @@ export class ARSession {
     // Camera pose → Three.js camera. Objects are not touched here (修正指示書 §11, §16).
     if (pose && tracking) this.arCamera.setPose(pose, r.timestamp / 1000);
     const nowMs = performance.now();
-    this.world.updateTracking(tracking, nowMs);
+    this.world.markTracking(tracking, nowMs);
+    // Object visibility follows the trust in the current pose (v13): hidden
+    // while lost / relocalizing / confirming, shown again on a fresh map pose.
+    // The map, the world anchor and the keyframes are not touched by this.
+    const decision = decideObjectVisibility({
+      state: this._state,
+      worldReady: true,
+      worldEstablished: r.worldEstablished,
+      framesSinceTracked: r.mapPose.framesSinceTracked,
+      lostFrameTolerance: this.config.state.mapLostFrameTolerance,
+      relocalized: r.mapPose.relocalized,
+      poseFinite: pose !== null && Array.from(pose.position).every(Number.isFinite) && Array.from(pose.quaternion).every(Number.isFinite),
+      currentlyVisible: !this.world.isHidden,
+    });
+    if (decision.visible !== this.objectVisibility.visible || decision.reason !== this.objectVisibility.reason) {
+      this.logger.info(`OBJECTS ${decision.visible ? "visible" : "hidden"} (${decision.reason}) at frame ${r.frameId}`);
+    }
+    this.objectVisibility = decision;
+    this.world.setObjectsVisible(decision.visible);
     // Objects' own animation, world space, independent of the camera (§14, §29).
     if (this.lastWorldUpdateMs > 0) this.world.update(Math.min(0.1, (nowMs - this.lastWorldUpdateMs) / 1000));
     this.lastWorldUpdateMs = nowMs;

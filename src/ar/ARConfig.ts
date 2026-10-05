@@ -422,7 +422,13 @@ export interface RelocalizationConfig {
 export interface WorldConfig {
   /** Assumed camera→plane distance (m) when the world is created; fixes the monocular scale. */
   assumedPlaneDistanceMeters: number;
-  /** Keep rendering objects at the last pose for this long after tracking is lost (ms, spec §33). */
+  /**
+   * No longer used for object visibility (v13 §1–§2, §5): objects are hidden
+   * as soon as the state machine declares the loss (its own
+   * `state.mapLostFrameTolerance` / `lostFrameTolerance` hysteresis) and
+   * shown again only on a fresh, confirmed map pose. Kept for configuration
+   * compatibility.
+   */
   holdPoseOnLostMs: number;
   /**
    * After the world was lost, show generic recovery guidance first; the
@@ -709,8 +715,7 @@ export const DEFAULT_CONFIG: ARConfig = {
   },
   world: {
     assumedPlaneDistanceMeters: 0.5,
-    // Debug value (v3 §14): a short loss must not hide the content; the pose
-    // is held at the last good one. Tighten for production.
+    // Unused since v13 (objects hide on the engine's own lost hysteresis).
     holdPoseOnLostMs: 10000,
     relocGuidanceDelayMs: 2000,
     smoothing: false,

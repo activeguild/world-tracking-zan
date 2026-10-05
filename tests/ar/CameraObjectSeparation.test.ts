@@ -14,7 +14,7 @@ const NO_SMOOTHING = { minCutoff: 1000, beta: 0, dCutoff: 1 };
 
 function setup() {
   const scene = new THREE.Scene();
-  const world = new ARWorld(1500);
+  const world = new ARWorld();
   world.attach(scene, false);
   world.setWorldReady(true);
   const cam = new ARCamera(0.01, 50, NO_SMOOTHING, NO_SMOOTHING);

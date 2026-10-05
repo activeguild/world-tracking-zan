@@ -292,6 +292,19 @@ relaxed bound the error itself is the reason. Validated strong candidates
 rank above acceptable ones. The HUD shows `Error 2.44/1.50px strict NG` /
 `2.44/3.00px relaxed OK` / `Level ACCEPTABLE`.
 
+Object visibility (v13): placed objects follow the trust in the *current*
+camera pose, never the last pose. `src/ar/ObjectVisibility.ts` decides
+`visible` + `reason` (`TRACKING_ACTIVE | TRACKING_LOST | RELOCALIZING |
+CONFIRMING | WORLD_NOT_READY | POSE_INVALID`): hidden as soon as the state
+machine declares the loss (its own `state.mapLostFrameTolerance`
+hysteresis — a tolerated PnP dropout keeps what is shown), hidden while
+relocalizing and while an applied relocalization is still in its
+post-relocalization monitor window (`CONFIRMING`, strong or acceptable
+alike), shown again only on a fresh map pose. Hiding keeps the transforms,
+the world anchor, the map and the keyframes; the render loop, camera and
+relocalization keep running. The 10 s `holdPoseOnLostMs` hold is gone. HUD
+`OBJECT`: `Visible NO / Reason RELOCALIZING`, `Obj1 hidden`.
+
 ## Tests
 
 ```bash
