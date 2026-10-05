@@ -524,7 +524,9 @@ export class VisionEngine {
       }
       if (tracker.framesSinceTracked > 0 && this.worldEstablished && (pending !== null || scheduled)) {
         const tr0 = now();
-        const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k);
+        // The held pose and scene depth feed the relocalization-specific jump
+        // limits (v12 §9); the normal-tracking gate is still not applied here.
+        const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k, tracker.pose, tracker.sceneDepth);
         this.timing.reloc = now() - tr0;
         const d = r.pose ? poseDelta(r.pose, tracker.pose) : { translation: 0, rotationDeg: 0 };
         this.relocDiagnostics = r.diagnostics;
@@ -539,7 +541,7 @@ export class VisionEngine {
           reason: r.reason,
           rejectCode: r.rejectCode,
           meanReprojectionErrorPx: r.meanReprojectionErrorPx,
-          errorTier: r.errorTier,
+          level: r.level,
           matchScore: r.matchScore,
           inlierRatio: r.inlierRatio,
           spatialCells: r.spatialCells,
@@ -549,13 +551,13 @@ export class VisionEngine {
         };
         let apply = false;
         if (r.success && r.pose) {
-          // v12: an acceptable-tier candidate (error above the strict bound)
+          // v12 §10–§11: an acceptable candidate (error above the strict bound)
           // is never applied at once — it needs at least one confirmation
           // frame whatever the immediate-apply rule says.
-          const tier = r.errorTier ?? "strict";
-          const needed = requiredConfirmations(tier, rc.confirmationFrames);
+          const level = r.level ?? "strong";
+          const needed = requiredConfirmations(level, rc.confirmationFrames);
           const immediate =
-            needed <= 0 || (tier === "strict" && r.inlierCount >= rc.immediateInliers && r.meanReprojectionErrorPx <= rc.immediateMaxErrorPx);
+            needed <= 0 || (level === "strong" && r.inlierCount >= rc.immediateInliers && r.meanReprojectionErrorPx <= rc.immediateMaxErrorPx);
           if (pending) {
             // Confirmation: the new candidate must land where the pending one did.
             const c = poseDelta(r.pose, pending.result.pose!);
@@ -1390,7 +1392,7 @@ function emptyReloc(): RelocalizationOutput {
     reason: null,
     rejectCode: null,
     meanReprojectionErrorPx: 0,
-    errorTier: null,
+    level: null,
     matchScore: 0,
     inlierRatio: 0,
     spatialCells: 0,

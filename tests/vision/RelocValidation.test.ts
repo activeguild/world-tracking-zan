@@ -12,22 +12,33 @@ import {
 /**
  * 修正指示書 v9: the relocalization validation evaluates every condition
  * independently, keeps all PASS / FAIL flags, names the reject reason and
- * never uses the normal-tracking jump gate. v12 adds the acceptable error
- * tier: tested with the tier disabled (`T`, the v9 behaviour) and with the
- * default config (`TA`).
+ * never uses the normal-tracking jump gate. v12 adds the strong /
+ * acceptable / reject levels with a relaxed error range, the relaxed-range
+ * NCC requirement and relocalization-specific jump limits: tested with the
+ * relaxed range disabled (`T`, the v9 behaviour) and with the default
+ * config (`TA`).
  */
 const cfg = resolveConfig().relocalization;
-/** v9 thresholds: acceptable tier disabled (equal to the strict bound). */
+/** v9 thresholds: relaxed range disabled (equal to the strict bound), no NCC / jump limits. */
 const T: RelocValidationThresholds = {
   minInliers: cfg.minInliers,
   maxMeanErrorPx: cfg.maxMeanErrorPx,
-  acceptableMeanErrorPx: cfg.maxMeanErrorPx,
+  relaxedMeanErrorPx: cfg.maxMeanErrorPx,
   minInlierRatio: cfg.minInlierRatio,
   minSpatialCells: cfg.minSpatialCells,
   minSpatialCoverage: cfg.minSpatialCoverage,
 };
-/** Default config: acceptable tier enabled (v12). */
-const TA: RelocValidationThresholds = { ...T, acceptableMeanErrorPx: cfg.acceptableMeanErrorPx };
+/** Default config (v12): relaxed range, NCC requirement and jump limits (depth 10 map units). */
+const DEPTH = 10;
+const TA: RelocValidationThresholds = {
+  ...T,
+  relaxedMeanErrorPx: cfg.relaxedMeanErrorPx,
+  relaxedMinMatchScore: cfg.relaxedMinMatchScore,
+  maxTranslationJump: cfg.maxTranslationJumpDepthRatio * DEPTH,
+  maxRotationJumpDeg: cfg.maxRotationJumpDeg,
+};
+/** The on-device return (v12 §18): 50i / 2.44 px / ratio 0.85 / 7 cells / NCC 0.67. */
+const DEVICE: Partial<RelocCandidateMeasures> = { inliers: 50, reprojectionErrorPx: 2.44, inlierRatio: 0.85, coveredCells: 7, spatialCoverage: 0.7, matchScore: 0.67 };
 
 function good(over: Partial<RelocCandidateMeasures> = {}): RelocCandidateMeasures {
   return {
@@ -53,8 +64,8 @@ describe("validateRelocalizationCandidate (v9 §5–§8)", () => {
     expect(v.passed).toBe(true);
     expect(v.rejectReason).toBeNull();
     expect(stageOfValidation(v)).toBe("ok");
-    expect(v.errorTier).toBe("strict");
-    expect(v.reprojectionAcceptable).toBe(false);
+    expect(v.level).toBe("strong");
+    expect(v.reprojectionStrictOk).toBe(true);
     // Thresholds are echoed from the config, never hard-coded.
     expect(v.requiredInliers).toBe(cfg.minInliers);
     expect(v.maxReprojectionErrorPx).toBe(cfg.maxMeanErrorPx);
@@ -71,7 +82,7 @@ describe("validateRelocalizationCandidate (v9 §5–§8)", () => {
     expect(stageOfValidation(v)).toBe("pnp_inliers");
   });
 
-  it("Test 3: reprojection error above the strict limit with the tier disabled → rejectReason reprojection_error (the on-device 35i / 2.93px case)", () => {
+  it("Test 3: reprojection error above the strict limit with the relaxed range disabled → rejectReason reprojection_error (the earlier on-device 35i / 2.93px case)", () => {
     const v = validateRelocalizationCandidate(good({ inliers: 35, reprojectionErrorPx: 2.93, inlierRatio: 0.61, coveredCells: 4, spatialCoverage: 0.58 }), T);
     expect(v.inliersPassed).toBe(true);
     expect(v.reprojectionPassed).toBe(cfg.maxMeanErrorPx >= 2.93);
@@ -81,71 +92,118 @@ describe("validateRelocalizationCandidate (v9 §5–§8)", () => {
     // reprojection error, and the breakdown says exactly that.
     expect(v.passed).toBe(false);
     expect(v.rejectReason).toBe("reprojection_error");
-    expect(v.errorTier).toBe("rejected");
+    expect(v.level).toBe("reject");
     expect(stageOfValidation(v)).toBe("reprojection");
     expect(v.reprojectionErrorPx).toBe(2.93);
     expect(v.maxReprojectionErrorPx).toBe(cfg.maxMeanErrorPx);
-    expect(v.acceptableReprojectionErrorPx).toBe(cfg.maxMeanErrorPx);
+    expect(v.relaxedReprojectionErrorPx).toBe(cfg.maxMeanErrorPx);
   });
 
-  // ---- v12: acceptable error tier ----
-  it("v12 Test 1: the on-device 2.44 px return passes as ACCEPTABLE when inliers, ratio, cells and pose all pass; strict stays 1.5 px", () => {
-    expect(cfg.maxMeanErrorPx).toBe(1.5); // the strict bound is not moved
-    expect(cfg.acceptableMeanErrorPx).toBeGreaterThanOrEqual(2.44);
-    const v = validateRelocalizationCandidate(good({ inliers: 35, reprojectionErrorPx: 2.44, inlierRatio: 0.61, coveredCells: 4, spatialCoverage: 0.58 }), TA);
-    expect(v.reprojectionPassed).toBe(false); // strict condition still fails …
-    expect(v.reprojectionAcceptable).toBe(true); // … but the tier rescues it
-    expect(v.errorTier).toBe("acceptable");
+  // ---- v12: strong / acceptable / reject ----
+  it("v12 Test 1 / 11: a strong candidate (error within the strict bound) is accepted as before", () => {
+    const v = validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 1.2 }), TA);
+    expect(v.level).toBe("strong");
+    expect(v.passed).toBe(true);
+    expect(v.reprojectionStrictOk).toBe(true);
+    expect(v.reprojectionRelaxedOk).toBe(true);
+    expect(v.rejectReason).toBeNull();
+    expect(stageOfValidation(v)).toBe("ok");
+    // Unchanged strict bound; the relaxed range never widens the strong one.
+    expect(cfg.maxMeanErrorPx).toBe(1.5);
+    expect(v.maxReprojectionErrorPx).toBe(1.5);
+    // A strong candidate does not need the relaxed-range NCC (the coarse gate already applied).
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 1.2, matchScore: 0.3 }), TA).level).toBe("strong");
+  });
+
+  it("v12 Test 2: the on-device 50i / 2.44px / 0.85 / 7 cells / NCC 0.67 return → strict NG, relaxed OK, level ACCEPTABLE, accepted", () => {
+    expect(cfg.relaxedMeanErrorPx).toBeGreaterThanOrEqual(2.44);
+    expect(cfg.relaxedMeanErrorPx).toBeLessThan(5); // §24: never a large relaxation
+    const v = validateRelocalizationCandidate(good(DEVICE), TA);
+    expect(v.reprojectionStrictOk).toBe(false);
+    expect(v.reprojectionRelaxedOk).toBe(true);
+    expect(v.inliersPassed).toBe(true);
+    expect(v.ratioPassed).toBe(true);
+    expect(v.spatialPassed).toBe(true);
+    expect(v.nccPassed).toBe(true);
+    expect(v.posePassed).toBe(true);
+    expect(v.level).toBe("acceptable");
     expect(v.passed).toBe(true);
     expect(v.rejectReason).toBeNull();
     expect(stageOfValidation(v)).toBe("ok");
-    expect(v.acceptableReprojectionErrorPx).toBe(cfg.acceptableMeanErrorPx);
-    // A plainly good candidate is still strict.
-    expect(validateRelocalizationCandidate(good(), TA).errorTier).toBe("strict");
+    expect(v.relaxedReprojectionErrorPx).toBe(cfg.relaxedMeanErrorPx);
+    expect(v.requiredNccScore).toBe(cfg.relaxedMinMatchScore);
   });
 
-  it("v12 Test 2: within the acceptable bound the candidate is carried by the other conditions — any of them failing rejects it, named as the reason", () => {
-    const base = { inliers: 35, reprojectionErrorPx: 2.44, inlierRatio: 0.61, coveredCells: 4, spatialCoverage: 0.58 };
-    const ratio = validateRelocalizationCandidate(good({ ...base, inlierRatio: cfg.minInlierRatio - 0.05 }), TA);
-    expect(ratio.passed).toBe(false);
-    expect(ratio.errorTier).toBe("rejected");
-    expect(ratio.reprojectionAcceptable).toBe(false);
-    expect(ratio.rejectReason).toBe("inlier_ratio");
-    const cells = validateRelocalizationCandidate(good({ ...base, coveredCells: cfg.minSpatialCells - 1 }), TA);
-    expect(cells.passed).toBe(false);
-    expect(cells.rejectReason).toBe("spatial_distribution");
-    const inliers = validateRelocalizationCandidate(good({ ...base, inliers: cfg.minInliers - 1 }), TA);
-    expect(inliers.passed).toBe(false);
-    expect(inliers.rejectReason).toBe("inliers");
-    const pose = validateRelocalizationCandidate(good({ ...base, poseFinite: false }), TA);
-    expect(pose.passed).toBe(false);
-    expect(pose.rejectReason).toBe("pose_invalid");
-    // Jump stays diagnostic in the acceptable tier too (v9 §16–§17).
-    const jump = validateRelocalizationCandidate(good({ ...base, translationJump: 25, rotationJumpDeg: 150 }), TA);
-    expect(jump.passed).toBe(true);
-    expect(jump.errorTier).toBe("acceptable");
-  });
-
-  it("v12 Test 3: beyond the acceptable bound the error itself rejects, whatever the other conditions", () => {
-    const v = validateRelocalizationCandidate(good({ reprojectionErrorPx: cfg.acceptableMeanErrorPx + 0.01 }), TA);
-    expect(v.passed).toBe(false);
-    expect(v.errorTier).toBe("rejected");
+  it("v12 Test 3: error above the relaxed bound → reject, reason reprojection_error", () => {
+    const v = validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 3.5 }), TA);
+    expect(v.level).toBe("reject");
     expect(v.rejectReason).toBe("reprojection_error");
     expect(stageOfValidation(v)).toBe("reprojection");
-    // Exactly at the bound is still acceptable.
-    expect(validateRelocalizationCandidate(good({ reprojectionErrorPx: cfg.acceptableMeanErrorPx }), TA).errorTier).toBe("acceptable");
-    // A bound at or below the strict one disables the tier.
-    const off = validateRelocalizationCandidate(good({ reprojectionErrorPx: 2.0 }), { ...TA, acceptableMeanErrorPx: 1.0 });
-    expect(off.errorTier).toBe("rejected");
-    expect(off.acceptableReprojectionErrorPx).toBe(cfg.maxMeanErrorPx);
-    const undef = validateRelocalizationCandidate(good({ reprojectionErrorPx: 2.0 }), { ...T, acceptableMeanErrorPx: undefined });
-    expect(undef.errorTier).toBe("rejected");
+    expect(v.reprojectionRelaxedOk).toBe(false);
+    // Exactly at the relaxed bound is still acceptable; a bound ≤ strict disables the range.
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: cfg.relaxedMeanErrorPx }), TA).level).toBe("acceptable");
+    const off = validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 2.0 }), { ...TA, relaxedMeanErrorPx: 1.0 });
+    expect(off.level).toBe("reject");
+    expect(off.relaxedReprojectionErrorPx).toBe(cfg.maxMeanErrorPx);
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 2.0 }), { ...T, relaxedMeanErrorPx: undefined }).level).toBe("reject");
   });
 
-  it("v12 Test 4: an acceptable-tier candidate always needs a confirmation frame; strict follows the configured count", () => {
-    expect(requiredConfirmations("strict", cfg.confirmationFrames)).toBe(cfg.confirmationFrames);
-    expect(requiredConfirmations("strict", 0)).toBe(0); // "always apply at once" config
-    expect(requiredConfirmations("acceptable", 0)).toBe(1); // … except for the acceptable tier
+  it("v12 Test 4: bad inlier ratio in the relaxed range → reject, reason inlier_ratio", () => {
+    const v = validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 2.4, inlierRatio: 0.35 }), TA);
+    expect(v.level).toBe("reject");
+    expect(v.rejectReason).toBe("inlier_ratio");
+    expect(stageOfValidation(v)).toBe("ratio");
+  });
+
+  it("v12 Test 5: bad spatial distribution in the relaxed range → reject, reason spatial_distribution", () => {
+    const v = validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 2.4, coveredCells: 2 }), TA);
+    expect(v.level).toBe("reject");
+    expect(v.rejectReason).toBe("spatial_distribution");
+    expect(stageOfValidation(v)).toBe("spatial");
+  });
+
+  it("v12 Test 6: bad NCC in the relaxed range → reject, reason ncc", () => {
+    const v = validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 2.4, matchScore: 0.3 }), TA);
+    expect(v.level).toBe("reject");
+    expect(v.nccPassed).toBe(false);
+    expect(v.rejectReason).toBe("ncc");
+    expect(stageOfValidation(v)).toBe("ncc");
+    // Too few inliers is reported before the NCC (§17 order).
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 2.4, matchScore: 0.3, inliers: cfg.minInliers - 1 }), TA).rejectReason).toBe("inliers");
+  });
+
+  it("v12 Test 7: an invalid pose rejects whatever the other values, reason pose_invalid", () => {
+    const v = validateRelocalizationCandidate(good({ ...DEVICE, poseFinite: false }), TA);
+    expect(v.level).toBe("reject");
+    expect(v.rejectReason).toBe("pose_invalid");
+    expect(stageOfValidation(v)).toBe("invalid");
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: NaN }), TA).rejectReason).toBe("pose_invalid");
+  });
+
+  it("v12 Test 8 / 9: the relocalization-specific jump limits reject in the relaxed range too (translation / rotation)", () => {
+    const limitT = cfg.maxTranslationJumpDepthRatio * DEPTH;
+    const t = validateRelocalizationCandidate(good({ ...DEVICE, translationJump: limitT + 0.01, rotationJumpDeg: 5 }), TA);
+    expect(t.level).toBe("reject");
+    expect(t.translationJumpPassed).toBe(false);
+    expect(t.rejectReason).toBe("translation_jump");
+    expect(stageOfValidation(t)).toBe("jump");
+    expect(t.maxTranslationJump).toBe(limitT);
+    const r = validateRelocalizationCandidate(good({ ...DEVICE, translationJump: 0.1, rotationJumpDeg: cfg.maxRotationJumpDeg + 1 }), TA);
+    expect(r.level).toBe("reject");
+    expect(r.rotationJumpPassed).toBe(false);
+    expect(r.rejectReason).toBe("rotation_jump");
+    // The same limits apply to a strong candidate (§9, §17).
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, reprojectionErrorPx: 1.0, translationJump: limitT + 1 }), TA).rejectReason).toBe("translation_jump");
+    // Within the limits (or unknown) the jump passes; with no limits configured it is diagnostic only (v9 §16–§17 behaviour).
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, translationJump: limitT - 0.01, rotationJumpDeg: cfg.maxRotationJumpDeg - 1 }), TA).level).toBe("acceptable");
+    expect(validateRelocalizationCandidate(good({ ...DEVICE, translationJump: NaN, rotationJumpDeg: NaN }), TA).level).toBe("acceptable");
+    expect(validateRelocalizationCandidate(good({ translationJump: 25, rotationJumpDeg: 150 }), T).passed).toBe(true);
+  });
+
+  it("v12 §10–§11: an acceptable candidate always needs a confirmation frame; strong follows the configured count", () => {
+    expect(requiredConfirmations("strong", cfg.confirmationFrames)).toBe(cfg.confirmationFrames);
+    expect(requiredConfirmations("strong", 0)).toBe(0); // "always apply at once" config
+    expect(requiredConfirmations("acceptable", 0)).toBe(1); // … except for an acceptable candidate
     expect(requiredConfirmations("acceptable", cfg.confirmationFrames)).toBe(Math.max(1, cfg.confirmationFrames));
     expect(requiredConfirmations("acceptable", 2)).toBe(2);
   });
@@ -183,8 +241,9 @@ describe("validateRelocalizationCandidate (v9 §5–§8)", () => {
     expect(v.ratioPassed).toBe(false);
     expect(v.spatialPassed).toBe(false);
     expect(v.passed).toBe(false);
-    // The reason is the first in the fixed order; the others stay visible.
-    expect(v.rejectReason).toBe("reprojection_error");
+    // The reason is the first in the fixed order (v12 §17: ratio and spatial
+    // come before the reprojection error); the others stay visible.
+    expect(v.rejectReason).toBe("inlier_ratio");
   });
 
   it("Test 7: a non-finite pose → rejectReason pose_invalid, whatever the other values", () => {
@@ -197,7 +256,7 @@ describe("validateRelocalizationCandidate (v9 §5–§8)", () => {
     expect(v2.rejectReason).toBe("pose_invalid");
   });
 
-  it("Test 8: a large pose jump from the held pose is diagnostic only and never rejects a relocalization candidate (v9 §16–§17)", () => {
+  it("Test 8: without relocalization jump limits a large pose jump is diagnostic only (v9 §16–§17; v12 adds optional limits)", () => {
     const v = validateRelocalizationCandidate(good({ translationJump: 25, rotationJumpDeg: 150 }), T);
     expect(v.passed).toBe(true);
     expect(v.rejectReason).toBeNull();

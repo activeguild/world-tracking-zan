@@ -643,7 +643,7 @@ export class ARSession {
       this.logger.info(
         `RELOCALIZATION ${rl.attempt === "success" ? "APPLIED" : "CANDIDATE"} at frame ${r.frameId} (kf ${rl.keyframeId})\n` +
           `translation = ${len(rl.jumpTranslation)}\nrotation = ${rl.jumpRotationDeg.toFixed(1)}deg\n` +
-          `inliers = ${rl.inlierCount}\nerror = ${rl.meanReprojectionErrorPx.toFixed(2)}px${rl.errorTier === "acceptable" ? ` (acceptable tier ≤ ${this.config.relocalization.acceptableMeanErrorPx}px, confirmation required)` : ""}\nmatch = ${rl.matchScore.toFixed(2)}\n` +
+          `inliers = ${rl.inlierCount}\nerror = ${rl.meanReprojectionErrorPx.toFixed(2)}px${rl.level === "acceptable" ? ` (ACCEPTABLE: relaxed ≤ ${this.config.relocalization.relaxedMeanErrorPx}px, confirmation required)` : rl.level === "strong" ? " (STRONG)" : ""}\nmatch = ${rl.matchScore.toFixed(2)}\n` +
           `inlier ratio = ${rl.inlierRatio.toFixed(2)}\ncells = ${rl.spatialCells}/9`,
       );
       this.loggedRelocReject = null;

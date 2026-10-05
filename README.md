@@ -278,16 +278,19 @@ are about the current frame's search (`candidateFound = stage === "candidate"`,
 detector's grace period is `previousCandidateHeld`. Recovery state:
 `inactive | starting | warmup | candidate | stable`.
 
-Relocalization error tiers (v12): the strict acceptance stays at
-`relocalization.maxMeanErrorPx` (1.5 px). A candidate above it but within
-`acceptableMeanErrorPx` (3.0 px) passes as the *acceptable* tier only when
-every other condition (inliers, inlier ratio, spatial cells, coverage, finite
-pose) passes, and it is then always held for a confirmation frame — never
-applied at once, whatever `confirmationFrames` or the immediate-apply rule
-say. Beyond the acceptable bound the error rejects on its own; within it a
-failing companion condition is the named reject reason. Validated strict
-candidates rank above acceptable ones. The HUD shows `Error 2.44/1.50px
-ACCEPT (≤ 3.00)` and marks the candidate `ACC`.
+Relocalization validation levels (v12): `strong | acceptable | reject`. The
+strict acceptance stays at `relocalization.maxMeanErrorPx` (1.5 px, strong).
+A candidate above it but within `relaxedMeanErrorPx` (3.0 px) is *acceptable*
+only when every other condition passes — inliers, inlier ratio, spatial
+cells, coverage, finite pose, coarse NCC ≥ `relaxedMinMatchScore` (0.5) and
+the relocalization-specific jump limits (`maxTranslationJumpDepthRatio` ×
+scene depth, `maxRotationJumpDeg`, generous by design and applied to every
+level) — and it is then always held for a confirmation frame, never applied
+at once. Reject reasons follow the order pose → inliers → ratio → spatial →
+ncc → translation jump → rotation jump → reprojection error; beyond the
+relaxed bound the error itself is the reason. Validated strong candidates
+rank above acceptable ones. The HUD shows `Error 2.44/1.50px strict NG` /
+`2.44/3.00px relaxed OK` / `Level ACCEPTABLE`.
 
 ## Tests
 

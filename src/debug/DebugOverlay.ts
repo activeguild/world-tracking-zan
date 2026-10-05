@@ -47,9 +47,15 @@ export interface HudRelocDiagnostics {
       requiredInliers: number;
       errorPx: number;
       maxErrorPx: number;
-      /** Acceptable error bound and the tier the candidate landed in (v12). */
-      acceptableErrorPx: number;
-      errorTier: string;
+      /** Relaxed error bound and the validation level (v12 §7, §14). */
+      relaxedErrorPx: number;
+      level: string;
+      /** Coarse NCC vs the relaxed-range requirement, jump vs the relocalization limits (v12 §5, §9). */
+      ncc: number;
+      requiredNcc: number;
+      nccPassed: boolean;
+      translationJumpPassed: boolean;
+      rotationJumpPassed: boolean;
       ratio: number;
       minRatio: number;
       cells: number;
@@ -210,8 +216,8 @@ export interface HudStats {
     attempt: string;
     inliers: number;
     errorPx: number;
-    /** strict / acceptable / rejected / null (v12). */
-    errorTier: string | null;
+    /** strong / acceptable / reject / null (v12 §7). */
+    level: string | null;
     match: number;
     inlierRatio: number;
     spatialCells: number;
@@ -395,18 +401,26 @@ export class DebugOverlay {
             // v9 §21: every condition with its value, its threshold and PASS / FAIL.
             const ok = (p: boolean) => (p ? "OK" : "NG");
             rows.push(row("Inlier", `${v.inliers}/${v.requiredInliers}  ${ok(v.inliersPassed)}`, v.inliersPassed ? undefined : "hud-warn"));
-            // v12: strict bound, then the acceptable tier (ACCEPT = carried by the other conditions, confirmation required).
-            const errorText =
-              v.errorTier === "acceptable"
-                ? `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  ACCEPT (≤ ${v.acceptableErrorPx.toFixed(2)})`
-                : `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  ${ok(v.reprojectionPassed)}${!v.reprojectionPassed && v.acceptableErrorPx > v.maxErrorPx ? `  (acc ≤ ${v.acceptableErrorPx.toFixed(2)})` : ""}`;
-            rows.push(row("Error", errorText, v.reprojectionPassed ? undefined : "hud-warn"));
+            // v12 §14: strict bound, then the relaxed bound on its own row when it exists.
+            rows.push(row("Error", `${v.errorPx.toFixed(2)}/${v.maxErrorPx.toFixed(2)}px  strict ${ok(v.reprojectionPassed)}`, v.reprojectionPassed ? undefined : "hud-warn"));
+            if (v.relaxedErrorPx > v.maxErrorPx) {
+              const relaxedOk = v.errorPx <= v.relaxedErrorPx;
+              rows.push(row("", `${v.errorPx.toFixed(2)}/${v.relaxedErrorPx.toFixed(2)}px  relaxed ${ok(relaxedOk)}`, relaxedOk ? undefined : "hud-warn"));
+            }
             rows.push(row("Ratio", `${v.ratio.toFixed(2)}/${v.minRatio.toFixed(2)}  ${ok(v.ratioPassed)}`, v.ratioPassed ? undefined : "hud-warn"));
             rows.push(row("Cells", `${v.cells}/${v.totalCells} (min ${v.minCells})  ${ok(v.spatialPassed)}`, v.spatialPassed ? undefined : "hud-warn"));
             rows.push(
               row("Cover", `${v.coverage.toFixed(2)}${v.minCoverage > 0 ? `/${v.minCoverage.toFixed(2)}  ${ok(v.coveragePassed)}` : ""}`, v.coveragePassed ? undefined : "hud-warn"),
             );
+            // NCC matters for the relaxed range (v12 §5); jump limits are the relocalization-specific ones (§9).
+            if (Number.isFinite(v.requiredNcc)) {
+              rows.push(row("NCC", `${v.ncc.toFixed(2)}/${v.requiredNcc.toFixed(2)}  ${ok(v.nccPassed)}`, v.nccPassed ? undefined : "hud-warn"));
+            }
+            if (!v.translationJumpPassed || !v.rotationJumpPassed) {
+              rows.push(row("Jump", `${!v.translationJumpPassed ? "translation " : ""}${!v.rotationJumpPassed ? "rotation " : ""}NG (reloc limit)`, "hud-warn"));
+            }
             if (!v.posePassed) rows.push(row("Pose", "invalid", "hud-warn"));
+            rows.push(row("Level", v.level.toUpperCase(), v.level === "reject" ? "hud-warn" : undefined));
             rows.push(row("Reject", v.rejectReason ?? "-", v.rejectReason ? "hud-warn" : undefined));
           } else {
             // Dropped out before PnP: the stage says where.
@@ -421,7 +435,7 @@ export class DebugOverlay {
         rows.push(
           row(
             r.attempt === "success" ? "Apply" : "Cand",
-            `KF${r.keyframeId} ${r.inliers}i ${r.errorPx.toFixed(2)}px${r.errorTier === "acceptable" ? " ACC" : ""} match ${r.match.toFixed(2)}`,
+            `KF${r.keyframeId} ${r.inliers}i ${r.errorPx.toFixed(2)}px${r.level === "acceptable" ? " ACCEPTABLE" : r.level === "strong" ? " STRONG" : ""} match ${r.match.toFixed(2)}`,
           ),
         );
         rows.push(row("Jump", `${cm(r.jumpM)} / ${r.jumpDeg.toFixed(1)}°`));

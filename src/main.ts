@@ -239,6 +239,8 @@ const RELOC_FAIL_SHORT: Record<string, string> = {
   reprojection: "reprojection_error",
   ratio: "inlier_ratio",
   spatial: "spatial_distribution",
+  ncc: "ncc",
+  jump: "pose_jump",
 };
 
 function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): HudRelocDiagnostics | null {
@@ -268,8 +270,13 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
                 requiredInliers: b.validation.requiredInliers,
                 errorPx: b.validation.reprojectionErrorPx,
                 maxErrorPx: b.validation.maxReprojectionErrorPx,
-                acceptableErrorPx: b.validation.acceptableReprojectionErrorPx,
-                errorTier: b.validation.errorTier,
+                relaxedErrorPx: b.validation.relaxedReprojectionErrorPx,
+                level: b.validation.level,
+                ncc: b.validation.nccScore,
+                requiredNcc: b.validation.requiredNccScore,
+                nccPassed: b.validation.nccPassed,
+                translationJumpPassed: b.validation.translationJumpPassed,
+                rotationJumpPassed: b.validation.rotationJumpPassed,
                 ratio: b.validation.inlierRatio,
                 minRatio: b.validation.minInlierRatio,
                 cells: b.validation.coveredCells,
@@ -433,7 +440,7 @@ function refreshHud(): void {
           attempt: s.relocalization.attempt,
           inliers: s.relocalization.inlierCount,
           errorPx: s.relocalization.meanReprojectionErrorPx,
-          errorTier: s.relocalization.errorTier,
+          level: s.relocalization.level,
           match: s.relocalization.matchScore,
           inlierRatio: s.relocalization.inlierRatio,
           spatialCells: s.relocalization.spatialCells,

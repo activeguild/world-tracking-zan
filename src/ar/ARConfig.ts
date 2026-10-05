@@ -351,18 +351,36 @@ export interface RelocalizationConfig {
   minInliers: number;
   /** Stop trying more candidates once this many inliers are found. */
   goodInliers: number;
-  /** Strict acceptance: mean reprojection error at or below this (px). */
+  /** Strict reprojection bound: a candidate at or below this is `strong` (v12 §3.1). */
   maxMeanErrorPx: number;
   /**
-   * Acceptable tier (v12): a candidate whose error is above `maxMeanErrorPx`
-   * but at or below this bound still passes when *every other* condition
-   * (minInliers, minInlierRatio, minSpatialCells, minSpatialCoverage, finite
-   * pose) passes, and is then always held for a confirmation frame — never
-   * applied at once. The strict bound is not moved; the on-device 2.44 px
-   * return (inliers, ratio and cells all fine) is let through by the other
-   * conditions. Values ≤ `maxMeanErrorPx` disable the tier.
+   * Relaxed reprojection bound (v12 §4–§5): a candidate above `maxMeanErrorPx`
+   * but at or below this is `acceptable` when *every other* condition passes
+   * — minInliers, minInlierRatio, minSpatialCells, minSpatialCoverage,
+   * `relaxedMinMatchScore`, finite pose and the relocalization jump limits —
+   * and is then always held for a confirmation frame, never applied at once.
+   * The strict bound is not moved; the on-device 50i / 2.44 px / ratio 0.85
+   * / 7 cells / NCC 0.67 return passes through the other conditions. Values
+   * ≤ `maxMeanErrorPx` disable the relaxed range. Initial candidate value
+   * (v12 §19); never ≥ 5 px (§24).
    */
-  acceptableMeanErrorPx: number;
+  relaxedMeanErrorPx: number;
+  /**
+   * Coarse NCC score the relaxed error range requires (v12 §5–§6). The
+   * coarse gate `coarseMinScore` (0.25) only saves work; a candidate that
+   * needs the relaxed range must also look like the keyframe. Initial value.
+   */
+  relaxedMinMatchScore: number;
+  /**
+   * Relocalization-specific jump limits vs the held pose (v12 §9), applied
+   * to every candidate: translation ≤ this × scene depth (map units),
+   * rotation ≤ `maxRotationJumpDeg`. Generous on purpose — a correct return
+   * after a long loss can be far from the held pose (v5 §9) — they only cut
+   * off a candidate that would put the camera somewhere else entirely. 0
+   * disables.
+   */
+  maxTranslationJumpDepthRatio: number;
+  maxRotationJumpDeg: number;
   /** Frames the map may stay lost before a relocalization attempt starts. */
   startAfterLostFrames: number;
   /** Failed relocalization attempts required (besides the lost time) before the map / world are reset. */
@@ -653,7 +671,10 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxMeanErrorPx: 1.5,
     // Keyframe→current LK after a loss is naturally noisier than the
     // per-frame LK; between 1.5 and 3 px the other conditions decide (v12).
-    acceptableMeanErrorPx: 3.0,
+    relaxedMeanErrorPx: 3.0,
+    relaxedMinMatchScore: 0.5,
+    maxTranslationJumpDepthRatio: 1.0,
+    maxRotationJumpDeg: 90,
     startAfterLostFrames: 1,
     minAttemptsBeforeReset: 10,
     // Every 3rd frame: relocalization attempts dominated the lost-frame cost

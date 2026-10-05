@@ -6,6 +6,7 @@ import { FeatureTracker, TrackStatus } from "./FeatureTracker";
 import type { ImagePyramid } from "./ImagePyramid";
 import { clonePyramid, downsampleToCoarse, type Keyframe, type KeyframeObservation } from "./Keyframe";
 import type { LandmarkMap } from "./LandmarkMap";
+import { poseDelta } from "./PoseValidation";
 import type { Track } from "./types";
 
 /**
@@ -37,43 +38,51 @@ export type RelocalizationRejectCode =
   | "high_reprojection_error"
   | "low_inlier_ratio"
   | "poor_spatial_distribution"
+  | "pose_jump"
   | "confirmation_failed"
   | "invalid_pose";
 
 /**
  * How far a keyframe candidate got in one attempt (v6 §1–§2, names made
- * unambiguous in v9 §29: no bare "error").
+ * unambiguous in v9 §29: no bare "error"). Validation order follows v12
+ * §17: pose → inliers → ratio → spatial → ncc → jump → reprojection.
  */
 export type RelocalizationStage =
   | "coarse" // rejected by the coarse NCC match
   | "landmarks" // too few of its landmarks are still in the map
   | "lk" // LK from the keyframe image failed
   | "pnp_inliers" // PnP ran but had too few inliers
-  | "reprojection" // enough inliers, mean reprojection error too high
   | "ratio" // inliers / tracked observations too low
   | "spatial" // inliers concentrated in too few image cells
+  | "ncc" // coarse match score too low for the relaxed error range (v12)
+  | "jump" // too far from the held pose (relocalization-specific limits, v12)
+  | "reprojection" // every other condition fine, mean reprojection error above the relaxed bound
   | "invalid" // non-finite pose
   | "ok"; // passed the global validation
 
-/** Which validation condition rejected a candidate that reached PnP (v9 §3). */
+/** Which validation condition rejected a candidate that reached PnP (v9 §3, v12 §8). */
 export type RelocValidationRejectReason =
   | "inliers"
   | "reprojection_error"
   | "inlier_ratio"
   | "spatial_distribution"
+  | "ncc"
   | "pose_invalid"
+  | "translation_jump"
+  | "rotation_jump"
   | "confirmation"
   | "unknown";
 
 /**
- * Reprojection-error tier of a candidate (v12): `strict` = within
- * `maxMeanErrorPx` (the classic acceptance), `acceptable` = above it but
- * within `acceptableMeanErrorPx` *and* every other condition (inliers,
- * ratio, spatial, coverage, finite pose) passes — such a candidate is
- * never applied without a confirmation frame; `rejected` = beyond the
- * acceptable bound, or within it while another condition fails.
+ * Validation level of a candidate (v12 §3–§7): `strong` = reprojection
+ * error within the strict bound (`maxMeanErrorPx`, the classic acceptance),
+ * `acceptable` = above it but within the relaxed bound
+ * (`relaxedMeanErrorPx`) while every other condition — inliers, inlier
+ * ratio, spatial distribution, coverage, coarse NCC, finite pose and the
+ * relocalization-specific jump limits — passes; such a candidate is never
+ * applied without a confirmation frame. `reject` otherwise.
  */
-export type RelocErrorTier = "strict" | "acceptable" | "rejected";
+export type RelocValidationLevel = "strong" | "acceptable" | "reject";
 
 /**
  * Every validation condition of one PnP candidate, evaluated independently
@@ -90,10 +99,10 @@ export interface RelocValidationDiagnostics {
   reprojectionErrorPx: number;
   /** Strict bound (`maxMeanErrorPx`). */
   maxReprojectionErrorPx: number;
-  /** Acceptable bound (`acceptableMeanErrorPx`, v12); equal to the strict bound when the tier is disabled. */
-  acceptableReprojectionErrorPx: number;
-  /** Which error tier the candidate landed in (v12). */
-  errorTier: RelocErrorTier;
+  /** Relaxed bound (`relaxedMeanErrorPx`, v12 §4); equal to the strict bound when the relaxed range is disabled. */
+  relaxedReprojectionErrorPx: number;
+  /** Validation level (v12 §7). */
+  level: RelocValidationLevel;
   inlierRatio: number;
   minInlierRatio: number;
   coveredCells: number;
@@ -102,17 +111,29 @@ export interface RelocValidationDiagnostics {
   /** Bounding box of the inliers / image area (0…1). */
   spatialCoverage: number;
   minSpatialCoverage: number;
+  /** Coarse NCC score of the keyframe match and the score the relaxed range requires (v12 §5). */
+  nccScore: number;
+  requiredNccScore: number;
   /** Distance of the candidate pose from the held pose (map units / deg); NaN when unknown. */
   translationJump: number;
   rotationJumpDeg: number;
+  /** Relocalization-specific jump limits (v12 §9); Infinity when disabled. */
+  maxTranslationJump: number;
+  maxRotationJumpDeg: number;
   inliersPassed: boolean;
   /** Strict reprojection condition (≤ `maxMeanErrorPx`). */
   reprojectionPassed: boolean;
-  /** Error above the strict bound but within the acceptable one, rescued by the other conditions (v12). */
-  reprojectionAcceptable: boolean;
+  /** Same as `reprojectionPassed` under the v12 name. */
+  reprojectionStrictOk: boolean;
+  /** Error within the relaxed bound (a bound check only; the level says whether the other conditions carried it). */
+  reprojectionRelaxedOk: boolean;
   ratioPassed: boolean;
   spatialPassed: boolean;
   coveragePassed: boolean;
+  /** Coarse NCC condition; always true for a strong-range error (the coarse gate already applied), checked against `requiredNccScore` in the relaxed range. */
+  nccPassed: boolean;
+  translationJumpPassed: boolean;
+  rotationJumpPassed: boolean;
   posePassed: boolean;
   passed: boolean;
   rejectReason: RelocValidationRejectReason | null;
@@ -137,17 +158,27 @@ export interface RelocalizationKeyframeTrial {
 /** Thresholds of the relocalization validation (v9 §31); taken from RelocalizationConfig. */
 export interface RelocValidationThresholds {
   minInliers: number;
+  /** Strict reprojection bound. */
   maxMeanErrorPx: number;
   /**
-   * Acceptable reprojection error (v12): a candidate above `maxMeanErrorPx`
-   * but within this bound still passes when every other condition does,
-   * and then always goes through a confirmation frame. Values ≤
-   * `maxMeanErrorPx` (or undefined) disable the tier.
+   * Relaxed reprojection bound (v12 §4): a candidate above `maxMeanErrorPx`
+   * but within this bound still passes — as `acceptable` — when every other
+   * condition does, and then always goes through a confirmation frame.
+   * Values ≤ `maxMeanErrorPx` (or undefined) disable the relaxed range.
    */
-  acceptableMeanErrorPx?: number;
+  relaxedMeanErrorPx?: number;
+  /** Coarse NCC score the relaxed range requires (v12 §5); undefined = not checked. */
+  relaxedMinMatchScore?: number;
   minInlierRatio: number;
   minSpatialCells: number;
   minSpatialCoverage: number;
+  /**
+   * Relocalization-specific jump limits (v12 §9) vs the held pose, map units
+   * / degrees; undefined, 0 or Infinity = not checked. Generous by design:
+   * a correct return after a long loss can be far from the held pose.
+   */
+  maxTranslationJump?: number;
+  maxRotationJumpDeg?: number;
 }
 
 /** Measured values of one candidate that reached PnP. */
@@ -158,58 +189,79 @@ export interface RelocCandidateMeasures {
   coveredCells: number;
   spatialCoverage: number;
   poseFinite: boolean;
-  /** Optional, diagnostic only. */
+  /** Coarse NCC score of the keyframe match (v12 §5); undefined = unknown (treated as passing). */
+  matchScore?: number;
+  /** Candidate pose vs the held pose (map units / deg); undefined / NaN = unknown (treated as passing). */
   translationJump?: number;
   rotationJumpDeg?: number;
 }
 
+function limitOf(v: number | undefined): number {
+  return v === undefined || !(v > 0) ? Number.POSITIVE_INFINITY : v;
+}
+
 /**
- * Relocalization validation (v9 §5–§6): every condition is evaluated, none
- * short-circuits. The reject reason is the first failing condition in the
- * order pose → inliers → reprojection → ratio → spatial / coverage; the
- * per-condition flags keep the rest. The normal-tracking jump gate is *not*
- * part of this (v9 §16–§17).
+ * Relocalization validation (v9 §5–§6, v12 §3–§9, §17): every condition is
+ * evaluated, none short-circuits, and the reject reason is the first
+ * failing one in the order pose → inliers → inlier ratio → spatial /
+ * coverage → NCC → translation jump → rotation jump → reprojection error.
+ * The reprojection error decides the *level*: ≤ strict = `strong`, within
+ * the relaxed bound with everything else passing = `acceptable`, otherwise
+ * `reject`. The jump limits here are the relocalization-specific ones (v12
+ * §9), not the normal-tracking gate.
  */
 export function validateRelocalizationCandidate(m: RelocCandidateMeasures, t: RelocValidationThresholds): RelocValidationDiagnostics {
-  const acceptableBound = Math.max(t.maxMeanErrorPx, t.acceptableMeanErrorPx ?? t.maxMeanErrorPx);
+  const relaxedBound = Math.max(t.maxMeanErrorPx, t.relaxedMeanErrorPx ?? t.maxMeanErrorPx);
+  const requiredNcc = t.relaxedMinMatchScore ?? Number.NEGATIVE_INFINITY;
+  const maxTranslationJump = limitOf(t.maxTranslationJump);
+  const maxRotationJumpDeg = limitOf(t.maxRotationJumpDeg);
+  const translationJump = m.translationJump ?? NaN;
+  const rotationJumpDeg = m.rotationJumpDeg ?? NaN;
+  const nccScore = m.matchScore ?? NaN;
+
   const posePassed = m.poseFinite && Number.isFinite(m.reprojectionErrorPx);
   const inliersPassed = m.inliers >= t.minInliers;
-  const reprojectionPassed = posePassed && m.reprojectionErrorPx <= t.maxMeanErrorPx;
   const ratioPassed = m.inlierRatio >= t.minInlierRatio;
   const spatialPassed = m.coveredCells >= t.minSpatialCells;
   const coveragePassed = m.spatialCoverage >= t.minSpatialCoverage;
-  const othersPassed = posePassed && inliersPassed && ratioPassed && spatialPassed && coveragePassed;
-  // v12: an error above the strict bound is not an automatic rejection. Within
-  // the acceptable bound the candidate is carried by the *other* conditions —
-  // all of them must pass — and the caller forces a confirmation frame.
-  const withinAcceptable = posePassed && !reprojectionPassed && m.reprojectionErrorPx <= acceptableBound;
-  const reprojectionAcceptable = withinAcceptable && othersPassed;
-  const passed = othersPassed && (reprojectionPassed || reprojectionAcceptable);
-  const errorTier: RelocErrorTier = reprojectionPassed ? "strict" : reprojectionAcceptable ? "acceptable" : "rejected";
+  const translationJumpPassed = !Number.isFinite(translationJump) || translationJump <= maxTranslationJump;
+  const rotationJumpPassed = !Number.isFinite(rotationJumpDeg) || rotationJumpDeg <= maxRotationJumpDeg;
+  const reprojectionStrictOk = posePassed && m.reprojectionErrorPx <= t.maxMeanErrorPx;
+  const reprojectionRelaxedOk = posePassed && m.reprojectionErrorPx <= relaxedBound;
+  // The coarse gate (`coarseMinScore`) already admitted every candidate that
+  // reached PnP; the relaxed error range asks for a better match on top.
+  const nccPassed = reprojectionStrictOk || !Number.isFinite(nccScore) || nccScore >= requiredNcc;
+
+  const othersPassed = posePassed && inliersPassed && ratioPassed && spatialPassed && coveragePassed && nccPassed && translationJumpPassed && rotationJumpPassed;
+  const level: RelocValidationLevel = !othersPassed ? "reject" : reprojectionStrictOk ? "strong" : reprojectionRelaxedOk ? "acceptable" : "reject";
+  const passed = level !== "reject";
   let rejectReason: RelocValidationRejectReason | null = null;
   if (!passed) {
-    // Beyond the acceptable bound the error itself is the reason; within it
-    // the reason is the condition that failed to rescue the candidate.
-    const errorRejected = posePassed && !reprojectionPassed && !withinAcceptable;
     rejectReason = !posePassed
       ? "pose_invalid"
       : !inliersPassed
         ? "inliers"
-        : errorRejected
-          ? "reprojection_error"
-          : !ratioPassed
-            ? "inlier_ratio"
-            : !spatialPassed || !coveragePassed
-              ? "spatial_distribution"
-              : "unknown";
+        : !ratioPassed
+          ? "inlier_ratio"
+          : !spatialPassed || !coveragePassed
+            ? "spatial_distribution"
+            : !nccPassed
+              ? "ncc"
+              : !translationJumpPassed
+                ? "translation_jump"
+                : !rotationJumpPassed
+                  ? "rotation_jump"
+                  : !reprojectionRelaxedOk
+                    ? "reprojection_error"
+                    : "unknown";
   }
   return {
     inliers: m.inliers,
     requiredInliers: t.minInliers,
     reprojectionErrorPx: m.reprojectionErrorPx,
     maxReprojectionErrorPx: t.maxMeanErrorPx,
-    acceptableReprojectionErrorPx: acceptableBound,
-    errorTier,
+    relaxedReprojectionErrorPx: relaxedBound,
+    level,
     inlierRatio: m.inlierRatio,
     minInlierRatio: t.minInlierRatio,
     coveredCells: m.coveredCells,
@@ -217,14 +269,22 @@ export function validateRelocalizationCandidate(m: RelocCandidateMeasures, t: Re
     minSpatialCells: t.minSpatialCells,
     spatialCoverage: m.spatialCoverage,
     minSpatialCoverage: t.minSpatialCoverage,
-    translationJump: m.translationJump ?? NaN,
-    rotationJumpDeg: m.rotationJumpDeg ?? NaN,
+    nccScore,
+    requiredNccScore: requiredNcc,
+    translationJump,
+    rotationJumpDeg,
+    maxTranslationJump,
+    maxRotationJumpDeg,
     inliersPassed,
-    reprojectionPassed,
-    reprojectionAcceptable,
+    reprojectionPassed: reprojectionStrictOk,
+    reprojectionStrictOk,
+    reprojectionRelaxedOk,
     ratioPassed,
     spatialPassed,
     coveragePassed,
+    nccPassed,
+    translationJumpPassed,
+    rotationJumpPassed,
     posePassed,
     passed,
     rejectReason,
@@ -233,13 +293,13 @@ export function validateRelocalizationCandidate(m: RelocCandidateMeasures, t: Re
 
 /**
  * Confirmation frames a validated candidate needs before it is applied
- * (v12): the configured count, but never fewer than one for an
- * `acceptable`-tier candidate — its error is above the strict bound, so it
- * must be reproduced in the next frame whatever the immediate-apply rule
- * or `confirmationFrames` say.
+ * (v12 §10–§11): the configured count, but never fewer than one for an
+ * `acceptable` candidate — its error is above the strict bound, so it must
+ * be reproduced in the next frame whatever the immediate-apply rule or
+ * `confirmationFrames` say.
  */
-export function requiredConfirmations(tier: RelocErrorTier, configuredFrames: number): number {
-  return tier === "acceptable" ? Math.max(1, configuredFrames) : Math.max(0, configuredFrames);
+export function requiredConfirmations(level: RelocValidationLevel, configuredFrames: number): number {
+  return level === "acceptable" ? Math.max(1, configuredFrames) : Math.max(0, configuredFrames);
 }
 
 /** Stage a candidate stopped at, from its validation (first failing condition). */
@@ -257,6 +317,11 @@ export function stageOfValidation(v: RelocValidationDiagnostics): Relocalization
       return "ratio";
     case "spatial_distribution":
       return "spatial";
+    case "ncc":
+      return "ncc";
+    case "translation_jump":
+    case "rotation_jump":
+      return "jump";
     default:
       return "invalid";
   }
@@ -294,8 +359,11 @@ export interface RelocalizationDiagnostics {
   pnpPassed: number;
   /** Passed every validation check. */
   validated: number;
-  /** Of the validated ones, how many passed only through the acceptable error tier (v12). */
+  /** Of the validated ones, how many passed at the `acceptable` level only (v12). */
   validatedAcceptable: number;
+  /** Rejected by the relaxed-range NCC requirement / the relocalization jump limits (v12). */
+  nccRejected: number;
+  jumpRejected: number;
   errorRejected: number;
   ratioRejected: number;
   spatialRejected: number;
@@ -332,8 +400,8 @@ export interface RelocalizationResult {
   spatialCoverage: number;
   /** Full validation breakdown (null when the candidate did not reach PnP). */
   validation: RelocValidationDiagnostics | null;
-  /** Reprojection-error tier of the candidate (v12), null before PnP. */
-  errorTier: RelocErrorTier | null;
+  /** Validation level of the candidate (v12 §7), null before PnP. */
+  level: RelocValidationLevel | null;
   /** Coarse shift found (level-0 pixels). */
   shiftX: number;
   shiftY: number;
@@ -347,16 +415,19 @@ export interface RelocalizationResult {
   diagnostics: RelocalizationDiagnostics;
 }
 
+// v12 §17 order: the later a candidate fails, the further it got.
 const STAGE_RANK: Record<RelocalizationStage, number> = {
   coarse: 0,
   landmarks: 1,
   lk: 2,
   pnp_inliers: 3,
   invalid: 3,
-  reprojection: 4,
-  ratio: 5,
-  spatial: 6,
-  ok: 7,
+  ratio: 4,
+  spatial: 5,
+  ncc: 6,
+  jump: 7,
+  reprojection: 8,
+  ok: 9,
 };
 
 const STAGE_CODE: Record<RelocalizationStage, RelocalizationRejectCode | null> = {
@@ -365,9 +436,11 @@ const STAGE_CODE: Record<RelocalizationStage, RelocalizationRejectCode | null> =
   lk: "lk_failed",
   pnp_inliers: "insufficient_inliers",
   invalid: "invalid_pose",
-  reprojection: "high_reprojection_error",
   ratio: "low_inlier_ratio",
   spatial: "poor_spatial_distribution",
+  ncc: "low_match_score",
+  jump: "pose_jump",
+  reprojection: "high_reprojection_error",
   ok: null,
 };
 
@@ -396,6 +469,8 @@ export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDia
     pnpPassed: 0,
     validated: 0,
     validatedAcceptable: 0,
+    nccRejected: 0,
+    jumpRejected: 0,
     errorRejected: 0,
     ratioRejected: 0,
     spatialRejected: 0,
@@ -502,13 +577,23 @@ export class Relocalizer {
    * stage counters and the best trial are returned with the result so that
    * a failing relocalization can be diagnosed without loosening anything
    * (v6 §1–§6).
+   *
+   * `heldPose` / `sceneDepth` (v12 §9) feed the relocalization-specific
+   * jump limits: translation ≤ `maxTranslationJumpDepthRatio` × depth,
+   * rotation ≤ `maxRotationJumpDeg`. Without them the jump is diagnostic.
    */
-  relocalize(current: ImagePyramid, map: LandmarkMap, k: CameraIntrinsics): RelocalizationResult {
+  relocalize(
+    current: ImagePyramid,
+    map: LandmarkMap,
+    k: CameraIntrinsics,
+    heldPose: RigidTransform | null = null,
+    sceneDepth = 0,
+  ): RelocalizationResult {
     const cfg = this.config;
     const diag = emptyRelocalizationDiagnostics(this.keyframes.length);
     const fail: RelocalizationResult = {
       success: false, keyframeId: -1, pose: null, inlierCount: 0, meanReprojectionErrorPx: 0,
-      matchScore: -1, lkRatio: 0, inlierRatio: 0, spatialCells: 0, spatialCoverage: 0, validation: null, errorTier: null,
+      matchScore: -1, lkRatio: 0, inlierRatio: 0, spatialCells: 0, spatialCoverage: 0, validation: null, level: null,
       shiftX: 0, shiftY: 0, tracks: [], candidatesTried: 0, reason: "no keyframes", rejectCode: "no_keyframes",
       diagnostics: diag,
     };
@@ -660,6 +745,7 @@ export class Relocalizer {
       // first failing one, the breakdown keeps all of them.
       const poseFinite =
         Array.from(pnp.pose.translation).every((v) => Number.isFinite(v)) && Array.from(pnp.pose.rotation).every((v) => Number.isFinite(v));
+      const jump = heldPose && poseFinite ? poseDelta(pnp.pose, heldPose) : null;
       const validation = validateRelocalizationCandidate(
         {
           inliers: pnp.inlierCount,
@@ -668,14 +754,20 @@ export class Relocalizer {
           coveredCells: trial.spatialCells,
           spatialCoverage: trial.spatialCoverage,
           poseFinite,
+          matchScore: shift.score,
+          translationJump: jump?.translation,
+          rotationJumpDeg: jump?.rotationDeg,
         },
         {
           minInliers: cfg.minInliers,
           maxMeanErrorPx: cfg.maxMeanErrorPx,
-          acceptableMeanErrorPx: cfg.acceptableMeanErrorPx,
+          relaxedMeanErrorPx: cfg.relaxedMeanErrorPx,
+          relaxedMinMatchScore: cfg.relaxedMinMatchScore,
           minInlierRatio: cfg.minInlierRatio,
           minSpatialCells: cfg.minSpatialCells,
           minSpatialCoverage: cfg.minSpatialCoverage,
+          maxTranslationJump: sceneDepth > 0 ? cfg.maxTranslationJumpDepthRatio * sceneDepth : undefined,
+          maxRotationJumpDeg: cfg.maxRotationJumpDeg,
         },
       );
       trial.validation = validation;
@@ -692,7 +784,7 @@ export class Relocalizer {
         spatialCells: trial.spatialCells,
         spatialCoverage: trial.spatialCoverage,
         validation,
-        errorTier: validation.errorTier,
+        level: validation.level,
         shiftX: sx,
         shiftY: sy,
         tracks,
@@ -702,15 +794,17 @@ export class Relocalizer {
         diagnostics: diag,
       };
       if (validation.inliersPassed && validation.posePassed) diag.pnpPassed++;
-      // The error counter means "rejected by the error": an acceptable-tier
-      // candidate is not (v12).
-      if (validation.errorTier === "rejected" && validation.posePassed && validation.inliersPassed) diag.errorRejected++;
+      // "Rejected by the error" means beyond the relaxed bound (v12): an
+      // acceptable candidate is not counted here.
+      if (validation.posePassed && validation.inliersPassed && !validation.reprojectionRelaxedOk) diag.errorRejected++;
       if (!validation.ratioPassed) diag.ratioRejected++;
       if (!validation.spatialPassed || !validation.coveragePassed) diag.spatialRejected++;
+      if (!validation.nccPassed) diag.nccRejected++;
+      if (!validation.translationJumpPassed || !validation.rotationJumpPassed) diag.jumpRejected++;
       if (!validation.passed) {
-        const errorNote =
-          !validation.reprojectionPassed && validation.posePassed && errPx <= validation.acceptableReprojectionErrorPx
-            ? ` (err ${errPx.toFixed(2)} px acceptable ≤ ${validation.acceptableReprojectionErrorPx} only with every other condition)`
+        const relaxedNote =
+          !validation.reprojectionStrictOk && validation.reprojectionRelaxedOk
+            ? ` (err ${errPx.toFixed(2)} px in the relaxed range ≤ ${validation.relaxedReprojectionErrorPx}: every other condition required)`
             : "";
         const reason =
           validation.rejectReason === "pose_invalid"
@@ -718,23 +812,29 @@ export class Relocalizer {
             : validation.rejectReason === "inliers"
               ? `kf ${kf.id}: pnp ${pnp.inlierCount}/${m} < ${cfg.minInliers}`
               : validation.rejectReason === "reprojection_error"
-                ? `kf ${kf.id}: err ${errPx.toFixed(2)} > ${validation.acceptableReprojectionErrorPx} px (strict ${cfg.maxMeanErrorPx})`
+                ? `kf ${kf.id}: err ${errPx.toFixed(2)} > ${validation.relaxedReprojectionErrorPx} px relaxed (strict ${cfg.maxMeanErrorPx})`
                 : validation.rejectReason === "inlier_ratio"
-                  ? `kf ${kf.id}: inlier ratio ${trial.inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}${errorNote}`
-                  : `kf ${kf.id}: inliers in ${trial.spatialCells}/9 cells < ${cfg.minSpatialCells}, coverage ${trial.spatialCoverage.toFixed(2)} < ${cfg.minSpatialCoverage}${errorNote}`;
+                  ? `kf ${kf.id}: inlier ratio ${trial.inlierRatio.toFixed(2)} < ${cfg.minInlierRatio}${relaxedNote}`
+                  : validation.rejectReason === "ncc"
+                    ? `kf ${kf.id}: ncc ${shift.score.toFixed(2)} < ${validation.requiredNccScore} for the relaxed error range${relaxedNote}`
+                    : validation.rejectReason === "translation_jump"
+                      ? `kf ${kf.id}: translation jump ${validation.translationJump.toFixed(3)} > ${validation.maxTranslationJump.toFixed(3)} (reloc limit)${relaxedNote}`
+                      : validation.rejectReason === "rotation_jump"
+                        ? `kf ${kf.id}: rotation jump ${validation.rotationJumpDeg.toFixed(1)} > ${validation.maxRotationJumpDeg}° (reloc limit)${relaxedNote}`
+                        : `kf ${kf.id}: inliers in ${trial.spatialCells}/9 cells < ${cfg.minSpatialCells}, coverage ${trial.spatialCoverage.toFixed(2)} < ${cfg.minSpatialCoverage}${relaxedNote}`;
         record(trial, candidate, reason);
         continue;
       }
       diag.validated++;
-      if (validation.errorTier === "acceptable") diag.validatedAcceptable++;
+      if (validation.level === "acceptable") diag.validatedAcceptable++;
       record(trial, candidate, null);
       candidate.success = true;
-      // Among validated candidates a strict-tier one beats an acceptable-tier
-      // one (v12); otherwise more inliers win.
-      const strictBeatsAcceptable = best !== null && best.errorTier === "strict" && candidate.errorTier === "acceptable";
-      const acceptableLosesToStrict = best !== null && best.errorTier === "acceptable" && candidate.errorTier === "strict";
-      if (!best || acceptableLosesToStrict || (!strictBeatsAcceptable && candidate.inlierCount > best.inlierCount)) best = candidate;
-      if (candidate.inlierCount >= cfg.goodInliers && candidate.errorTier === "strict") break;
+      // Among validated candidates a strong one beats an acceptable one
+      // (v12 §12); otherwise more inliers win, as before.
+      const strongBeatsAcceptable = best !== null && best.level === "strong" && candidate.level === "acceptable";
+      const acceptableLosesToStrong = best !== null && best.level === "acceptable" && candidate.level === "strong";
+      if (!best || acceptableLosesToStrong || (!strongBeatsAcceptable && candidate.inlierCount > best.inlierCount)) best = candidate;
+      if (candidate.inlierCount >= cfg.goodInliers && candidate.level === "strong") break;
     }
     if (best) {
       return { ...best, candidatesTried: diag.candidatesTried, diagnostics: diag };
