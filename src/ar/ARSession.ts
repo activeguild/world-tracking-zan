@@ -112,6 +112,8 @@ export interface ARStats {
   relocalization: RelocalizationOutput | null;
   /** Frame-to-frame motion level and LK diagnostics (v7). */
   motion: MotionDiagnostics | null;
+  /** World tracking established for the current map (v10): RELOCALIZING is reachable only when true. */
+  worldEstablished: boolean;
   planeSearch: PlaneSearchOutput | null;
   state: TrackingState;
   fastThreshold: number;
@@ -200,6 +202,7 @@ export class ARSession {
   private landmarkCount = 0;
   private relocalization: RelocalizationOutput | null = null;
   private motion: MotionDiagnostics | null = null;
+  private worldEstablished = false;
   /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
   private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
@@ -451,6 +454,7 @@ export class ARSession {
       placedObjects: this.world.placedCount,
       relocalization: this.relocalization,
       motion: this.motion,
+      worldEstablished: this.worldEstablished,
       planeSearch: this.planeSearch,
       planePose: this.planePose,
       planeAnchored: this.planeAnchored,
@@ -572,6 +576,7 @@ export class ARSession {
     this.landmarkCount = r.landmarkCount;
     this.relocalization = r.relocalization;
     this.motion = r.motion;
+    this.worldEstablished = r.worldEstablished;
     this.planeSearch = r.planeSearch;
     this.planePose = r.planePose;
     this.planeAnchored = r.planeAnchor !== null;

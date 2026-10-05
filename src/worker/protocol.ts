@@ -77,6 +77,7 @@ export interface ResultResponse {
   planePose: PlanePoseOutput | null;
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
+  worldEstablished: boolean;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */
   landmarks: ArrayBuffer;
   landmarkCount: number;

@@ -229,6 +229,17 @@ normal-tracking jump gate is not applied to relocalization candidates. The
 debug HUD, the overlay and the `[AR]` console logs are off unless `?debug=1`;
 with the HUD hidden nothing is formatted or written to the DOM per frame.
 
+Initial scan vs relocalization (v10): `RELOCALIZING` is reachable only once a
+world has been established for the current map (first `PLANE_FOUND`,
+`worldEstablished`). Before that a lost map just means the user is scanning
+somewhere else: no relocalization attempts, the map is dropped after
+`landmarks.preWorldLostResetFrames` and re-initialized where the camera looks
+now. Guidance comes from the pure `src/ar/Guidance.ts`; "return to where you
+were" is produced only for an established world lost for longer than
+`world.relocGuidanceDelayMs` (generic recovery wording before that). The HUD
+shows the v10 phase (`INITIAL_SCAN / SURFACE_SCAN / PLANE_CANDIDATE /
+WORLD_TRACKING / WORLD_LOST / RELOCALIZING`) and `World Established YES/NO`.
+
 ## Tests
 
 ```bash

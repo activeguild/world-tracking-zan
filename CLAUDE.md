@@ -207,6 +207,17 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### 修正指示書 v10 対応 — 初期スキャンと Relocalization の分離（2026-10-05、実機確認待ち）
+
+起動直後に別の場所へ移動すると「さっき見ていた場所に戻してください」が出ていた。原因は状態機械が `mapInitialized && mapLost` だけで `RELOCALIZING` に入っていたこと（Map は PLANE_DETECTING の二視点初期化で早期にできる）。World 未確立の失探は「スキャン継続」、確立後の失探だけが「World への復帰」。**既存の状態 enum は維持し、新しい状態は追加していない**（§41）。閾値（PnP / LK / NCC / Plane / Jump Gate / v9 Validation）は未変更（AC-8、AC-9）。
+
+- **`worldEstablished`（§5–§7）**: `VisionEngine` が「現在の Map で初めて `PLANE_FOUND` になった」時点で true（ARSession はその同じフレームで WorldAnchor を生成するので `World ready` と同義）。Map 再初期化・リセットで false。`FrameObservation.worldEstablished` として状態機械へ渡し、`VisionOutput / ARStats.worldEstablished` で出力
+- **状態機械（§8–§10、§43）**: `RELOCALIZING` に入る条件を `mapInitialized && mapLost && worldEstablished` に限定。World 未確立で Map を見失ったら TRACKING（SURFACE_SCAN）を継続、特徴も失えば TRACKING_LOST → SEARCHING_FEATURES。v10 の呼称との対応: INITIALIZING / SEARCHING_FEATURES = INITIAL_SCAN、TRACKING / PLANE_DETECTING = SURFACE_SCAN（平面候補ありで PLANE_CANDIDATE）、PLANE_FOUND / AR_ACTIVE = WORLD_TRACKING、確立後の TRACKING_LOST / RELOCALIZING = WORLD_LOST（`relocGuidanceDelayMs` 未満）/ RELOCALIZING
+- **World 未確立の Map 失探（§10–§12、§18）**: 再局所化は試行しない（World がないので戻る先がない）。`landmarks.preWorldLostResetFrames`（30 = 1 s）で Map / Keyframe を捨てて現在見ている場所で再初期化（短い猶予は同じ面の速い振りを再関連付けで拾うため）。確立後は従来どおり 300 フレーム + 失敗 10 回でのみリセット
+- **Guidance（§13–§17、§25）**: `src/ar/Guidance.ts` の純関数 `getGuidance(ctx)`（UX Controller、エンジン閾値には触れない）。World 未確立: `SHOW_FLAT_SURFACE`（特徴不足）/ `SCAN_SURFACE` / `MOVE_SLOWLY`（Map ありで視差待ち）/ `PLANE_DETECTING`（候補あり）。確立後: `TAP_TO_PLACE` / `NONE` / 失探は `RECOVER`（「カメラをゆっくり動かしてください」）→ `world.relocGuidanceDelayMs`（2000 ms）経過で `RELOCALIZE`（「先ほど見ていた場所にカメラを戻してください」）。この文言はそれ以外では生成されない。`main.ts` は毎フレーム評価し文言が変わったときだけ DOM 更新
+- **HUD（§26–§28）**: `Phase INITIAL_SCAN | SURFACE_SCAN | PLANE_CANDIDATE | WORLD_TRACKING | WORLD_LOST | RELOCALIZING`（`worldPhase()`）、`World Established YES/NO`、RELOC 節に `Reason WORLD_LOST` / `scan continues (no world)`。Debug 既定 OFF は v9 のまま
+- テスト 178 件（+9）: 状態機械 Test 1（World なしの Map 失探で RELOCALIZING に入らず TRACKING / SEARCHING_FEATURES）、Test 3/4（World ありで TRACKING_LOST → RELOCALIZING → 復帰で PLANE_FOUND）、Guidance Test 2/5（World なしでは全状態・全条件で RELOCALIZE も戻る文言も出ない）、Test 6/7（遅延前は RECOVER、経過後に RELOCALIZE）、`worldPhase` 対応表、VisionEngine Test 8（机 A で Map 初期化後に無関係な机 B へ移動 → RELOCALIZING 0 フレーム・再局所化試行 0 回・新しい Map で 37 フレーム後に PLANE_FOUND）。ブラウザテスト 2 件合格
+
 ### 修正指示書 v9 対応 — Relocalization Validation の分解・可視化（2026-10-05、実機確認待ち）
 
 実機ログ `Best KF3 35i 2.93px / Ratio 0.61 / cells 4/9 / Stage error / Fail error` の `error` は再投影誤差の段階（2.93 px > `maxMeanErrorPx` 1.5 px）だったが名前が曖昧だった。各検証条件を独立に評価して値・閾値・PASS/FAIL を出す。**閾値（`minInliers` 25 / `maxMeanErrorPx` 1.5 / `minInlierRatio` 0.5 / `minSpatialCells` 4 / NCC / LK / PnP / Jump Gate）は変更していない**（§30）。

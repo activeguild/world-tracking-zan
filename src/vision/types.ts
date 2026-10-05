@@ -358,6 +358,12 @@ export interface VisionOutput {
   relocalization: RelocalizationOutput;
   /** Frame-to-frame motion level and LK diagnostics (v7). */
   motion: MotionDiagnostics;
+  /**
+   * World tracking established for the current map (v10 §5–§7): a plane was
+   * found and the world anchored to it. Only then does a lost map lead to
+   * RELOCALIZING; before, the scan continues wherever the camera looks.
+   */
+  worldEstablished: boolean;
   /** Packed landmarks for debug rendering: see `LANDMARK_STRIDE`. */
   landmarks: Float32Array;
   landmarkCount: number;

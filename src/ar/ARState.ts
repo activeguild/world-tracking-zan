@@ -1,12 +1,16 @@
 /**
- * Tracking state machine (spec §31).
+ * Tracking state machine (spec §31, 修正指示書 v10 §3–§4).
  *
- * Phase 1 only exercises the first part of the machine:
+ *   INITIALIZING → SEARCHING_FEATURES → TRACKING → PLANE_DETECTING → PLANE_FOUND → AR_ACTIVE
+ *                                          ↑            │                  │
+ *                                          └────────────┘ (map lost, no    ├→ TRACKING_LOST → RELOCALIZING → PLANE_FOUND
+ *                                            world yet: keep scanning)     └→ RELOCALIZING ──────────────────┘
  *
- *   INITIALIZING → SEARCHING_FEATURES → TRACKING → TRACKING_LOST → SEARCHING_FEATURES
- *
- * The later states are declared so that the public API is stable, but no
- * transition targets them yet (PLANE_DETECTING etc. arrive in Phase 3/4).
+ * In v10 terms: INITIALIZING / SEARCHING_FEATURES = INITIAL_SCAN, TRACKING /
+ * PLANE_DETECTING = SURFACE_SCAN (PLANE_CANDIDATE while a plane candidate
+ * exists), PLANE_FOUND / AR_ACTIVE = WORLD_TRACKING, TRACKING_LOST /
+ * RELOCALIZING with an established world = WORLD_LOST / RELOCALIZING.
+ * RELOCALIZING is reachable only once `worldEstablished` is true.
  */
 export enum TrackingState {
   INITIALIZING = "INITIALIZING",
@@ -57,6 +61,13 @@ export interface FrameObservation {
   planeFound?: boolean;
   /** Map initialized but the camera pose could not be computed this frame (Phase 5). */
   mapLost?: boolean;
+  /**
+   * World tracking has been established for the current map (a plane was
+   * found and the world anchored to it, 修正指示書 v10 §5–§7). Before that
+   * a lost map is not something to return to: the user is still scanning
+   * and may freely move elsewhere, so RELOCALIZING is never entered.
+   */
+  worldEstablished?: boolean;
 }
 
 /**
@@ -92,19 +103,24 @@ export class TrackingStateMachine {
 
       case TrackingState.SEARCHING_FEATURES:
       case TrackingState.TRACKING_LOST:
-      case TrackingState.RELOCALIZING:
+      case TrackingState.RELOCALIZING: {
+        // Relocalization exists only to return to an *established* world
+        // (v10 §2, §9): a lost map without a world is just scanning.
+        const relocatable = !!obs.mapInitialized && !!obs.worldEstablished;
         if (obs.inlierCount >= t.minTrackedForTracking) {
-          // Features track again. If a map exists but the camera is not yet
-          // located in it, we are relocalizing; otherwise plain tracking.
-          this._state = obs.mapInitialized && obs.mapLost ? TrackingState.RELOCALIZING : TrackingState.TRACKING;
+          // Features track again. If an established world exists but the
+          // camera is not yet located in it, we are relocalizing; otherwise
+          // plain tracking (surface scan).
+          this._state = relocatable && obs.mapLost ? TrackingState.RELOCALIZING : TrackingState.TRACKING;
           this.badFrames = 0;
         } else if (this._state === TrackingState.TRACKING_LOST) {
-          // Nothing tracked for a while → searching (or relocalizing when a map exists).
-          this._state = obs.mapInitialized ? TrackingState.RELOCALIZING : TrackingState.SEARCHING_FEATURES;
-        } else if (this._state === TrackingState.RELOCALIZING && !obs.mapInitialized) {
+          // Nothing tracked for a while → searching (or relocalizing when an established world exists).
+          this._state = relocatable ? TrackingState.RELOCALIZING : TrackingState.SEARCHING_FEATURES;
+        } else if (this._state === TrackingState.RELOCALIZING && !relocatable) {
           this._state = TrackingState.SEARCHING_FEATURES;
         }
         return this._state;
+      }
 
       case TrackingState.TRACKING:
       case TrackingState.PLANE_DETECTING:
@@ -120,8 +136,11 @@ export class TrackingStateMachine {
         }
         this.badFrames = 0;
         // Phase 5: features track but the camera is not located in the map.
+        // Only an established world is worth relocalizing into (v10 §8–§10);
+        // before that the scan simply continues where the camera looks now
+        // (the engine re-initializes the map there).
         if (obs.mapInitialized && obs.mapLost) {
-          this._state = TrackingState.RELOCALIZING;
+          this._state = obs.worldEstablished ? TrackingState.RELOCALIZING : TrackingState.TRACKING;
           return this._state;
         }
         // Phase 3 transitions driven by the landmark map / plane detector.

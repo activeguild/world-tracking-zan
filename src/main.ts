@@ -1,5 +1,6 @@
 import { ARSession } from "./ar/ARSession";
-import { ARError, TrackingState } from "./ar/ARState";
+import { ARError } from "./ar/ARState";
+import { GUIDANCE_TEXT_JA, getGuidance, worldPhase } from "./ar/Guidance";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type * as THREE from "three";
 import { DebugOverlay, type HudCandidate, type HudRelocDiagnostics } from "./debug/DebugOverlay";
@@ -110,24 +111,38 @@ debugToggle.addEventListener("click", (ev) => {
 });
 applyHudVisibility();
 
-session.on("trackingStateChanged", (state) => {
-  messageEl.textContent = userMessageFor(state, session.getStats().quality.lowFeature);
-});
-
-session.on("planeFound", () => {
-  messageEl.textContent = userMessageFor(session.state, false);
-});
+// Guidance (v10 §13–§17): decided every frame from the state and a few
+// quality facts by the pure Guidance module; the DOM is touched only when
+// the text changes. "Go back to where you were" is produced only for an
+// established world that has been lost for relocGuidanceDelayMs.
+let lastGuidanceText: string | null = null;
+function refreshGuidance(): void {
+  const s = session.getStats();
+  const key = getGuidance({
+    state: s.state,
+    worldEstablished: s.worldEstablished,
+    lowFeature: s.quality.lowFeature,
+    planeCandidate: s.plane !== null,
+    lostMs: s.lostMs,
+    relocGuidanceDelayMs: session.config.world.relocGuidanceDelayMs,
+  });
+  let text = GUIDANCE_TEXT_JA[key];
+  if (key === "TAP_TO_PLACE" && placed) text = "";
+  if (text !== lastGuidanceText) {
+    lastGuidanceText = text;
+    messageEl.textContent = text;
+  }
+}
+session.on("frame", refreshGuidance);
+session.on("trackingStateChanged", refreshGuidance);
 
 // Phase 4: tap → hit test → place / move the object (spec §27, §68).
 // The first tap places the cube (or the GLB when ?model= is given), later
 // taps move it. Objects are fixed in world space; only the camera moves.
 let placed: ARObject | undefined;
-session.on("worldReady", () => {
-  messageEl.textContent = "平面をタップしてオブジェクトを置いてください";
-});
 session.on("worldLost", () => {
   placed = undefined;
-  messageEl.textContent = "トラッキングを失いました。平面を探し直しています…";
+  lastGuidanceText = null; // re-evaluate on the next frame
 });
 app.addEventListener("pointerup", async (ev) => {
   if ((ev.target as HTMLElement).tagName === "BUTTON") return;
@@ -148,7 +163,7 @@ app.addEventListener("pointerup", async (ev) => {
     placed = session.placeCube(hit);
   }
   if (walk) startWalking(placed);
-  messageEl.textContent = "";
+  refreshGuidance();
 });
 
 // Object motion test (修正指示書 Test D / E): the object walks along world X
@@ -164,12 +179,6 @@ function startWalking(obj: ARObject): void {
     obj.setYaw(obj.velocity.x > 0 ? Math.PI / 2 : -Math.PI / 2);
   }, 4000);
 }
-
-session.on("frame", (r) => {
-  if (r.quality.lowFeature && session.state !== TrackingState.TRACKING) {
-    messageEl.textContent = userMessageFor(session.state, true);
-  }
-});
 
 session.on("error", (err) => {
   showError(err);
@@ -194,31 +203,6 @@ function showError(e: unknown): void {
   const code = e instanceof ARError ? e.code : "ERROR";
   const msg = e instanceof Error ? e.message : String(e);
   messageEl.textContent = `${code}: ${msg}`;
-}
-
-function userMessageFor(state: TrackingState, lowFeature: boolean): string {
-  switch (state) {
-    case TrackingState.INITIALIZING:
-      return "Initializing…";
-    case TrackingState.SEARCHING_FEATURES:
-      return lowFeature
-        ? "周囲をゆっくり動かしてください（特徴点が足りません）"
-        : "Searching features…";
-    case TrackingState.TRACKING:
-      return "ゆっくり横に動かして平面を探しています…";
-    case TrackingState.PLANE_DETECTING:
-      return "平面を検出中…（床・机をゆっくり見回してください）";
-    case TrackingState.PLANE_FOUND:
-      return "平面をタップして Cube を置いてください";
-    case TrackingState.AR_ACTIVE:
-      return "";
-    case TrackingState.RELOCALIZING:
-      return "位置を探しています… さっき見ていた場所にカメラを戻してください";
-    case TrackingState.TRACKING_LOST:
-      return "Tracking lost — ゆっくり元の位置に戻してください";
-    default:
-      return state;
-  }
 }
 
 /** Candidate diagnostics in display units (v4 §25); `scale` NaN before the world exists. */
@@ -323,6 +307,14 @@ function refreshHud(): void {
     inlierCount: s.quality.inlierCount,
     planeConfidence: s.quality.planeConfidence,
     state: s.state,
+    phase: worldPhase({
+      state: s.state,
+      worldEstablished: s.worldEstablished,
+      planeCandidate: s.plane !== null,
+      lostMs: s.lostMs,
+      relocGuidanceDelayMs: session.config.world.relocGuidanceDelayMs,
+    }),
+    worldEstablished: s.worldEstablished,
     visionMs: s.visionMs,
     framesDropped: s.framesDropped,
     fastThreshold: s.fastThreshold,

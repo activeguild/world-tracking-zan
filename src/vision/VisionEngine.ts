@@ -132,6 +132,12 @@ export class VisionEngine {
     inconsistent: boolean;
   } | null = null;
   private lastRelocalized = false;
+  /**
+   * World tracking established for the current map (first PLANE_FOUND, v10
+   * §5–§7). Gates RELOCALIZING and the relocalizer: before it, a lost map is
+   * dropped and the scan restarts where the camera looks now.
+   */
+  private worldEstablished = false;
   /** Stage counters of the most recent relocalization attempt of the current lost episode (v6). */
   private relocDiagnostics: RelocalizationDiagnostics | null = null;
   private relocDiagnosticsAge = 0;
@@ -242,6 +248,12 @@ export class VisionEngine {
     this.relocMonitor = null;
     this.lastRelocalized = false;
     this.relocDiagnostics = null;
+    this.worldEstablished = false;
+  }
+
+  /** World tracking established for the current map (v10). */
+  get isWorldEstablished(): boolean {
+    return this.worldEstablished;
   }
 
   /** Last pose output (null until a reference frame and enough tracks exist). */
@@ -333,7 +345,12 @@ export class VisionEngine {
       planeFound: this.planeTracker.anchored || (this.lastPlane?.found ?? false),
       mapLost:
         this.mapTracker.initialized && this.mapTracker.framesSinceTracked > this.config.state.mapLostFrameTolerance,
+      worldEstablished: this.worldEstablished,
     });
+    // World tracking is established the first time a plane is found for this
+    // map (the session anchors the world in that same frame, v10 §5–§7); from
+    // here on a lost map is something to relocalize into.
+    if (state === TrackingState.PLANE_FOUND && this.mapTracker.initialized) this.worldEstablished = true;
 
     // Swap pyramids for the next frame.
     const tmp = this.prevPyramid;
@@ -366,6 +383,7 @@ export class VisionEngine {
       planePose: this.lastPlanePose,
       relocalization: this.relocStatus,
       motion: this.lastMotion,
+      worldEstablished: this.worldEstablished,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
       landmarkCount: this.packedLandmarkCount,
       tracks: packTracks(this.tracks),
@@ -414,6 +432,7 @@ export class VisionEngine {
           this.planeTracker.reset(this.tracks);
           this.lastPlaneAnchor = null;
           this.relocalizer.reset();
+          this.worldEstablished = false;
           // The initialization frame is the first keyframe.
           this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
           this.relocStatus.keyframes = this.relocalizer.count;
@@ -430,12 +449,18 @@ export class VisionEngine {
       // far from the held pose, v5 §9); the delta is diagnostic only.
       const rc = this.config.relocalization;
       const pending = this.pendingReloc;
+      // Relocalization only returns to an *established* world (v10 §2, §9):
+      // before a plane fixed the world there is nothing to go back to, the
+      // user may be scanning somewhere else on purpose, and the map is
+      // re-initialized there instead (reset below).
       const scheduled =
+        this.worldEstablished &&
         tracker.framesSinceTracked >= rc.startAfterLostFrames &&
         (tracker.framesSinceTracked - rc.startAfterLostFrames) % rc.attemptEveryNFrames === 0;
-      if (tracker.framesSinceTracked === 0) {
+      if (tracker.framesSinceTracked === 0 || !this.worldEstablished) {
         this.pendingReloc = null;
-      } else if (pending !== null || scheduled) {
+      }
+      if (tracker.framesSinceTracked > 0 && this.worldEstablished && (pending !== null || scheduled)) {
         const tr0 = now();
         const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k);
         this.timing.reloc = now() - tr0;
@@ -592,12 +617,16 @@ export class VisionEngine {
           this.relocStatus.keyframes = this.relocalizer.count;
         }
       } else if (
-        tracker.framesSinceTracked > cfg.lostResetFrames &&
-        this.relocAttemptsSinceLost >= this.config.relocalization.minAttemptsBeforeReset
+        this.worldEstablished
+          ? tracker.framesSinceTracked > cfg.lostResetFrames &&
+            this.relocAttemptsSinceLost >= this.config.relocalization.minAttemptsBeforeReset
+          : tracker.framesSinceTracked > cfg.preWorldLostResetFrames
       ) {
-        // World reset is the last resort (v3 §12, §16): long loss AND enough
-        // failed relocalization attempts. A short loss keeps map, world and
-        // objects; the camera holds its last good pose meanwhile.
+        // Established world: reset is the last resort (v3 §12, §16) — long
+        // loss AND enough failed relocalization attempts; a short loss keeps
+        // map, world and objects while the camera holds its last good pose.
+        // No world yet (v10 §8–§12): the lost map is dropped quickly and the
+        // scan re-initializes where the camera looks now.
         tracker.reset(this.tracks);
         this.planeDetector.reset();
         this.planeTracker.reset(this.tracks);
@@ -607,6 +636,7 @@ export class VisionEngine {
         this.pendingReloc = null;
         this.relocMonitor = null;
         this.relocDiagnostics = null;
+        this.worldEstablished = false;
       }
       this.sourceHistory = (
         this.sourceHistory + (relocalizedNow ? "R" : res.tracked ? (sel.source === "plane" ? "P" : "M") : "·")

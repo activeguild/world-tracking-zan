@@ -76,6 +76,10 @@ export interface HudStats {
   inlierCount: number;
   planeConfidence: number;
   state: string;
+  /** v10 phase (INITIAL_SCAN / SURFACE_SCAN / PLANE_CANDIDATE / WORLD_TRACKING / WORLD_LOST / RELOCALIZING). */
+  phase?: string;
+  /** World tracking established for the current map (v10 §27). */
+  worldEstablished?: boolean;
   visionMs: number;
   /** Camera frames skipped because the vision backend was still busy. */
   framesDropped?: number;
@@ -251,6 +255,10 @@ export class DebugOverlay {
 
     // ---- always ----
     rows.push({ text: `State  ${s.state}`, cls: "hud-state" });
+    if (s.phase) {
+      rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
+    }
+    if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
     rows.push(
       row("FPS", `${s.renderFps.toFixed(0)} / vis ${s.visionFps.toFixed(0)} (${s.visionMs.toFixed(0)}ms)${s.framesDropped ? `  drop ${s.framesDropped}` : ""}`),
     );
@@ -324,6 +332,8 @@ export class DebugOverlay {
     // ---- RELOC (only while lost, during an attempt, or right after a relocalization) ----
     if (r && (lost || r.attempt !== "none" || r.diag || m?.relocalized)) {
       rows.push(section("RELOC"));
+      // v10 §28: why we are here — only an established world is relocalized into.
+      if (lost) rows.push(row("Reason", s.worldEstablished ? "WORLD_LOST" : "scan continues (no world)"));
       const d = r.diag;
       if (d) {
         rows.push(row("KF", `${d.keyframes} / try ${d.tried}${d.age > 0 ? `  (${d.age}f ago)` : ""}`));

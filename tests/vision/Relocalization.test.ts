@@ -173,6 +173,49 @@ describe("Relocalization (Phase 5)", () => {
     expect(relocOk || relinked).toBe(true);
   });
 
+  it("Test 8 (v10): moving to another place before a world exists never relocalizes — the map re-initializes there and a plane is found", () => {
+    const engine = new VisionEngine(W, H, resolveConfig(), createRng(21));
+    const other = makeTexture(W, H, createRng(6060), [10, 25, 60, 150]);
+    const otherN = [0, Math.SQRT1_2, Math.SQRT1_2];
+    const otherFrame = (f: number) => {
+      const t = [-0.004 * f, -0.001 * f, 0];
+      return f === 0 ? other : warpImage(other, W, H, pixelHomography(I, t, otherN, 1), 128);
+    };
+    const outs: VisionOutput[] = [];
+    let frameId = 0;
+    // Desk A: only long enough to initialize a map, not to find a plane.
+    for (let f = 0; f < 30; f++, frameId++) {
+      const o = engine.process(input(frameId, deskFrame(f).img, gravity));
+      outs.push(o);
+      if (o.mapPose && o.state === TrackingState.PLANE_DETECTING) break;
+    }
+    const atA = outs[outs.length - 1];
+    expect(atA.mapPose).not.toBeNull();
+    expect(atA.worldEstablished).toBe(false);
+    const mapA = atA.mapPose!.mapFrameId;
+
+    // The user carries the phone to desk B (unrelated texture) and scans there.
+    let relocalizing = 0;
+    let relocAttempts = 0;
+    let found = -1;
+    for (let f = 0; f < 90; f++, frameId++) {
+      const o = engine.process(input(frameId, otherFrame(f), gravity));
+      outs.push(o);
+      if (o.state === TrackingState.RELOCALIZING) relocalizing++;
+      if (o.relocalization.attempt !== "none") relocAttempts++;
+      if (found < 0 && o.state === TrackingState.PLANE_FOUND) found = f;
+    }
+    // AC-1 / AC-3 / AC-4: never RELOCALIZING, no relocalization attempts, a
+    // new map at desk B and a plane found there.
+    expect(relocalizing).toBe(0);
+    expect(relocAttempts).toBe(0);
+    expect(found).toBeGreaterThan(0);
+    const last = outs[outs.length - 1];
+    expect(last.mapPose!.mapFrameId).not.toBe(mapA);
+    expect(last.worldEstablished).toBe(true);
+    console.log(`[v10] desk B: plane found after ${found} frames, new map ${last.mapPose!.mapFrameId} (old ${mapA})`);
+  });
+
   it("creates keyframes as the camera moves and keeps the count bounded", () => {
     const cfg = resolveConfig();
     const engine = new VisionEngine(W, H, cfg, createRng(13));

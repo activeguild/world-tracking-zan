@@ -230,6 +230,14 @@ export interface LandmarkConfig {
   /** Cap of the lost-time growth factor (v5 §13): beyond it only relocalization can bring the camera back. */
   jumpRejectMaxLostGrowth: number;
   /**
+   * Before a world is established (v10 §8–§12) a lost map is not worth
+   * keeping: after this many lost frames the map and keyframes are dropped
+   * and the scan re-initializes where the camera looks now. Short enough
+   * that moving to another desk feels immediate, long enough for a fast
+   * swing over the same surface to recover through re-association.
+   */
+  preWorldLostResetFrames: number;
+  /**
    * Long loss (v5 §12–§14): after this many lost frames the normal PnP
    * recovery needs minRecoveryInliersLong inliers (instead of
    * minRecoveryInliers), so a stale pose, a widened gate and a few links do
@@ -379,6 +387,12 @@ export interface WorldConfig {
   assumedPlaneDistanceMeters: number;
   /** Keep rendering objects at the last pose for this long after tracking is lost (ms, spec §33). */
   holdPoseOnLostMs: number;
+  /**
+   * After the world was lost, show generic recovery guidance first; the
+   * "return to where you were" guidance appears only once relocalization
+   * has been failing for this long (ms, v10 §14–§15).
+   */
+  relocGuidanceDelayMs: number;
   /**
    * Apply the One Euro filters to the rendered camera pose. Off while the
    * raw pose is being validated (v3 §22): filter lag and real drift must not
@@ -585,6 +599,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     jumpRejectLostGrowthPerFrame: 0.1,
     // Capped at 3× (20 lost frames): about 12 cm at the desk scale.
     jumpRejectMaxLostGrowth: 3,
+    preWorldLostResetFrames: 30,
     longLostFrames: 30,
     minRecoveryInliersLong: 40,
     sourceSwitchCooldownFrames: 15,
@@ -651,6 +666,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     // Debug value (v3 §14): a short loss must not hide the content; the pose
     // is held at the last good one. Tighten for production.
     holdPoseOnLostMs: 10000,
+    relocGuidanceDelayMs: 2000,
     smoothing: false,
     // Light smoothing: with the displayed frame synchronized to the pose,
     // any filter lag shows up as the object sliding during motion.
