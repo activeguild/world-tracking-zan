@@ -354,6 +354,21 @@ export interface RelocalizationConfig {
   coarseRefineRadius: number;
   /** Coarse search radius (pixels of the coarse image ≈ level-0 / 8); kept for the full search used in tests / fallback. */
   coarseSearchRadius: number;
+  /**
+   * Smallest overlap per axis (fraction of the image) a coarse shift may
+   * have. Shifts are chosen by NCC × √overlap so that a large shift with a
+   * small overlap does not win by chance (on device such shifts put most
+   * keyframe observations outside the image: `out_of_bounds`).
+   */
+  coarseMinOverlap: number;
+  /**
+   * While tracking is weak the keyframe ranking is kept warm every this
+   * many frames (v14 §3–§6). Ranking 8 keyframes costs about one LK pass, so
+   * this is sparser than `attemptEveryNFrames`; a prepared ranking is reused
+   * on the first lost frame only while it is at most this old and the view
+   * has not changed.
+   */
+  prepareEveryNFrames: number;
   /** Minimum NCC score of the coarse alignment to proceed. */
   coarseMinScore: number;
   /**
@@ -712,6 +727,11 @@ export const DEFAULT_CONFIG: ARConfig = {
     rankSearchRadius: 12,
     coarseRefineRadius: 2,
     coarseSearchRadius: 24,
+    coarseMinOverlap: 0.5,
+    // On device the preparation every 3 frames (PnP below trusted quality the
+    // whole time) cost 25 → 43 ms per frame; every 10 frames keeps the
+    // ranking at most a third of a second old.
+    prepareEveryNFrames: 10,
     // The PnP acceptance (≥ 25 inliers, ≤ 1.5 px) is the real verifier; the
     // coarse score only saves work. 0.45 refused views that came back with a
     // few degrees of rotation.

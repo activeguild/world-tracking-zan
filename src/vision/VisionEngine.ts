@@ -738,7 +738,7 @@ export class VisionEngine {
         if (prepare && this.relocalizer.count > 0) {
           this.relocStatus.preparing = true;
           if (!relocalizedNow) this.relocStatus.searchStage = "prepare";
-          if (this.relocPreparedFrame < 0 || frameId - this.relocPreparedFrame >= Math.max(1, this.config.relocalization.attemptEveryNFrames)) {
+          if (this.relocPreparedFrame < 0 || frameId - this.relocPreparedFrame >= Math.max(1, this.config.relocalization.prepareEveryNFrames)) {
             const tp0 = now();
             this.relocalizer.prepare(this.curPyramid, frameId);
             this.timing.reloc += now() - tp0;

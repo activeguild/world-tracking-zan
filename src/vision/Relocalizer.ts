@@ -583,6 +583,8 @@ export class Relocalizer {
   private lastKeyframePose: RigidTransform | null = null;
   private lastKeyframeFrame = -Infinity;
   private readonly tracker: FeatureTracker;
+  /** Half LK window (level-0 px) for the in-bounds check of the shifted observations. */
+  private readonly lkHalf: number;
   private scratchCoarse: CoarseImage | null = null;
   private readonly retry = new Map<number, KeyframeRetryState>();
   private prepared: RelocalizationPreparation | null = null;
@@ -602,6 +604,7 @@ export class Relocalizer {
       forwardBackwardThreshold: config.lkForwardBackwardPx > 0 ? config.lkForwardBackwardPx : trackerConfig.forwardBackwardThreshold,
       maxResidual: config.lkMaxResidual > 0 ? config.lkMaxResidual : trackerConfig.maxResidual,
     });
+    this.lkHalf = ((trackerConfig.windowSize | 1) - 1) / 2;
   }
 
   reset(): void {
@@ -688,7 +691,7 @@ export class Relocalizer {
   private rankKeyframes(rank: CoarseImage, preferKeyframeId?: number): RankedKeyframe[] {
     const radius = this.config.rankSearchRadius;
     const ranked: RankedKeyframe[] = this.keyframes.map((kf) => {
-      const s = coarseShift(kf.rank, rank, radius);
+      const s = coarseShift(kf.rank, rank, radius, this.config.coarseMinOverlap);
       return { keyframeId: kf.id, rankScore: s.score, dx: s.dx, dy: s.dy, selected: false, suppressed: false };
     });
     const recency = new Map<number, number>();
@@ -727,7 +730,7 @@ export class Relocalizer {
     const p = this.prepared;
     if (!p || frameId === undefined) return null;
     const age = frameId - p.frameId;
-    if (age < 0 || age > Math.max(1, this.config.attemptEveryNFrames)) return null;
+    if (age < 0 || age > Math.max(1, this.config.prepareEveryNFrames)) return null;
     if (coarseShift(p.rank, rank, 0).score < this.config.retryImageChangeScore) return null;
     // Copy with fresh selection flags; the cached scores order the candidates.
     return p.ranked.map((r) => ({ ...r, selected: false, suppressed: false }));
@@ -891,14 +894,14 @@ export class Relocalizer {
       // a frame or two old: re-measure it for the selected keyframes so the
       // 1/8 refinement starts from this frame's alignment.
       if (preparedRanking) {
-        const fresh = coarseShift(kf.rank, curRank, cfg.rankSearchRadius);
+        const fresh = coarseShift(kf.rank, curRank, cfg.rankSearchRadius, cfg.coarseMinOverlap);
         rank.dx = fresh.dx;
         rank.dy = fresh.dy;
         rank.rankScore = fresh.score;
         trial.rankScore = fresh.score;
       }
       diag.coarseTested++;
-      const shift = coarseShiftAround(kf.coarse, curCoarse, rank.dx * 2, rank.dy * 2, cfg.coarseRefineRadius);
+      const shift = coarseShiftAround(kf.coarse, curCoarse, rank.dx * 2, rank.dy * 2, cfg.coarseRefineRadius, cfg.coarseMinOverlap);
       trial.coarseScore = shift.score;
       diag.bestCoarseScore = Math.max(diag.bestCoarseScore, shift.score);
       if (shift.score < cfg.coarseMinScore) {
@@ -922,15 +925,36 @@ export class Relocalizer {
         record(trial, { matchScore: shift.score }, `kf ${kf.id}: ${n} landmarks left < ${cfg.minInliers}`);
         continue;
       }
-      diag.lkTested++;
       const pts = new Float32Array(n * 2);
       const guesses = new Float32Array(n * 2);
+      let inBounds = 0;
+      const margin = this.lkHalf + 2;
       for (let i = 0; i < n; i++) {
         pts[i * 2] = obs[i].x;
         pts[i * 2 + 1] = obs[i].y;
-        guesses[i * 2] = obs[i].x + sx;
-        guesses[i * 2 + 1] = obs[i].y + sy;
+        const gx = obs[i].x + sx;
+        const gy = obs[i].y + sy;
+        guesses[i * 2] = gx;
+        guesses[i * 2 + 1] = gy;
+        if (gx >= margin && gy >= margin && gx < current.width - margin && gy < current.height - margin) inBounds++;
       }
+      trial.lkObservations = n;
+      if (inBounds < cfg.minInliers) {
+        // v14 follow-up: the shift leaves too few observations inside the
+        // image for a validation to be possible — do not spend the LK; the
+        // keyframe does not show this view (or the shift is wrong).
+        trial.stage = "lk";
+        trial.lkStatus.outOfBounds = n - inBounds;
+        trial.lkFailureReason = "out_of_bounds";
+        this.noteFailure(kf, curRank, frameId, "lk");
+        record(
+          trial,
+          { matchScore: shift.score },
+          `kf ${kf.id}: only ${inBounds}/${n} observations inside the image after the coarse shift (${sx.toFixed(0)}, ${sy.toFixed(0)}) px < ${cfg.minInliers} (score ${shift.score.toFixed(2)}, overlap ${shift.overlap.toFixed(2)})`,
+        );
+        continue;
+      }
+      diag.lkTested++;
       const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, cfg.lkMaxDisplacementPx);
       trial.lkObservations = n;
       trial.lkTracked = res.okCount;
@@ -1145,14 +1169,36 @@ export function coarseShift(
   a: { width: number; height: number; data: Uint8Array; mean: number },
   b: { width: number; height: number; data: Uint8Array; mean: number },
   radius: number,
-): { dx: number; dy: number; score: number } {
-  return coarseShiftAround(a, b, 0, 0, radius);
+  minOverlap = 0.5,
+): CoarseShiftResult {
+  return coarseShiftAround(a, b, 0, 0, radius, minOverlap);
+}
+
+/** Result of a coarse shift search: the raw NCC at the chosen shift and the overlap it was measured on. */
+export interface CoarseShiftResult {
+  dx: number;
+  dy: number;
+  /** Zero-mean NCC over the overlapping region (−1…1). */
+  score: number;
+  /** Overlapping area / image area at that shift (0…1). */
+  overlap: number;
+  /** score × √overlap — what the search maximizes (v14 follow-up). */
+  weightedScore: number;
 }
 
 /**
  * Same search restricted to shifts within `radius` of (cx, cy) — the 1/8
  * refinement around the shift found on the 1/16 ranking image (v14 §10).
  * Radius 0 evaluates the single shift (cx, cy).
+ *
+ * The shift is chosen by `score × √overlap`, not by the raw NCC: the NCC of
+ * two unrelated patches has a standard deviation ∝ 1/√N, so a large shift
+ * with a small overlap produces high *chance* maxima — on device that sent
+ * 83 of 89 keyframe observations out of the image (`out_of_bounds`). The
+ * weight normalizes the noise level across shifts; the raw NCC at the
+ * chosen shift is still what `coarseMinScore` and v12's relaxed-range NCC
+ * gate on. Shifts with less than `minOverlap` of the image overlapping per
+ * axis are not considered.
  */
 export function coarseShiftAround(
   a: { width: number; height: number; data: Uint8Array; mean: number },
@@ -1160,19 +1206,22 @@ export function coarseShiftAround(
   cx: number,
   cy: number,
   radius: number,
-): { dx: number; dy: number; score: number } {
+  minOverlap = 0.5,
+): CoarseShiftResult {
   const w = a.width;
   const h = a.height;
-  let best = { dx: 0, dy: 0, score: -1 };
+  let best: CoarseShiftResult = { dx: 0, dy: 0, score: -1, overlap: 0, weightedScore: -1 };
   const am = a.mean;
   const bm = b.mean;
+  const minW = w * minOverlap;
+  const minH = h * minOverlap;
   for (let dy = cy - radius; dy <= cy + radius; dy++) {
     const y0 = Math.max(0, dy);
     const y1 = Math.min(h, h + dy);
     for (let dx = cx - radius; dx <= cx + radius; dx++) {
       const x0 = Math.max(0, dx);
       const x1 = Math.min(w, w + dx);
-      if (x1 - x0 < w / 2 || y1 - y0 < h / 2) continue;
+      if (x1 - x0 < minW || y1 - y0 < minH) continue;
       let sab = 0;
       let saa = 0;
       let sbb = 0;
@@ -1190,7 +1239,9 @@ export function coarseShiftAround(
       const denom = Math.sqrt(saa * sbb);
       if (denom < 1e-9) continue;
       const score = sab / denom;
-      if (score > best.score) best = { dx, dy, score };
+      const overlap = ((x1 - x0) * (y1 - y0)) / (w * h);
+      const weightedScore = score * Math.sqrt(overlap);
+      if (weightedScore > best.weightedScore) best = { dx, dy, score, overlap, weightedScore };
     }
   }
   return best;

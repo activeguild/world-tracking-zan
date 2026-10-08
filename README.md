@@ -312,7 +312,10 @@ Every attempt ranks all keyframes by coarse similarity (zero-mean NCC
 shift search on a 1/16 image, `rankSearchRadius`), only the top
 `maxLkCandidatesPerFrame` (3; 4 on the first attempt) get the 1/8
 refinement (`coarseRefineRadius`) → LK → PnP; a strong candidate stops the
-search. Keyframe → current LK has its own forward-backward / residual
+search. Shifts are chosen by NCC × √overlap (`coarseMinOverlap`) so a large
+shift with little overlap cannot win by chance, and a shift that leaves
+fewer than `minInliers` observations inside the image skips LK as
+`out_of_bounds`. Keyframe → current LK has its own forward-backward / residual
 bounds (`lkForwardBackwardPx` 2.0, `lkMaxResidual`); the frame-to-frame
 tracker is unchanged. A keyframe that failed is not retried on an
 unchanged view for `retryCooldownFrames` (image change = zero-shift NCC

@@ -8,7 +8,8 @@ import { FeatureDetector } from "../../src/vision/FeatureDetector";
 import { ImagePyramid } from "../../src/vision/ImagePyramid";
 import { LandmarkMap } from "../../src/vision/LandmarkMap";
 import { createRng } from "../../src/vision/OutlierRejection";
-import { Relocalizer } from "../../src/vision/Relocalizer";
+import { downsampleToCoarse } from "../../src/vision/Keyframe";
+import { coarseShift, Relocalizer } from "../../src/vision/Relocalizer";
 import {
   candidateAction,
   candidateStale,
@@ -301,10 +302,52 @@ describe("v14 keyframe ranking and search budget (Tests 5–11, 14, AC-2 / AC-3)
     const r2 = reloc.relocalize(elsewhere, map, K, null, 0, { frameId: 42 });
     expect(r2.diagnostics.usedPreparedRanking).toBe(false);
     expect(r2.keyframeId).toBe(7);
-    // Too old either way.
+    // Within the preparation period it is reused; older than that not.
     reloc.prepare(current, 50);
-    const r3 = reloc.relocalize(current, map, K, null, 0, { frameId: 50 + RC.attemptEveryNFrames + 1 });
-    expect(r3.diagnostics.usedPreparedRanking).toBe(false);
+    const r3 = reloc.relocalize(current, map, K, null, 0, { frameId: 50 + RC.prepareEveryNFrames });
+    expect(r3.diagnostics.usedPreparedRanking).toBe(true);
+    reloc.prepare(current, 70);
+    const r4 = reloc.relocalize(current, map, K, null, 0, { frameId: 70 + RC.prepareEveryNFrames + 1 });
+    expect(r4.diagnostics.usedPreparedRanking).toBe(false);
+  });
+
+  it("follow-up (on-device `out_of_bounds`): a shift that leaves too few observations inside the image skips LK with that reason; the coarse search weighs the overlap", () => {
+    // Keyframe observing only the right-hand band of the desk; the camera
+    // then pans so the content moves 180 px to the right: the band leaves
+    // the image, so no relocalization from this keyframe is possible.
+    const { map, reloc } = keyframeStore([textures[0], textures[1]], (kf, x) => kf !== 0 || x > 430);
+    expect(reloc.keyframes[0].observations.length).toBeGreaterThanOrEqual(RC.minInliers);
+    const panned = pyramidOf(translateImage(textures[0], W, H, 180, 0, 128));
+    const r = reloc.relocalize(panned, map, K, null, 0, { frameId: 10, preferKeyframeId: 1 });
+    const t1 = r.diagnostics.trials.find((t) => t.keyframeId === 1)!;
+    expect(t1.coarseScore).toBeGreaterThanOrEqual(RC.coarseMinScore); // the pan was found …
+    expect(t1.stage).toBe("lk");
+    expect(t1.lkFailureReason).toBe("out_of_bounds"); // … but the band is gone
+    expect(t1.lkTracked).toBe(0);
+    expect(t1.lkStatus.outOfBounds).toBeGreaterThan(t1.lkObservations - RC.minInliers);
+    expect(r.diagnostics.lkTested).toBe(0); // no LK spent on it (keyframe 2 is unrelated and fails at coarse)
+    expect(r.reason).toMatch(/inside the image/);
+    expect(reloc.retryStateOf(1)!.lastStage).toBe("lk");
+
+    // Overlap weighting: an identical image is matched at zero shift with
+    // full overlap; a shifted copy is still found, with the overlap reported.
+    const a = reloc.keyframes[0].coarse;
+    const same = coarseShift(a, a, RC.coarseSearchRadius, RC.coarseMinOverlap);
+    expect(same.dx).toBe(0);
+    expect(same.dy).toBe(0);
+    expect(same.overlap).toBe(1);
+    expect(same.weightedScore).toBeCloseTo(same.score, 12);
+    const shifted = downsampleToCoarse(pyramidOf(translateImage(textures[0], W, H, 64, -32, 128)).levels[2]);
+    const s = coarseShift(a, shifted, RC.coarseSearchRadius, RC.coarseMinOverlap);
+    expect(s.dx).toBe(8); // 64 px / 8
+    expect(s.dy).toBe(-4);
+    expect(s.overlap).toBeLessThan(1);
+    expect(s.overlap).toBeGreaterThanOrEqual(RC.coarseMinOverlap * RC.coarseMinOverlap);
+    expect(s.weightedScore).toBeLessThan(s.score);
+    // Shifts with less than the minimum overlap per axis are never chosen.
+    const far = coarseShift(a, shifted, 60, 0.5);
+    expect(Math.abs(far.dx)).toBeLessThanOrEqual(a.width / 2);
+    expect(Math.abs(far.dy)).toBeLessThanOrEqual(a.height / 2);
   });
 });
 
