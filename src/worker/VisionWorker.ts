@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import { VisionEngine } from "../vision/VisionEngine";
-import type { ErrorResponse, ResultResponse, WorkerRequest, WorkerResponse } from "./protocol";
+import { wallNow, type ErrorResponse, type ResultResponse, type WorkerRequest, type WorkerResponse } from "./protocol";
 
 /**
  * Web Worker entry point (spec §39).
@@ -30,6 +30,7 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
       return;
     }
     case "frame": {
+      const receivedAt = wallNow();
       if (!engine) {
         const err: ErrorResponse = {
           type: "error",
@@ -76,6 +77,8 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           timing: { ...engine.timing },
           fastThreshold: engine.fastThreshold,
           gray: msg.gray,
+          receivedAt,
+          postedAt: wallNow(),
         };
         post(res, landmarksBuf === tracksBuf ? [tracksBuf, msg.gray] : [tracksBuf, landmarksBuf, msg.gray]);
       } catch (e) {

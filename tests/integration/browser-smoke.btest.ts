@@ -227,6 +227,9 @@ describe("Phase 1 browser smoke test", () => {
     expect(on.toggleOn).toBe(true);
     expect(on.text).toMatch(/State/);
     expect(on.text).toMatch(/Motion/);
+    // v16: engine per-stage and main-thread timing rows.
+    expect(on.text).toMatch(/Vis\s+pyr/);
+    expect(on.text).toMatch(/Main\s+grab/);
     expect(onLogs.length).toBeGreaterThan(0);
     await ctxOn.close();
   });

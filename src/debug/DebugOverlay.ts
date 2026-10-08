@@ -112,6 +112,21 @@ export interface HudStats {
   framesDropped?: number;
   /** Per-stage vision engine time of the last frame (ms, v16). */
   engineTiming?: { pyramid: number; track: number; ransac: number; detect: number; pose: number; map: number; plane: number; reloc: number; total: number } | null;
+  /** Main-thread / transport time of the last frame (ms, v16). */
+  mainTiming?: {
+    grabMs: number;
+    captureMs: number;
+    queueInMs: number;
+    engineMs: number;
+    queueOutMs: number;
+    roundTripMs: number;
+    worldMs: number;
+    presentMs: number;
+    overlayMs: number;
+    resultIntervalMs: number;
+  } | null;
+  /** Time of the previous HUD refresh (formatting + DOM, ms). */
+  hudMs?: number;
   fastThreshold: number;
   processingSize: string;
   backend: string;
@@ -363,6 +378,22 @@ export class DebugOverlay {
           "Vis",
           `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)} = ${ms(et.total)}ms`,
           et.total > 33 ? "hud-warn" : undefined,
+        ),
+      );
+    }
+    // v16: the rest of the frame's wall time (main thread + worker transport).
+    // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this
+    // row says whether the grab, the display copy, the result waiting for a
+    // busy main thread (q↓), the Three.js update or the HUD itself is to blame.
+    const mt = s.mainTiming;
+    if (mt) {
+      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
+      const overhead = mt.roundTripMs - mt.engineMs;
+      rows.push(
+        row(
+          "Main",
+          `grab ${ms(mt.grabMs)} cap ${ms(mt.captureMs)} q↑ ${ms(mt.queueInMs)} eng ${ms(mt.engineMs)} q↓ ${ms(mt.queueOutMs)} rtt ${ms(mt.roundTripMs)}  world ${ms(mt.worldMs)} show ${ms(mt.presentMs)} ovl ${ms(mt.overlayMs)} hud ${ms(s.hudMs ?? 0)}  every ${ms(mt.resultIntervalMs)}ms`,
+          overhead > 20 ? "hud-warn" : undefined,
         ),
       );
     }

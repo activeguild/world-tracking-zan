@@ -25,7 +25,7 @@ import type {
   MotionDiagnostics,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
-import type { EngineTiming } from "../worker/protocol";
+import { wallNow, type EngineTiming } from "../worker/protocol";
 import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
 import { WorldAnchor } from "./WorldAnchor";
 import {
@@ -124,6 +124,8 @@ export interface ARStats {
   planeRecovery: PlaneRecoveryDiagnostics | null;
   /** Per-stage vision engine time of the last processed frame (ms, v16); null before the first frame. */
   engineTiming: EngineTiming | null;
+  /** Main-thread / transport time of the last processed frame (ms, v16); null before the first frame. */
+  mainTiming: MainTiming | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -155,6 +157,35 @@ export interface ARStats {
   /** Frame-synchronized display active. */
   syncVideo: boolean;
   backend: "worker" | "main";
+}
+
+/**
+ * Where a frame's wall time goes outside the vision engine (v16). On Android
+ * Chrome the engine took 22–31 ms yet vision ran at 10–14 fps with 9–16
+ * dropped camera frames per second: the missing 45–65 ms were somewhere in
+ * grab → transfer → engine → transfer → world update → render → present.
+ */
+export interface MainTiming {
+  /** drawImage + getImageData + grayscale of the processing frame. */
+  grabMs: number;
+  /** FramePresenter.capture (display copy for the pose-synchronized frame). */
+  captureMs: number;
+  /** Frame message: handed to the backend → picked up by the worker. */
+  queueInMs: number;
+  /** Engine processing (= VisionResult.processingMs). */
+  engineMs: number;
+  /** Result message: posted by the worker → handled on the main thread (includes waiting for a busy main thread). */
+  queueOutMs: number;
+  /** Handed to the backend → result handled. */
+  roundTripMs: number;
+  /** updateWorld (anchor, visibility, Three.js camera + render). */
+  worldMs: number;
+  /** FramePresenter.present (blit of the synchronized frame). */
+  presentMs: number;
+  /** Debug overlay (features / motion vectors / landmarks / plane grid). */
+  overlayMs: number;
+  /** Interval between consecutive processed-frame results (ms). */
+  resultIntervalMs: number;
 }
 
 type Listener<K extends keyof ARSessionEvents> = ARSessionEvents[K];
@@ -220,6 +251,11 @@ export class ARSession {
   private planeSearchStageSinceMs = 0;
   private planeRecovery: PlaneRecoveryDiagnostics | null = null;
   private engineTiming: EngineTiming | null = null;
+  private mainTiming: MainTiming | null = null;
+  /** Grab / capture time of the frame in flight (one at a time). */
+  private pendingGrabMs = 0;
+  private pendingCaptureMs = 0;
+  private lastResultAt = 0;
   private objectVisibility: ObjectVisibilityDecision = { visible: false, reason: "WORLD_NOT_READY" };
   private loggedPlaneRecoveries = 0;
   private loggedPlaneStage: string | null = null;
@@ -476,6 +512,7 @@ export class ARSession {
       planeSearchStageMs: this.planeSearch ? performance.now() - this.planeSearchStageSinceMs : 0,
       planeRecovery: this.planeRecovery,
       engineTiming: this.engineTiming,
+      mainTiming: this.mainTiming,
       planePose: this.planePose,
       planeAnchored: this.planeAnchored,
       frameTimestampMs: this.frameTimestampMs,
@@ -557,9 +594,14 @@ export class ARSession {
       if (g && g.length === 3) gravity = [g[0], g[1], g[2]];
     }
     this.lastGravity = gravity;
+    const g0 = performance.now();
     const frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    const g1 = performance.now();
     // Keep a display copy of this frame for when its pose arrives (GPU blit).
     if (this.syncActive) this.presenter!.capture(this.video, frame.frameId);
+    const g2 = performance.now();
+    this.pendingGrabMs = g1 - g0;
+    this.pendingCaptureMs = g2 - g1;
     this.backend.processFrame(frame);
   }
 
@@ -610,8 +652,11 @@ export class ARSession {
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
     this.setState(r.state);
+    const w0 = performance.now();
     this.updateWorld(r);
+    const w1 = performance.now();
     if (this.syncActive) this.presentFrame(r.frameId);
+    const w2 = performance.now();
 
     const found = !!r.plane?.found;
     if (found && !this.planeWasFound) {
@@ -624,11 +669,29 @@ export class ARSession {
       this.emit("planeLost");
     }
 
+    const o0 = performance.now();
     if (this.renderer && this.config.debug.overlay && this.debugVisualization && this.grabber && this.intrinsics) {
       this.renderer.resize();
       this.renderer.draw(r.tracks, r.trackCount, this.grabber.width, this.grabber.height);
       this.planeRenderer?.draw(r.mapPose, r.plane, r.landmarks, r.landmarkCount, this.intrinsics, !this.worldAnchor.isReady);
     }
+    const o1 = performance.now();
+    // v16: main-thread / transport breakdown of this frame (the wall-clock
+    // stamps are comparable across the worker boundary, see protocol.wallNow).
+    const arrivedWall = wallNow();
+    this.mainTiming = {
+      grabMs: this.pendingGrabMs,
+      captureMs: this.pendingCaptureMs,
+      queueInMs: Math.max(0, r.receivedAt - r.sentAt),
+      engineMs: r.processingMs,
+      queueOutMs: Math.max(0, arrivedWall - r.postedAt),
+      roundTripMs: Math.max(0, arrivedWall - r.sentAt),
+      worldMs: w1 - w0,
+      presentMs: w2 - w1,
+      overlayMs: o1 - o0,
+      resultIntervalMs: this.lastResultAt > 0 ? arrived - this.lastResultAt : 0,
+    };
+    this.lastResultAt = arrived;
     this.logger.periodic(performance.now(), {
       state: r.state,
       features: r.quality.featureCount,

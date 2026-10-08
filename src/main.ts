@@ -328,11 +328,13 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
 // HUD refresh loop (independent of vision rate). With the HUD hidden nothing
 // is formatted or written to the DOM (v9 §28); the engine's diagnostics are
 // still computed and available through getStats().
+let lastHudMs = 0;
 function refreshHud(): void {
   if (!hudVisible) {
     requestAnimationFrame(refreshHud);
     return;
   }
+  const hud0 = performance.now();
   const s = session.getStats();
   hud.update({
     renderFps: s.renderFps,
@@ -354,6 +356,8 @@ function refreshHud(): void {
     visionMs: s.visionMs,
     framesDropped: s.framesDropped,
     engineTiming: s.engineTiming,
+    mainTiming: s.mainTiming,
+    hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
     processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
     backend: s.backend,
@@ -501,6 +505,8 @@ function refreshHud(): void {
       : null,
     build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",
   });
+  // v16: the HUD's own cost (formatting + DOM) is part of the main-thread budget.
+  lastHudMs = performance.now() - hud0;
   requestAnimationFrame(refreshHud);
 }
 requestAnimationFrame(refreshHud);

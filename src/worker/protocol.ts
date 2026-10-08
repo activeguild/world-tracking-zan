@@ -40,6 +40,11 @@ export interface FrameRequest {
   intrinsics: CameraIntrinsics;
   /** Gravity direction in the camera frame, if known. */
   gravity: number[] | null;
+  /**
+   * Wall-clock send time (performance.timeOrigin + performance.now(), ms),
+   * comparable across the main thread and the worker (v16 main-thread timing).
+   */
+  sentAt: number;
 }
 
 export interface ResetRequest {
@@ -91,6 +96,14 @@ export interface ResultResponse {
   fastThreshold: number;
   /** The input frame buffer, returned for reuse. Transferred. */
   gray: ArrayBuffer;
+  /** Wall-clock times (same base as FrameRequest.sentAt): frame message received, result posted. */
+  receivedAt: number;
+  postedAt: number;
+}
+
+/** Wall-clock milliseconds comparable across threads. */
+export function wallNow(): number {
+  return performance.timeOrigin + performance.now();
 }
 
 export interface ErrorResponse {

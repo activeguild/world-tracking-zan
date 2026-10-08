@@ -328,7 +328,12 @@ rejected as a `rotation_jump` on every attempt. Beyond that age the jump is
 diagnostic only (HUD `Jump … no limit (long loss)`); the other validators
 and the confirmation / post-monitor are unchanged. The HUD shows the engine's
 per-stage time right under the FPS row (`Vis pyr … lk … 2view … map … plane …
-reloc … = total`), and before a world exists a plane search that keeps
+reloc … = total`) and, below it, where the rest of the frame's wall time goes
+(`Main grab … cap … q↑ … eng … q↓ … rtt …  world … show … ovl … hud …`:
+frame grab, display copy, worker transport both ways — the wall-clock stamps
+are comparable across threads — Three.js update, synchronized blit, debug
+overlay and the HUD itself; on Android Chrome the engine ran in 22–31 ms while
+vision reached only 10–14 fps), and before a world exists a plane search that keeps
 failing the 2D-extent test for `sidewaysGuidanceDelayMs` asks the user to
 move the phone sideways (`MOVE_SIDEWAYS`) instead of "show a flat surface".
 
