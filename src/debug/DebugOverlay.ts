@@ -351,6 +351,21 @@ export class DebugOverlay {
     rows.push(
       row("FPS", `${s.renderFps.toFixed(0)} / vis ${s.visionFps.toFixed(0)} (${s.visionMs.toFixed(0)}ms)${s.framesDropped ? `  drop ${s.framesDropped}` : ""}`),
     );
+    // v16: where the vision time goes (the engine measured it all along; the
+    // 17 → 120 ms climb before the world existed on device had no breakdown).
+    // Right under FPS: at the end of the TIMING section it was below the fold
+    // of the on-device recording.
+    const et = s.engineTiming;
+    if (et) {
+      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
+      rows.push(
+        row(
+          "Vis",
+          `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)} = ${ms(et.total)}ms`,
+          et.total > 33 ? "hud-warn" : undefined,
+        ),
+      );
+    }
 
     // ---- TRACK ----
     rows.push(section("TRACK"));
@@ -653,19 +668,6 @@ export class DebugOverlay {
     rows.push(section("TIMING"));
     if (s.timing) {
       rows.push(row("Pose", `age ${s.timing.ageMs.toFixed(0)}ms${s.timing.stale ? "  STALE" : ""}`, s.timing.stale ? "hud-warn" : undefined));
-    }
-    // v16: where the vision time goes (the engine measured it all along; the
-    // 17 → 120 ms climb before the world existed on device had no breakdown).
-    const et = s.engineTiming;
-    if (et) {
-      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
-      rows.push(
-        row(
-          "Vis",
-          `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)} = ${ms(et.total)}ms`,
-          et.total > 33 ? "hud-warn" : undefined,
-        ),
-      );
     }
     rows.push(row("Proc", `FAST ${s.fastThreshold}  ${s.processingSize}  [${s.backend}]`));
     if (s.build) rows.push(row("Build", s.build));
