@@ -158,6 +158,14 @@ export interface HudStats {
       planeErrorPx: number;
       otherCount: number;
       otherErrorPx: number;
+      lowParallaxCount: number;
+      lowParallaxErrorPx: number;
+      midParallaxCount: number;
+      midParallaxErrorPx: number;
+      highParallaxCount: number;
+      highParallaxErrorPx: number;
+      parallaxLowDeg: number;
+      parallaxHighDeg: number;
     } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
@@ -426,6 +434,16 @@ export class DebugOverlay {
             "Err",
             `center ${rb.centerErrorPx.toFixed(2)}px (${rb.centerCount})  edge ${rb.edgeErrorPx.toFixed(2)}px (${rb.edgeCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}  |  plane ${rb.planeErrorPx.toFixed(2)} (${rb.planeCount})  other ${rb.otherErrorPx.toFixed(2)} (${rb.otherCount})`,
             ratio >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        // By the landmark's triangulation parallax: error concentrated in the
+        // low bin = noisy depths (multi-view refinement); uniform = observation noise.
+        const lowHigh = rb.lowParallaxCount && rb.highParallaxCount && rb.highParallaxErrorPx > 0 ? rb.lowParallaxErrorPx / rb.highParallaxErrorPx : 0;
+        rows.push(
+          row(
+            "Par",
+            `<${rb.parallaxLowDeg}° ${rb.lowParallaxErrorPx.toFixed(2)}px (${rb.lowParallaxCount})  ${rb.parallaxLowDeg}–${rb.parallaxHighDeg}° ${rb.midParallaxErrorPx.toFixed(2)} (${rb.midParallaxCount})  >${rb.parallaxHighDeg}° ${rb.highParallaxErrorPx.toFixed(2)} (${rb.highParallaxCount})${lowHigh ? `  ×${lowHigh.toFixed(1)}` : ""}`,
+            lowHigh >= 1.5 ? "hud-warn" : undefined,
           ),
         );
       }

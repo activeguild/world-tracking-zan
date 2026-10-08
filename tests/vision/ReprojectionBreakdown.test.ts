@@ -4,7 +4,7 @@ import { TrackingState } from "../../src/ar/ARState";
 import { approximateIntrinsics } from "../../src/camera/CameraIntrinsics";
 import { type Mat3, mat3Invert, mat3Multiply, mat3TransformPoint } from "../../src/math/Matrix";
 import { createRng } from "../../src/vision/OutlierRejection";
-import type { ReprojectionBreakdown, VisionInput, VisionOutput } from "../../src/vision/types";
+import { emptyReprojectionBreakdown, type ReprojectionBreakdown, type VisionInput, type VisionOutput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
 import { makeTexture, sampleBilinear } from "../helpers/synthetic";
 
@@ -74,7 +74,7 @@ function run(k1: number): { breakdown: ReprojectionBreakdown; meanErrPx: number;
   const foundIdx = outs.findIndex((o) => o.state === TrackingState.PLANE_FOUND);
   expect(foundIdx, `k1 ${k1}: plane found`).toBeGreaterThan(0);
   // Average the breakdown over the tracked frames after the plane was found.
-  const acc: ReprojectionBreakdown = { centerCount: 0, centerErrorPx: 0, edgeCount: 0, edgeErrorPx: 0, planeCount: 0, planeErrorPx: 0, otherCount: 0, otherErrorPx: 0, centerRadius: 0 };
+  const acc: ReprojectionBreakdown = { ...emptyReprojectionBreakdown(), centerRadius: 0 };
   let frames = 0;
   let meanErr = 0;
   for (let f = foundIdx; f < FRAMES; f++) {
@@ -89,6 +89,12 @@ function run(k1: number): { breakdown: ReprojectionBreakdown; meanErrPx: number;
     acc.planeErrorPx += b.planeErrorPx * b.planeCount;
     acc.otherCount += b.otherCount;
     acc.otherErrorPx += b.otherErrorPx * b.otherCount;
+    acc.lowParallaxCount += b.lowParallaxCount;
+    acc.lowParallaxErrorPx += b.lowParallaxErrorPx * b.lowParallaxCount;
+    acc.midParallaxCount += b.midParallaxCount;
+    acc.midParallaxErrorPx += b.midParallaxErrorPx * b.midParallaxCount;
+    acc.highParallaxCount += b.highParallaxCount;
+    acc.highParallaxErrorPx += b.highParallaxErrorPx * b.highParallaxCount;
     acc.centerRadius = b.centerRadius;
     meanErr += mp.meanReprojectionErrorPx;
     frames++;
@@ -97,6 +103,9 @@ function run(k1: number): { breakdown: ReprojectionBreakdown; meanErrPx: number;
   acc.edgeErrorPx /= Math.max(1, acc.edgeCount);
   acc.planeErrorPx /= Math.max(1, acc.planeCount);
   acc.otherErrorPx /= Math.max(1, acc.otherCount);
+  acc.lowParallaxErrorPx /= Math.max(1, acc.lowParallaxCount);
+  acc.midParallaxErrorPx /= Math.max(1, acc.midParallaxCount);
+  acc.highParallaxErrorPx /= Math.max(1, acc.highParallaxCount);
   return { breakdown: acc, meanErrPx: meanErr / Math.max(1, frames), frames };
 }
 
@@ -118,7 +127,12 @@ describe("PnP reprojection breakdown (v16 diagnostics)", () => {
     const distortedRatio = distorted.breakdown.edgeErrorPx / Math.max(1e-6, distorted.breakdown.centerErrorPx);
     expect(distortedRatio).toBeGreaterThan(1.5);
     expect(distorted.breakdown.edgeErrorPx).toBeGreaterThan(pinhole.breakdown.edgeErrorPx);
-    // The per-kind counts add up to the per-region counts (same inlier set).
+    // The per-kind and per-parallax counts add up to the per-region counts (same inlier set).
     expect(pinhole.breakdown.planeCount + pinhole.breakdown.otherCount).toBe(pinhole.breakdown.centerCount + pinhole.breakdown.edgeCount);
+    const par = pinhole.breakdown.lowParallaxCount + pinhole.breakdown.midParallaxCount + pinhole.breakdown.highParallaxCount;
+    expect(par).toBe(pinhole.breakdown.centerCount + pinhole.breakdown.edgeCount);
+    console.log(
+      `[reproj] parallax bins (pinhole): <2° ${pinhole.breakdown.lowParallaxErrorPx.toFixed(2)} (${pinhole.breakdown.lowParallaxCount})  2–5° ${pinhole.breakdown.midParallaxErrorPx.toFixed(2)} (${pinhole.breakdown.midParallaxCount})  >5° ${pinhole.breakdown.highParallaxErrorPx.toFixed(2)} (${pinhole.breakdown.highParallaxCount})`,
+    );
   });
 });

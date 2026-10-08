@@ -818,11 +818,26 @@ export class MapTracker {
         out.otherCount++;
         out.otherErrorPx += errPx;
       }
+      // By the landmark's own triangulation parallax (ray angle, radians).
+      const parDeg = lm ? (lm.parallax * 180) / Math.PI : 0;
+      if (parDeg < out.parallaxLowDeg) {
+        out.lowParallaxCount++;
+        out.lowParallaxErrorPx += errPx;
+      } else if (parDeg < out.parallaxHighDeg) {
+        out.midParallaxCount++;
+        out.midParallaxErrorPx += errPx;
+      } else {
+        out.highParallaxCount++;
+        out.highParallaxErrorPx += errPx;
+      }
     }
     if (out.centerCount) out.centerErrorPx /= out.centerCount;
     if (out.edgeCount) out.edgeErrorPx /= out.edgeCount;
     if (out.planeCount) out.planeErrorPx /= out.planeCount;
     if (out.otherCount) out.otherErrorPx /= out.otherCount;
+    if (out.lowParallaxCount) out.lowParallaxErrorPx /= out.lowParallaxCount;
+    if (out.midParallaxCount) out.midParallaxErrorPx /= out.midParallaxCount;
+    if (out.highParallaxCount) out.highParallaxErrorPx /= out.highParallaxCount;
     return out;
   }
 

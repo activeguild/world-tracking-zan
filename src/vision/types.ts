@@ -313,10 +313,44 @@ export interface ReprojectionBreakdown {
   otherErrorPx: number;
   /** Normalized radius that splits center from edge (fraction of the half diagonal). */
   centerRadius: number;
+  /**
+   * Inliers by the ray parallax angle of their landmark's triangulation
+   * (`Landmark.parallax`): below `parallaxLowDeg`, between, above
+   * `parallaxHighDeg`. A depth error scales with 1 / parallax, so a map whose
+   * error sits in the low bin has noisy landmark depths (multi-view
+   * refinement helps); a uniform error across the bins is observation noise
+   * (LK precision / resolution).
+   */
+  lowParallaxCount: number;
+  lowParallaxErrorPx: number;
+  midParallaxCount: number;
+  midParallaxErrorPx: number;
+  highParallaxCount: number;
+  highParallaxErrorPx: number;
+  parallaxLowDeg: number;
+  parallaxHighDeg: number;
 }
 
 export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
-  return { centerCount: 0, centerErrorPx: 0, edgeCount: 0, edgeErrorPx: 0, planeCount: 0, planeErrorPx: 0, otherCount: 0, otherErrorPx: 0, centerRadius: 0.5 };
+  return {
+    centerCount: 0,
+    centerErrorPx: 0,
+    edgeCount: 0,
+    edgeErrorPx: 0,
+    planeCount: 0,
+    planeErrorPx: 0,
+    otherCount: 0,
+    otherErrorPx: 0,
+    centerRadius: 0.5,
+    lowParallaxCount: 0,
+    lowParallaxErrorPx: 0,
+    midParallaxCount: 0,
+    midParallaxErrorPx: 0,
+    highParallaxCount: 0,
+    highParallaxErrorPx: 0,
+    parallaxLowDeg: 2,
+    parallaxHighDeg: 5,
+  };
 }
 
 /** New-landmark triangulation of one frame (v11 diagnostics: why the map does / does not grow). */
