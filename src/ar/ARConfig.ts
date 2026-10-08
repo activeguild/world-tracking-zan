@@ -29,6 +29,17 @@ export interface ProcessingConfig {
    * ~2 frames ahead of the pose and objects would lag during motion).
    */
   syncVideoToPose: boolean;
+  /**
+   * How the processing frame is read from the video (v16). `canvas2d` =
+   * drawImage + getImageData (fast on iOS Safari, 31–41 ms per frame on
+   * Android Chrome); `webgl` = texture upload + luma shader + readPixels;
+   * `auto` = start with canvas2d, measure the first `grabAutoSwitchFrames`
+   * grabs and switch to webgl for good when their median exceeds
+   * `grabAutoSwitchMs` (so devices where the 2D path is fast stay on it).
+   */
+  grabber: "auto" | "canvas2d" | "webgl";
+  grabAutoSwitchMs: number;
+  grabAutoSwitchFrames: number;
 }
 
 /** Feature detection configuration (spec §11, §49). */
@@ -636,6 +647,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxVisionFps: 30,
     longSideFovDeg: 66,
     syncVideoToPose: true,
+    grabber: "auto",
+    grabAutoSwitchMs: 12,
+    grabAutoSwitchFrames: 30,
   },
   features: {
     maxFeatures: 300,

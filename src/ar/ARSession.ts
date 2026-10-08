@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { CameraManager, type CameraOptions } from "../camera/CameraManager";
-import { FrameGrabber } from "../camera/CameraFrame";
+import { FrameGrabber, type FrameGrabberKind, type FrameSource } from "../camera/CameraFrame";
+import { WebGLFrameGrabber } from "../camera/WebGLFrameGrabber";
 import { approximateIntrinsics, type CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
@@ -157,6 +158,8 @@ export interface ARStats {
   /** Frame-synchronized display active. */
   syncVideo: boolean;
   backend: "worker" | "main";
+  /** How the processing frame is read from the video (v16); null before the camera starts. */
+  grabber: FrameGrabberKind | null;
 }
 
 /**
@@ -215,7 +218,10 @@ export class ARSession {
   private syncActive = false;
   private backend: VisionBackend | null = null;
   private backendKind: "worker" | "main" = "worker";
-  private grabber: FrameGrabber | null = null;
+  private grabber: FrameSource | null = null;
+  /** Grab times of the first frames on the 2D path (auto grabber selection, v16). */
+  private grabSamplesMs: number[] = [];
+  private grabDecided = false;
   private intrinsics: CameraIntrinsics | null = null;
 
   private running = false;
@@ -356,7 +362,9 @@ export class ARSession {
       this.config.processing.width,
       this.config.processing.height,
     );
-    this.grabber = new FrameGrabber(size.width, size.height);
+    this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
+    this.grabSamplesMs = [];
+    this.grabDecided = this.config.processing.grabber !== "auto";
     this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
 
     // Frame-synchronized display.
@@ -397,6 +405,8 @@ export class ARSession {
     this.vfcHandle = 0;
     this.backend?.dispose();
     this.backend = null;
+    this.grabber?.dispose?.();
+    this.grabber = null;
     this.camera.stop();
     this.renderer?.clear();
     this.worldAnchor.reset();
@@ -534,6 +544,7 @@ export class ARSession {
       focalPx: this.intrinsics?.fx ?? 0,
       syncVideo: this.syncActive,
       backend: this.backendKind,
+      grabber: this.grabber?.kind ?? null,
     };
   }
 
@@ -595,14 +606,132 @@ export class ARSession {
     }
     this.lastGravity = gravity;
     const g0 = performance.now();
-    const frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    let frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
     const g1 = performance.now();
+    // A lost WebGL context (GPU reset, background tab) falls back to the 2D path.
+    if (this.grabber instanceof WebGLFrameGrabber && this.grabber.lost) {
+      this.logger.warn("WebGL grabber lost its context: falling back to canvas2d");
+      this.grabber = new FrameGrabber(this.grabber.width, this.grabber.height);
+      this.grabDecided = true;
+      frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    }
+    this.maybeSwitchGrabber(g1 - g0);
     // Keep a display copy of this frame for when its pose arrives (GPU blit).
     if (this.syncActive) this.presenter!.capture(this.video, frame.frameId);
     const g2 = performance.now();
     this.pendingGrabMs = g1 - g0;
     this.pendingCaptureMs = g2 - g1;
     this.backend.processFrame(frame);
+  }
+
+  private createGrabber(width: number, height: number, kind: "auto" | FrameGrabberKind): FrameSource {
+    if (kind === "webgl") {
+      try {
+        return new WebGLFrameGrabber(width, height);
+      } catch (e) {
+        this.logger.warn(`WebGL grabber unavailable (${e instanceof Error ? e.message : String(e)}): using canvas2d`);
+      }
+    }
+    return new FrameGrabber(width, height);
+  }
+
+  /**
+   * Auto grabber selection (v16): the 2D path is measured on the first
+   * frames and, when its median grab time exceeds `grabAutoSwitchMs`, the
+   * WebGL path takes over for the rest of the session. On Android Chrome the
+   * 2D readback cost 31–41 ms per frame (the engine took 22–31 ms); on iOS
+   * Safari it is cheap and nothing changes.
+   */
+  private maybeSwitchGrabber(grabMs: number): void {
+    if (this.grabDecided || !this.grabber || this.grabber.kind !== "canvas2d") return;
+    const cfg = this.config.processing;
+    this.grabSamplesMs.push(grabMs);
+    if (this.grabSamplesMs.length < Math.max(1, cfg.grabAutoSwitchFrames)) return;
+    this.grabDecided = true;
+    const sorted = [...this.grabSamplesMs].sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    if (median <= cfg.grabAutoSwitchMs || !WebGLFrameGrabber.available()) {
+      this.logger.info(`grabber: canvas2d (median grab ${median.toFixed(1)} ms over ${sorted.length} frames)`);
+      return;
+    }
+    try {
+      this.grabber = new WebGLFrameGrabber(this.grabber.width, this.grabber.height);
+      this.logger.info(`grabber: switched to webgl (canvas2d median grab ${median.toFixed(1)} ms > ${cfg.grabAutoSwitchMs} ms)`);
+    } catch (e) {
+      this.logger.warn(`WebGL grabber unavailable (${e instanceof Error ? e.message : String(e)}): staying on canvas2d`);
+    }
+  }
+
+  /**
+   * Debug: grab the current video frame with both grabbers and compare the
+   * gray images (mean / max absolute difference, 0–255). Used by the browser
+   * test to prove the WebGL path reproduces the 2D path's orientation and
+   * scale; the shader's luma rounding differs from the integer 2D conversion
+   * by about one gray level.
+   */
+  compareGrabbers(): {
+    meanAbsDiff: number;
+    maxAbsDiff: number;
+    width: number;
+    height: number;
+    /** Mean difference against transformed WebGL images — says *how* the images differ when they do. */
+    alternatives: Record<string, number>;
+    /** Mean difference between two consecutive 2D grabs (how much the frame itself moves between calls). */
+    twoDRepeat: number;
+  } | null {
+    if (!this.grabber || !this.intrinsics || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+    const { width, height } = this.grabber;
+    const a = new FrameGrabber(width, height);
+    const b = new WebGLFrameGrabber(width, height);
+    // The live video advances between two synchronous grabs (headless
+    // Chromium: ~18 gray levels of difference between two 2D grabs of a
+    // sliding texture); freeze it for the comparison.
+    const wasPlaying = !this.video.paused;
+    if (wasPlaying) this.video.pause();
+    try {
+      const now = performance.now();
+      const ga = a.grab(this.video, now, this.intrinsics).data;
+      const gb = b.grab(this.video, now, this.intrinsics).data;
+      const ga2 = a.grab(this.video, now, this.intrinsics).data;
+      const meanDiff = (map: (x: number, y: number) => number) => {
+        let sum = 0;
+        let n = 0;
+        for (let y = 1; y < height - 1; y++) {
+          for (let x = 1; x < width - 1; x++) {
+            sum += Math.abs(ga[y * width + x] - gb[map(x, y)]);
+            n++;
+          }
+        }
+        return sum / n;
+      };
+      let sum = 0;
+      let max = 0;
+      for (let i = 0; i < ga.length; i++) {
+        const d = Math.abs(ga[i] - gb[i]);
+        sum += d;
+        if (d > max) max = d;
+      }
+      let rep = 0;
+      for (let i = 0; i < ga.length; i++) rep += Math.abs(ga[i] - ga2[i]);
+      return {
+        meanAbsDiff: sum / ga.length,
+        maxAbsDiff: max,
+        width,
+        height,
+        alternatives: {
+          flipY: meanDiff((x, y) => (height - 1 - y) * width + x),
+          flipX: meanDiff((x, y) => y * width + (width - 1 - x)),
+          "dx+1": meanDiff((x, y) => y * width + x + 1),
+          "dx-1": meanDiff((x, y) => y * width + x - 1),
+          "dy+1": meanDiff((x, y) => (y + 1) * width + x),
+          "dy-1": meanDiff((x, y) => (y - 1) * width + x),
+        },
+        twoDRepeat: rep / ga.length,
+      };
+    } finally {
+      b.dispose();
+      if (wasPlaying) void this.video.play().catch(() => undefined);
+    }
   }
 
   /** Show the frame the result belongs to, time-aligned with the pose. */

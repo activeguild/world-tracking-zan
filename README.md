@@ -137,6 +137,7 @@ Query parameters:
 | `?fov=66`   | camera field of view along the long side (degrees) |
 | `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
 | `?sync=0`   | show the live video instead of the pose-synchronized frame |
+| `?grab=2d` / `?grab=gl` / `?grab=auto` | frame grabber: 2D canvas readback, WebGL shader, or measure-then-pick (default) |
 | `?debug=1` | debug mode: HUD + debug drawing on at start, `[AR]` console logs (the ☰ button toggles the HUD at any time; off by default) |
 | `?hud=1` / `?hud=0` | force the initial HUD state independently of `?debug` |
 | `?smooth=1` | enable pose smoothing (off by default while the raw pose is validated) |
@@ -333,7 +334,13 @@ reloc … = total`) and, below it, where the rest of the frame's wall time goes
 frame grab, display copy, worker transport both ways — the wall-clock stamps
 are comparable across threads — Three.js update, synchronized blit, debug
 overlay and the HUD itself; on Android Chrome the engine ran in 22–31 ms while
-vision reached only 10–14 fps), and before a world exists a plane search that keeps
+vision reached only 10–14 fps — the `grab` entry was 31–41 ms: the 2D-canvas
+readback of the camera frame). The frame grabber therefore has a WebGL path
+(`WebGLFrameGrabber`: texture upload, luma shader packing four gray pixels per
+texel, `readPixels` straight into the pooled buffer) and `processing.grabber`
+defaults to `auto`: the 2D path is measured on the first frames and WebGL
+takes over when its median grab exceeds `grabAutoSwitchMs`; `?grab=2d|gl`
+forces one, HUD `Proc … grab 2d|gl`. Before a world exists a plane search that keeps
 failing the 2D-extent test for `sidewaysGuidanceDelayMs` asks the user to
 move the phone sideways (`MOVE_SIDEWAYS`) instead of "show a flat surface".
 

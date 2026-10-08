@@ -234,6 +234,37 @@ describe("Phase 1 browser smoke test", () => {
     await ctxOn.close();
   });
 
+  it("v16: the WebGL frame grabber reproduces the 2D grabber's gray image and tracks to a world", async () => {
+    const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto(`${URL}&grab=gl`, { waitUntil: "load" });
+    await page.click("#start");
+    await page.waitForFunction(() => window.__ar.stats().framesProcessed > 30, null, { timeout: 60_000 });
+    const probe = (await page.evaluate(() => ({
+      grabber: window.__ar.stats().grabber,
+      proc: (document.querySelector(".ar-hud") as HTMLElement).innerText.match(/Proc.*/)?.[0] ?? "",
+      cmp: window.__ar.grabCompare(),
+    }))) as { grabber: string | null; proc: string; cmp: { meanAbsDiff: number; maxAbsDiff: number; width: number; height: number } | null };
+    console.log("[browser-smoke] grabber compare " + JSON.stringify(probe));
+    expect(probe.grabber).toBe("webgl");
+    expect(probe.proc).toMatch(/grab gl/);
+    expect(probe.cmp).not.toBeNull();
+    // Same orientation and scale: measured mean 0.04 / max 1 gray level (the
+    // luma rounding); a flipped image differs by ~44 levels, a 1 px shift by ~2.7.
+    expect(probe.cmp!.width % 4).toBe(0);
+    expect(probe.cmp!.twoDRepeat).toBe(0); // the frame was frozen for the comparison
+    expect(probe.cmp!.meanAbsDiff).toBeLessThan(0.5);
+    expect(probe.cmp!.maxAbsDiff).toBeLessThanOrEqual(2);
+    expect(probe.cmp!.alternatives.flipY).toBeGreaterThan(probe.cmp!.meanAbsDiff + 5);
+    expect(probe.cmp!.alternatives["dx+1"]).toBeGreaterThan(probe.cmp!.meanAbsDiff + 1);
+    // The engine tracks through the WebGL frames all the way to a world.
+    await page.waitForFunction(() => window.__ar.stats().worldReady, null, { timeout: 60_000 });
+    expect(errors).toEqual([]);
+    await context.close();
+  });
+
   it("tracks features from the camera through the worker pipeline", async () => {
     const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
     const page = await context.newPage();

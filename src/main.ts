@@ -25,6 +25,7 @@ import "./style.css";
  *   ?size=0.15        footprint of the model in meters (default 0.15)
  *   ?fov=66           camera field of view along the long side (degrees)
  *   ?sync=0           show the live video instead of the pose-synchronized frame
+ *   ?grab=2d|gl|auto  frame grabber: 2D canvas readback, WebGL shader, or auto (default: measure, then pick)
  *   ?smooth=1         enable pose smoothing (off by default while the raw pose is validated)
  *   ?dist=0.5         assumed camera→plane distance in meters (scale)
  *   ?walk=1           the placed object walks back and forth on the plane (object motion test)
@@ -43,6 +44,8 @@ const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 const fovDeg = Number(params.get("fov") ?? "") || undefined;
 const syncVideo = params.get("sync") !== "0";
+// Frame grabber (v16): auto picks canvas2d or webgl from the measured grab time; ?grab=2d / ?grab=gl force one.
+const grabParam = ({ "2d": "canvas2d", gl: "webgl", auto: "auto" } as const)[params.get("grab") ?? ""];
 // Pose smoothing is off by default while the raw pose is validated (v3 §22).
 const smoothingParam = params.get("smooth");
 const assumedDist = Number(params.get("dist") ?? "") || undefined;
@@ -82,6 +85,7 @@ const session = new ARSession({
     processing: {
       ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),
       syncVideoToPose: syncVideo,
+      ...(grabParam ? { grabber: grabParam } : {}),
     },
     planeTracking: { enabled: planeTracking },
     landmarks: { enableLandmarkDepthRefinement: refineLandmarks },
@@ -359,7 +363,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {
@@ -518,6 +522,8 @@ declare global {
       session: ARSession;
       stats: () => ReturnType<ARSession["getStats"]>;
       start: () => Promise<void>;
+      /** Compare the 2D and WebGL grabbers on the current frame (v16 test hook). */
+      grabCompare: () => ReturnType<ARSession["compareGrabbers"]>;
     };
   }
 }
@@ -525,4 +531,5 @@ window.__ar = {
   session,
   stats: () => session.getStats(),
   start: () => session.start(),
+  grabCompare: () => session.compareGrabbers(),
 };
