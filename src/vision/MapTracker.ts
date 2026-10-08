@@ -15,7 +15,7 @@ import {
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
-import type { PoseCandidateReport, Track, TriangulationStats } from "./types";
+import { emptyReprojectionBreakdown, type PoseCandidateReport, type ReprojectionBreakdown, type Track, type TriangulationStats } from "./types";
 
 /**
  * SLAM-lite front end (spec §19–§20, Phase 3):
@@ -51,6 +51,8 @@ export interface MapTrackingResult {
   reassociated: number;
   /** Why landmark-less tracks did / did not become landmarks this frame (v11 diagnostics). */
   triangulation: TriangulationStats;
+  /** PnP inlier error by image region / landmark kind (v16 diagnostics). */
+  reprojection: ReprojectionBreakdown;
 }
 
 export function emptyTriangulationStats(): TriangulationStats {
@@ -121,6 +123,7 @@ const EMPTY_RESULT: MapTrackingResult = {
   jumpRejected: false,
   reassociated: 0,
   triangulation: emptyTriangulationStats(),
+  reprojection: emptyReprojectionBreakdown(),
 };
 
 export class MapTracker {
@@ -557,6 +560,7 @@ export class MapTracker {
     let tracked = false;
     let inlierCount = 0;
     let meanErrPx = 0;
+    let reprojection = emptyReprojectionBreakdown();
     // v4 §10: a jump of either candidate is a jump.
     const jumpRejected = isJumpRejection(mapRejection) || isJumpRejection(planeRejection);
     if (chosen) {
@@ -574,6 +578,7 @@ export class MapTracker {
         const cls = this.classify(this._pose, n, cfg.pnpInlierPx / f);
         inlierCount = cls.inlierCount;
         meanErrPx = cls.meanError * f;
+        reprojection = this.reprojectionBreakdown(this._pose, n, obsTracks, cls.inliers, k);
         const maxErr = cfg.maxTriangulationErrorPx / f;
         for (let i = 0; i < n; i++) {
           const lm = this.map.get(obsTracks[i].landmarkId)!;
@@ -769,8 +774,56 @@ export class MapTracker {
       translationPredicted,
       jumpRejected,
       triangulation: tri,
+      reprojection,
     };
     return this.lastResult;
+  }
+
+  /**
+   * Reprojection error of the PnP inliers split by image region (center
+   * disc vs edge ring, radius = half the half-diagonal) and by landmark kind
+   * (on the detected plane vs the rest), v16 diagnostics. A device whose
+   * focal length or lens distortion departs from the assumed pinhole model
+   * shows a larger error in the edge ring than in the center.
+   */
+  private reprojectionBreakdown(pose: RigidTransform, n: number, obsTracks: Track[], inliers: Uint8Array, k: CameraIntrinsics): ReprojectionBreakdown {
+    const out = emptyReprojectionBreakdown();
+    const r = pose.rotation;
+    const t = pose.translation;
+    const halfDiag = Math.hypot(k.width, k.height) / 2;
+    const centerR = out.centerRadius * halfDiag;
+    const f = (k.fx + k.fy) / 2;
+    for (let i = 0; i < n; i++) {
+      if (!inliers[i]) continue;
+      const X = this.pts3[i * 3], Y = this.pts3[i * 3 + 1], Z = this.pts3[i * 3 + 2];
+      const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
+      if (z <= 1e-6) continue;
+      const u = (r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z;
+      const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
+      const errPx = Math.hypot(u - this.obsX[i], v - this.obsY[i]) * f;
+      const tr = obsTracks[i];
+      const radius = Math.hypot(tr.x - k.cx, tr.y - k.cy);
+      if (radius <= centerR) {
+        out.centerCount++;
+        out.centerErrorPx += errPx;
+      } else {
+        out.edgeCount++;
+        out.edgeErrorPx += errPx;
+      }
+      const lm = this.map.get(tr.landmarkId);
+      if (lm?.planeInlier) {
+        out.planeCount++;
+        out.planeErrorPx += errPx;
+      } else {
+        out.otherCount++;
+        out.otherErrorPx += errPx;
+      }
+    }
+    if (out.centerCount) out.centerErrorPx /= out.centerCount;
+    if (out.edgeCount) out.edgeErrorPx /= out.edgeCount;
+    if (out.planeCount) out.planeErrorPx /= out.planeCount;
+    if (out.otherCount) out.otherErrorPx /= out.otherCount;
+    return out;
   }
 
   /**

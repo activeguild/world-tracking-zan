@@ -148,6 +148,17 @@ export interface HudStats {
     landmarks: number;
     pnpInliers: number;
     reprojPx: number;
+    /** v16: inlier error by image region / landmark kind (null before a tracked frame). */
+    reprojection: {
+      centerCount: number;
+      centerErrorPx: number;
+      edgeCount: number;
+      edgeErrorPx: number;
+      planeCount: number;
+      planeErrorPx: number;
+      otherCount: number;
+      otherErrorPx: number;
+    } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
     /** Camera center displacement since the previous frame, world meters (NaN before the world exists). */
@@ -404,6 +415,20 @@ export class DebugOverlay {
     if (m) {
       const flags = `${m.relinked ? `  relink ${m.relinked}` : ""}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));
+      // v16: where the error sits. Edge ≫ center → focal length / lens
+      // distortion (objects shift while tilting and come back); plane ≠
+      // other → biased landmark depths.
+      const rb = m.reprojection;
+      if (rb && (rb.centerCount || rb.edgeCount)) {
+        const ratio = rb.centerCount && rb.edgeCount && rb.centerErrorPx > 0 ? rb.edgeErrorPx / rb.centerErrorPx : 0;
+        rows.push(
+          row(
+            "Err",
+            `center ${rb.centerErrorPx.toFixed(2)}px (${rb.centerCount})  edge ${rb.edgeErrorPx.toFixed(2)}px (${rb.edgeCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}  |  plane ${rb.planeErrorPx.toFixed(2)} (${rb.planeCount})  other ${rb.otherErrorPx.toFixed(2)} (${rb.otherCount})`,
+            ratio >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+      }
       rows.push(row("Source", `${lost ? "LOST" : m.source.toUpperCase()}${m.relocalized ? " (RELOC)" : ""}  ${m.history.slice(-20)}`));
     } else {
       rows.push(row("PnP", "—"));

@@ -165,6 +165,8 @@ export interface MapPoseOutput {
   relocalized: boolean;
   /** New-landmark triangulation of this frame (v11 diagnostics). */
   triangulation: TriangulationStats;
+  /** PnP inlier error by image region / landmark kind (v16 diagnostics). */
+  reprojection: ReprojectionBreakdown;
   /**
    * Where this frame's pose came from: "plane" = plane-relative estimate
    * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no
@@ -287,6 +289,34 @@ export interface PlaneRecoveryDiagnostics {
   recoveryElapsedMs: number;
   /** Recoveries started for the current map. */
   recoveries: number;
+}
+
+/**
+ * Reprojection error of this frame's PnP inliers split by image region and
+ * by landmark kind (v16 diagnostics). On Android the mean error sat at
+ * 2.4–3.0 px while a small early map gave 0.5 px, and placed objects shifted
+ * while the phone was tilted and came back when it was tilted back: the
+ * signature of a camera model (focal length / lens distortion) that does not
+ * match the device. Edge ≫ center says distortion / focal length; plane ≠
+ * other says the landmark depths are biased.
+ */
+export interface ReprojectionBreakdown {
+  /** Inliers inside / outside `centerRadius` × half the image diagonal from the principal point. */
+  centerCount: number;
+  centerErrorPx: number;
+  edgeCount: number;
+  edgeErrorPx: number;
+  /** Inliers on the detected plane vs the rest. */
+  planeCount: number;
+  planeErrorPx: number;
+  otherCount: number;
+  otherErrorPx: number;
+  /** Normalized radius that splits center from edge (fraction of the half diagonal). */
+  centerRadius: number;
+}
+
+export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
+  return { centerCount: 0, centerErrorPx: 0, edgeCount: 0, edgeErrorPx: 0, planeCount: 0, planeErrorPx: 0, otherCount: 0, otherErrorPx: 0, centerRadius: 0.5 };
 }
 
 /** New-landmark triangulation of one frame (v11 diagnostics: why the map does / does not grow). */

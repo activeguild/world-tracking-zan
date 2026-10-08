@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { WorldAnchor } from "../../src/ar/WorldAnchor";
 import { worldToMap } from "../../src/math/CoordinateSystem";
 import { rotationAxisAngle, type RigidTransform } from "../../src/math/Pose";
-import type { MapPoseOutput, PlaneOutput } from "../../src/vision/types";
+import { emptyReprojectionBreakdown, type MapPoseOutput, type PlaneOutput } from "../../src/vision/types";
 import { poseFromCenter, TEST_K } from "../helpers/scene";
 
 function mapPose(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
@@ -36,6 +36,7 @@ function mapPose(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     sourceHistory: "M",
     relocalized: false,
     triangulation: { candidates: 0, parallaxRejected: 0, cheiralityRejected: 0, angleRejected: 0, errorRejected: 0, depthRejected: 0, added: 0 },
+    reprojection: emptyReprojectionBreakdown(),
     source: "map",
   };
 }

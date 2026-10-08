@@ -394,6 +394,7 @@ function refreshHud(): void {
           landmarks: s.mapPose.landmarkCount,
           pnpInliers: s.mapPose.inlierCount,
           reprojPx: s.mapPose.meanReprojectionErrorPx,
+          reprojection: s.mapPose.reprojection,
           cameraCenter: s.mapPose.cameraCenter,
           framesSinceTracked: s.mapPose.framesSinceTracked,
           deltaTranslationM: s.worldReady ? s.mapPose.deltaTranslation * s.worldScale : NaN,

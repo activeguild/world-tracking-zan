@@ -853,6 +853,7 @@ export class VisionEngine {
         sourceHistory: this.sourceHistory,
         relocalized: this.lastRelocalized,
         triangulation: r.triangulation,
+        reprojection: r.reprojection,
         source: this.lastPoseSource,
       };
     } else {
