@@ -326,7 +326,11 @@ half-way it points the other way; the correct candidate at the start view
 (263 inliers, 0.2 px in the synthetic replay, NCC 0.97 on device) was being
 rejected as a `rotation_jump` on every attempt. Beyond that age the jump is
 diagnostic only (HUD `Jump … no limit (long loss)`); the other validators
-and the confirmation / post-monitor are unchanged.
+and the confirmation / post-monitor are unchanged. The HUD's TIMING section
+shows the engine's per-stage time (`Vis pyr … lk … 2view … map … plane …
+reloc … = total`), and before a world exists a plane search that keeps
+failing the 2D-extent test for `sidewaysGuidanceDelayMs` asks the user to
+move the phone sideways (`MOVE_SIDEWAYS`) instead of "show a flat surface".
 
 Keyframe coverage (v15): a new keyframe must be a new *view* with respect
 to every stored keyframe (rotation above `keyframeRotationDeg` or

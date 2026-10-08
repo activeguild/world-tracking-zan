@@ -216,7 +216,8 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **HUD**: `LKpts` 直下に `Best KF1 263i 0.20px ncc 0.97  ✗ rotation_jump`（または `✓ STRONG`）の判定行を移動（末尾の `Best` 行は削除、`Inlier` 以下の内訳は従来の位置）。`Jump 2.93/∞ u  132/∞°  no limit (long loss)` のように Jump 量と有効な上限を常に表示（NG のときだけでなく）。ログ `RELOC REJECT` に `jump vs held = … (limits off: long loss)`
 - テスト 228 件（+2）: 一周（遮蔽で失探）→ 357° で KF1 により復帰し最終姿勢は開始姿勢から 5° 以内・同じ Map / 上限を常に有効にした対照では復帰せず `rotation_jump` のみ。既存の再局所化テスト（ブランク復帰 / 別シーン / ループカット / v12 Jump）合格、ブラウザテスト 2 件合格
 - **実機で読むべきもの**: 一周して戻ったときに `Best … ✓ STRONG` → `Stage CONFIRMING` → `AR_ACTIVE` と進むこと、`Jump … no limit (long loss)` の回転量（保持姿勢がどれだけ外れていたか）、Cube が元の位置に戻ること。1 s 未満の短い失探では `Jump … OK` のまま上限が効いていること
-- **併せて観察（6 本目、未対応）**: 平面検出まで 18 s（`Stage extent` が続く: 低テクスチャのカーペット + 並進不足で床 inlier が細い帯）、World 確立前の Vision 時間が 17 → 120 ms に増大（HUD に段階別時間がなく原因未特定。候補は二視点 RANSAC の低 inlier 比 / 端末発熱）。提案中: HUD TIMING 節に段階別時間行、`extent` 継続時の誘導文「スマホを横にゆっくり動かしてください」
+- **実機結果（`8d81a72`、8 本目 29.8 s、二周）**: 1 周目・2 周目とも戻った直後に `Best KF4 111i 1.94px ncc 0.91 ✓ ACCEPTABLE` → `CONFIRMING` → `AR_ACTIVE`（失探 → Apply は 3.3 s / 2.5 s = 一周に要した時間、戻ってからの遅れは確認 1 フレーム）、Cube は同じ位置。回転中は `out_of_bounds`（無関係な景色で大シフト）/ `insufficient_tracks`（ブラー）で復帰不能（設計どおり）。Keyframe 16 made / 8 out、Vision 追跡中 17–22 ms、失探中 11–34 ms（FAST + 再局所化のフレームで 58 ms が 1 回）。`Stage PNP / val 0` のループは解消
+- **併せて対応（6 本目・8 本目の観察、同日）**: (1) HUD TIMING 節に `Vis pyr 2 lk 9 rsc 1 fast 2 2view 24 map 8 plane 3 reloc 0 = 49ms`（エンジンが計測して Worker から転送済みだった `EngineTiming` を `ARStats.engineTiming` 経由で表示。33 ms 超は橙）。6 本目の World 確立前 17 → 120 ms の原因（二視点 RANSAC の低 inlier 比 / 端末発熱）を次の録画で切り分ける。(2) 誘導 `MOVE_SIDEWAYS`「スマホを横にゆっくり動かしてください（床の広い範囲を映す）」: World 未確立で平面探索が `extent` 段階に `world.sidewaysGuidanceDelayMs`（1500 ms）以上止まっているとき（`ARStats.planeSearchStageMs`、段階が変わると 0 から）。特徴不足 / `SLOW_DOWN` / 平面候補あり / World 確立後には出ない。エンジン閾値は不変。テスト 231 件（+3）: 継続時のみ・他の段階や遅延前は従来の文言・優先順位
 
 ### v15 — Keyframe の視点カバレッジ + LK 発散の分類（2026-10-08、実機確認待ち）
 

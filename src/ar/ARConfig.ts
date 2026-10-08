@@ -518,6 +518,14 @@ export interface WorldConfig {
    */
   relocGuidanceDelayMs: number;
   /**
+   * Before a world exists, when the plane search has been stopping at the
+   * 2D-extent test for this long (ms, v16): the floor landmarks form a thin
+   * strip (low-texture carpet, little translation — 7 s on device while the
+   * phone was held still), so ask for a sideways move instead of "show a
+   * flat surface".
+   */
+  sidewaysGuidanceDelayMs: number;
+  /**
    * Apply the One Euro filters to the rendered camera pose. Off while the
    * raw pose is being validated (v3 §22): filter lag and real drift must not
    * be confused. `?smooth=1` in the demo.
@@ -827,6 +835,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     // Unused since v13 (objects hide on the engine's own lost hysteresis).
     holdPoseOnLostMs: 10000,
     relocGuidanceDelayMs: 2000,
+    sidewaysGuidanceDelayMs: 1500,
     smoothing: false,
     // Light smoothing: with the displayed frame synchronized to the pose,
     // any filter lag shows up as the object sliding during motion.

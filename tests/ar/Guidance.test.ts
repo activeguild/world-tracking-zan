@@ -100,6 +100,37 @@ describe("getGuidance (v10)", () => {
   });
 });
 
+describe("getGuidance (v16): sideways move when the plane search keeps failing the extent test", () => {
+  const SIDEWAYS = 1500;
+  const extent = (over: Partial<GuidanceContext>) =>
+    getGuidance(ctx({ state: TrackingState.PLANE_DETECTING, planeSearchStage: "extent", planeSearchStageMs: SIDEWAYS, sidewaysGuidanceDelayMs: SIDEWAYS, ...over }));
+
+  it("asks for a sideways move once `extent` has persisted for the delay (plain scan and plane warmup)", () => {
+    expect(extent({})).toBe("MOVE_SIDEWAYS");
+    expect(extent({ planeRecovery: "warmup" })).toBe("MOVE_SIDEWAYS");
+    expect(extent({ state: TrackingState.TRACKING })).toBe("MOVE_SIDEWAYS");
+    expect(GUIDANCE_TEXT_JA.MOVE_SIDEWAYS).toMatch(/横に/);
+  });
+
+  it("keeps the previous wording before the delay, at other stages, or when not evaluated", () => {
+    expect(extent({ planeSearchStageMs: SIDEWAYS - 1 })).toBe("MOVE_SLOWLY");
+    expect(extent({ planeSearchStageMs: SIDEWAYS - 1, planeRecovery: "warmup" })).toBe("PLANE_WARMUP");
+    expect(extent({ planeSearchStage: "points" })).toBe("MOVE_SLOWLY");
+    expect(extent({ planeSearchStage: "reclassify", planeRecovery: "warmup" })).toBe("PLANE_WARMUP");
+    expect(extent({ planeSearchStage: null })).toBe("MOVE_SLOWLY");
+    expect(extent({ sidewaysGuidanceDelayMs: undefined })).toBe("MOVE_SLOWLY");
+  });
+
+  it("yields to the stronger instructions: few features, slow down, a plane candidate, an established world", () => {
+    expect(extent({ lowFeature: true })).toBe("SHOW_FLAT_SURFACE");
+    expect(extent({ planeRecovery: "starting" })).toBe("SLOW_DOWN");
+    expect(extent({ planeCandidate: true })).toBe("PLANE_DETECTING");
+    expect(extent({ planeRecovery: "candidate" })).toBe("PLANE_DETECTING");
+    expect(extent({ state: TrackingState.PLANE_FOUND, worldEstablished: true })).toBe("TAP_TO_PLACE");
+    expect(extent({ state: TrackingState.RELOCALIZING, worldEstablished: true, lostMs: 10_000 })).toBe("RELOCALIZE");
+  });
+});
+
 describe("worldPhase (v10 §3, §26)", () => {
   it("maps engine states to the v10 phases, with the world flag deciding lost vs scan", () => {
     const p = (over: Partial<GuidanceContext>) => worldPhase(ctx(over));

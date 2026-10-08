@@ -126,6 +126,9 @@ function refreshGuidance(): void {
     lostMs: s.lostMs,
     relocGuidanceDelayMs: session.config.world.relocGuidanceDelayMs,
     planeRecovery: s.planeRecovery?.state,
+    planeSearchStage: s.planeSearch?.stage ?? null,
+    planeSearchStageMs: s.planeSearchStageMs,
+    sidewaysGuidanceDelayMs: session.config.world.sidewaysGuidanceDelayMs,
   });
   let text = GUIDANCE_TEXT_JA[key];
   if (key === "TAP_TO_PLACE" && placed) text = "";
@@ -350,6 +353,7 @@ function refreshHud(): void {
     worldEstablished: s.worldEstablished,
     visionMs: s.visionMs,
     framesDropped: s.framesDropped,
+    engineTiming: s.engineTiming,
     fastThreshold: s.fastThreshold,
     processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
     backend: s.backend,

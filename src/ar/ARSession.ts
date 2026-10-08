@@ -25,6 +25,7 @@ import type {
   MotionDiagnostics,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
+import type { EngineTiming } from "../worker/protocol";
 import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
 import { WorldAnchor } from "./WorldAnchor";
 import {
@@ -117,8 +118,12 @@ export interface ARStats {
   /** World tracking established for the current map (v10): RELOCALIZING is reachable only when true. */
   worldEstablished: boolean;
   planeSearch: PlaneSearchOutput | null;
+  /** How long the plane search has been stopping at its current stage (ms, v16 guidance). */
+  planeSearchStageMs: number;
   /** Plane recovery after fast motion (v11 §23); null before the first frame. */
   planeRecovery: PlaneRecoveryDiagnostics | null;
+  /** Per-stage vision engine time of the last processed frame (ms, v16); null before the first frame. */
+  engineTiming: EngineTiming | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -212,7 +217,9 @@ export class ARSession {
   /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
   private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
+  private planeSearchStageSinceMs = 0;
   private planeRecovery: PlaneRecoveryDiagnostics | null = null;
+  private engineTiming: EngineTiming | null = null;
   private objectVisibility: ObjectVisibilityDecision = { visible: false, reason: "WORLD_NOT_READY" };
   private loggedPlaneRecoveries = 0;
   private loggedPlaneStage: string | null = null;
@@ -466,7 +473,9 @@ export class ARSession {
       motion: this.motion,
       worldEstablished: this.worldEstablished,
       planeSearch: this.planeSearch,
+      planeSearchStageMs: this.planeSearch ? performance.now() - this.planeSearchStageSinceMs : 0,
       planeRecovery: this.planeRecovery,
+      engineTiming: this.engineTiming,
       planePose: this.planePose,
       planeAnchored: this.planeAnchored,
       frameTimestampMs: this.frameTimestampMs,
@@ -589,8 +598,12 @@ export class ARSession {
     this.relocalization = r.relocalization;
     this.motion = r.motion;
     this.worldEstablished = r.worldEstablished;
+    // v16 guidance: how long the plane search has been stuck at one stage
+    // (e.g. `extent` for 7 s on device while the user held the phone still).
+    if ((r.planeSearch?.stage ?? null) !== (this.planeSearch?.stage ?? null)) this.planeSearchStageSinceMs = arrived;
     this.planeSearch = r.planeSearch;
     this.planeRecovery = r.planeRecovery;
+    this.engineTiming = r.timing;
     this.logPlaneRecovery(r);
     this.planePose = r.planePose;
     this.planeAnchored = r.planeAnchor !== null;
