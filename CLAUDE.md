@@ -207,6 +207,17 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### v16 — 一周後の再局所化: 長時間失探では保持姿勢との Jump 上限を外す（2026-10-08、実機確認待ち）
+
+7 本目の録画（`e93ca8c`、19.5 s、廊下）: スマホをその場で一周させると「先ほど見ていた場所にカメラを戻してください」のまま復帰しない。HUD: 一周の前半は Map が追跡を続け（PnP 123i → 64i 3.07 px → 16i 2.60 px、`LM 326 → 758 → 1170`、ほぼ純回転なので新規 Landmark の奥行きは不確か）、約 140° で失探。元の視点に戻ると `Rank KF1 0.97 / KF4 0.91`、`LKpts 130/183`、`pnp 2–3 ran`、**`val 0`、`Stage PNP`** を 6 フレーム cooldown ごとに繰り返す。`Stage PNP` は「PnP まで進んだが検証を通らない」の意味で、拒否理由（`Best` / `Reject` 行）は HUD の折り返しの下で読めなかった。
+
+- **原因（合成で再現）**: `tests/vision/FullTurn.test.ts` — 床テクスチャを任意姿勢で描画し、腕の長さ 15 cm で 3°/frame の一周（135–225° は遮蔽）。Map は 135° まで追跡、138° で失探、元の視点に戻った時点の保持姿勢は正解から **141° / 2.9 unit** ずれている。KF1 の候補は **263 inlier / 0.2 px** で完全だが、v12 §9 の再局所化専用 Jump 上限（回転 90°）で `rotation_jump` として毎回拒否 → 永久に復帰しない（旧挙動は `jumpLimitMaxLostFrames: 1e9` の対照テストで固定）。失探中の保持姿勢は速度伝播（10 フレーム）→ 保持、回転は二視点事前値（参照フレーム更新で途切れがち）で、長い失探の後は現在位置の情報を持たない
+- **対処**: `relocalization.jumpLimitMaxLostFrames`（30 = `landmarks.longLostFrames` と同じ 1 s）。失探がこれを超えたら保持姿勢との Jump 上限（並進 1.0×奥行き / 回転 90°）は**診断のみ**（`RelocalizationDiagnostics.jumpLimitsActive`、`RelocalizeOptions.lostFrames` を VisionEngine が `framesSinceTracked` で渡す）。1 s 以内の短い失探では従来どおり上限が効く。他の検証（inlier 25 / 誤差 1.5–3.0 px / ratio 0.5 / cells 4 / relaxed NCC / 確認フレーム / 事後監視 3 フレーム）は不変。**PnP / LK / ランキング / cooldown / Keyframe 生成 / Map / Plane は変更していない**
+- **HUD**: `LKpts` 直下に `Best KF1 263i 0.20px ncc 0.97  ✗ rotation_jump`（または `✓ STRONG`）の判定行を移動（末尾の `Best` 行は削除、`Inlier` 以下の内訳は従来の位置）。`Jump 2.93/∞ u  132/∞°  no limit (long loss)` のように Jump 量と有効な上限を常に表示（NG のときだけでなく）。ログ `RELOC REJECT` に `jump vs held = … (limits off: long loss)`
+- テスト 228 件（+2）: 一周（遮蔽で失探）→ 357° で KF1 により復帰し最終姿勢は開始姿勢から 5° 以内・同じ Map / 上限を常に有効にした対照では復帰せず `rotation_jump` のみ。既存の再局所化テスト（ブランク復帰 / 別シーン / ループカット / v12 Jump）合格、ブラウザテスト 2 件合格
+- **実機で読むべきもの**: 一周して戻ったときに `Best … ✓ STRONG` → `Stage CONFIRMING` → `AR_ACTIVE` と進むこと、`Jump … no limit (long loss)` の回転量（保持姿勢がどれだけ外れていたか）、Cube が元の位置に戻ること。1 s 未満の短い失探では `Jump … OK` のまま上限が効いていること
+- **併せて観察（6 本目、未対応）**: 平面検出まで 18 s（`Stage extent` が続く: 低テクスチャのカーペット + 並進不足で床 inlier が細い帯）、World 確立前の Vision 時間が 17 → 120 ms に増大（HUD に段階別時間がなく原因未特定。候補は二視点 RANSAC の低 inlier 比 / 端末発熱）。提案中: HUD TIMING 節に段階別時間行、`extent` 継続時の誘導文「スマホを横にゆっくり動かしてください」
+
 ### v15 — Keyframe の視点カバレッジ + LK 発散の分類（2026-10-08、実機確認待ち）
 
 3 本目の画面録画（`f0ae2cd`、33 s）の読み取り: 復帰 4 回すべて `RELOCALIZING → AR_ACTIVE` 直行、Cube は同じ位置、Vision 13–28 ms（失探中の試行込みで 17–25 ms）。再局所化はフレームがブレていない瞬間に成立（MED 20 px で `CONFIRMING`、168 ms で `PNP` 段階）。**`out_of_bounds` の訂正**: `LKpts 56/115 … oob 50`（LK 成功 56 点と同じ試行）、`5/179 … fb 15 res 3 oob 154`（LK は走っている）から、画面内チェックを通った初期位置から始めた LK の反復が**ブレたフレーム上で発散して画像外へ出た**もので、シフトの間違いではない。Motion FAST 36–80 px のフレームでは原理的に成立せず、復帰は「減速後 1〜3 フレーム」になっている。残る改善点として Keyframe 生成（id が 56 まで進み、8 枚が 10 フレームごとに入れ替わっていた）に着手。**PnP / LK / RANSAC / Validation / Confirmation / Visibility / Plane は変更していない**。

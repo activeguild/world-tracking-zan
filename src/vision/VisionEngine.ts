@@ -583,6 +583,9 @@ export class VisionEngine {
           frameId,
           firstAttempt: this.relocTimeline !== null && this.relocTimeline.attempts === 0,
           preferKeyframeId: pending ? pending.result.keyframeId : undefined,
+          // v16: the held pose is dead-reckoned while lost; after a long loss
+          // the jump limits vs it are diagnostic only.
+          lostFrames: tracker.framesSinceTracked,
         });
         this.timing.reloc = now() - tr0;
         if (this.relocTimeline) advanceTimeline(this.relocTimeline, r.diagnostics, frameId, input.timestamp);

@@ -41,6 +41,8 @@ export interface HudRelocDiagnostics {
   /** Keyframes with too few live landmarks to relocalize (v15). */
   unusableKeyframes: number;
   usedPreparedRanking: boolean;
+  /** The jump limits vs the held pose were in force (v16); false after a long loss. */
+  jumpLimitsActive: boolean;
   best: {
     keyframeId: number;
     stage: string;
@@ -66,6 +68,11 @@ export interface HudRelocDiagnostics {
       nccPassed: boolean;
       translationJumpPassed: boolean;
       rotationJumpPassed: boolean;
+      /** Jump vs the held pose (map units / deg) and the limits in force (Infinity = not checked, v16). */
+      translationJump: number;
+      rotationJumpDeg: number;
+      maxTranslationJump: number;
+      maxRotationJumpDeg: number;
       ratio: number;
       minRatio: number;
       cells: number;
@@ -437,6 +444,21 @@ export class DebugOverlay {
           ),
         );
       }
+      // v16: the verdict on the best candidate right under the LK row, so
+      // the reason is above the fold (on device the Best / Reject rows at the
+      // end of the section were cut off while a full turn kept failing).
+      if (d?.best) {
+        const b = d.best;
+        const v = b.validation;
+        const verdict = v
+          ? v.rejectReason
+            ? `✗ ${v.rejectReason}`
+            : `✓ ${v.level.toUpperCase()}`
+          : `✗ ${d.fail ?? b.stage}`;
+        rows.push(
+          row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}  ${verdict}`, v && !v.rejectReason ? undefined : "hud-warn"),
+        );
+      }
       if (d) {
         // v14 §23, §36: total keyframes, how many were ranked (all), sent to LK
         // / PnP (the budget), validated, held back by the retry cooldown.
@@ -461,7 +483,6 @@ export class DebugOverlay {
         rows.push(row("VAL", `${d.validated}`, d.validated === 0 && d.tried > 0 ? "hud-warn" : undefined));
         if (d.best) {
           const b = d.best;
-          rows.push(row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}`));
           const v = b.validation;
           if (v) {
             // v9 §21: every condition with its value, its threshold and PASS / FAIL.
@@ -482,8 +503,18 @@ export class DebugOverlay {
             if (Number.isFinite(v.requiredNcc)) {
               rows.push(row("NCC", `${v.ncc.toFixed(2)}/${v.requiredNcc.toFixed(2)}  ${ok(v.nccPassed)}`, v.nccPassed ? undefined : "hud-warn"));
             }
-            if (!v.translationJumpPassed || !v.rotationJumpPassed) {
-              rows.push(row("Jump", `${!v.translationJumpPassed ? "translation " : ""}${!v.rotationJumpPassed ? "rotation " : ""}NG (reloc limit)`, "hud-warn"));
+            // v16: the jump vs the held pose with the limits in force; after a
+            // long loss the limits are off and the jump is information only.
+            if (Number.isFinite(v.rotationJumpDeg) || Number.isFinite(v.translationJump)) {
+              const lim = (x: number) => (Number.isFinite(x) ? x.toFixed(x >= 10 ? 0 : 1) : "∞");
+              const ng = !v.translationJumpPassed || !v.rotationJumpPassed;
+              rows.push(
+                row(
+                  "Jump",
+                  `${v.translationJump.toFixed(2)}/${lim(v.maxTranslationJump)} u  ${v.rotationJumpDeg.toFixed(0)}/${lim(v.maxRotationJumpDeg)}°  ${ng ? "NG (reloc limit)" : d.jumpLimitsActive ? "OK" : "no limit (long loss)"}`,
+                  ng ? "hud-warn" : undefined,
+                ),
+              );
             }
             if (!v.posePassed) rows.push(row("Pose", "invalid", "hud-warn"));
             rows.push(row("Level", v.level.toUpperCase(), v.level === "reject" ? "hud-warn" : undefined));

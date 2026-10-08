@@ -381,6 +381,12 @@ export interface RelocalizationDiagnostics {
   searchStage: RelocalizationSearchStage;
   /** The ranking came from a preparation made while still tracking (§3–§6, §33). */
   usedPreparedRanking: boolean;
+  /**
+   * The jump limits vs the held pose were in force for this attempt (v16):
+   * false after `jumpLimitMaxLostFrames` lost frames (the jump is then
+   * diagnostic only) or without a held pose.
+   */
+  jumpLimitsActive: boolean;
   candidatesTried: number;
   coarseTested: number;
   coarsePassed: number;
@@ -517,6 +523,7 @@ export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDia
     unusableKeyframes: 0,
     searchStage: "coarse",
     usedPreparedRanking: false,
+    jumpLimitsActive: false,
     candidatesTried: 0,
     coarseTested: 0,
     coarsePassed: 0,
@@ -565,6 +572,12 @@ export interface RelocalizeOptions {
   firstAttempt?: boolean;
   /** Keyframe to rank first whatever its score — the pending candidate's keyframe (confirmation, v14 §33). */
   preferKeyframeId?: number;
+  /**
+   * Frames the map has been lost (v16): beyond `jumpLimitMaxLostFrames` the
+   * held pose is stale and the jump limits vs it are diagnostic only.
+   * Omitted = the held pose is treated as fresh.
+   */
+  lostFrames?: number;
 }
 
 /** Retry bookkeeping per keyframe (v14 §21–§22, §34). */
@@ -1203,6 +1216,12 @@ export class Relocalizer {
       const poseFinite =
         Array.from(pnp.pose.translation).every((v) => Number.isFinite(v)) && Array.from(pnp.pose.rotation).every((v) => Number.isFinite(v));
       const jump = heldPose && poseFinite ? poseDelta(pnp.pose, heldPose) : null;
+      // v16: the held pose is dead-reckoned while lost; after a long loss it
+      // says nothing about where the camera is (a full turn lost half-way
+      // left it ~150° off on device), so the jump limits apply only while it
+      // is fresh. The jump itself stays in the diagnostics.
+      const heldFresh = opts.lostFrames === undefined || opts.lostFrames <= cfg.jumpLimitMaxLostFrames;
+      diag.jumpLimitsActive = heldPose !== null && heldFresh;
       const validation = validateRelocalizationCandidate(
         {
           inliers: pnp.inlierCount,
@@ -1223,8 +1242,8 @@ export class Relocalizer {
           minInlierRatio: cfg.minInlierRatio,
           minSpatialCells: cfg.minSpatialCells,
           minSpatialCoverage: cfg.minSpatialCoverage,
-          maxTranslationJump: sceneDepth > 0 ? cfg.maxTranslationJumpDepthRatio * sceneDepth : undefined,
-          maxRotationJumpDeg: cfg.maxRotationJumpDeg,
+          maxTranslationJump: heldFresh && sceneDepth > 0 ? cfg.maxTranslationJumpDepthRatio * sceneDepth : undefined,
+          maxRotationJumpDeg: heldFresh ? cfg.maxRotationJumpDeg : undefined,
         },
       );
       trial.validation = validation;

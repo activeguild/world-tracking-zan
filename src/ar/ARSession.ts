@@ -675,7 +675,10 @@ export class ARSession {
             `\nranking = ${d.ranked.map((k) => `KF${k.keyframeId}:${k.rankScore.toFixed(2)}${k.unusable ? `×${k.alive}` : k.suppressed ? "~" : k.selected ? "" : "·"}`).join(" ")}` +
             `\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
             (b
-              ? `\nbest = KF${b.keyframeId} stage ${b.stage}  ${b.inlierCount}i  ${b.meanReprojectionErrorPx.toFixed(2)}px  ratio ${b.inlierRatio.toFixed(2)}  cells ${b.spatialCells}/9  ncc ${b.coarseScore.toFixed(2)}`
+              ? `\nbest = KF${b.keyframeId} stage ${b.stage}  ${b.inlierCount}i  ${b.meanReprojectionErrorPx.toFixed(2)}px  ratio ${b.inlierRatio.toFixed(2)}  cells ${b.spatialCells}/9  ncc ${b.coarseScore.toFixed(2)}` +
+                (b.validation
+                  ? `\njump vs held = ${b.validation.translationJump.toFixed(2)} u / ${b.validation.rotationJumpDeg.toFixed(1)}deg (limits ${d.jumpLimitsActive ? `${b.validation.maxTranslationJump.toFixed(2)} u / ${b.validation.maxRotationJumpDeg}deg` : "off: long loss"})`
+                  : "")
               : "") +
             lk +
             `\ntrials = ${d.trials.map((t) => `KF${t.keyframeId}:${t.stage}${t.inlierCount ? `(${t.inlierCount}i)` : ""}`).join(" ")}`

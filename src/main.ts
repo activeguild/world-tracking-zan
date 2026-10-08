@@ -261,6 +261,7 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
     retrySuppressed: d.retrySuppressed,
     unusableKeyframes: d.unusableKeyframes,
     usedPreparedRanking: d.usedPreparedRanking,
+    jumpLimitsActive: d.jumpLimitsActive,
     best: b
       ? {
           keyframeId: b.keyframeId,
@@ -294,6 +295,10 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
                 nccPassed: b.validation.nccPassed,
                 translationJumpPassed: b.validation.translationJumpPassed,
                 rotationJumpPassed: b.validation.rotationJumpPassed,
+                translationJump: b.validation.translationJump,
+                rotationJumpDeg: b.validation.rotationJumpDeg,
+                maxTranslationJump: b.validation.maxTranslationJump,
+                maxRotationJumpDeg: b.validation.maxRotationJumpDeg,
                 ratio: b.validation.inlierRatio,
                 minRatio: b.validation.minInlierRatio,
                 cells: b.validation.coveredCells,

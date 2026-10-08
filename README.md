@@ -318,6 +318,16 @@ fewer than `minInliers` observations inside the image skips LK as
 `out_of_bounds`; an LK run that started inside the image and ended outside
 it is reported as `diverged` (what a motion-blurred frame does).
 
+Long loss (v16): the relocalization-specific jump limits vs the held pose
+(`maxTranslationJumpDepthRatio`, `maxRotationJumpDeg`) apply only while
+the held pose is fresh — up to `jumpLimitMaxLostFrames` (30) lost frames.
+While lost the pose is dead-reckoned and after a turn that was lost
+half-way it points the other way; the correct candidate at the start view
+(263 inliers, 0.2 px in the synthetic replay, NCC 0.97 on device) was being
+rejected as a `rotation_jump` on every attempt. Beyond that age the jump is
+diagnostic only (HUD `Jump … no limit (long loss)`); the other validators
+and the confirmation / post-monitor are unchanged.
+
 Keyframe coverage (v15): a new keyframe must be a new *view* with respect
 to every stored keyframe (rotation above `keyframeRotationDeg` or
 camera-center translation above `keyframeTranslationDepthRatio` × scene

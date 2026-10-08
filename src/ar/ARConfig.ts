@@ -448,6 +448,20 @@ export interface RelocalizationConfig {
    */
   maxTranslationJumpDepthRatio: number;
   maxRotationJumpDeg: number;
+  /**
+   * The jump limits above are only applied while the held pose is fresh:
+   * up to this many lost frames (v16). While lost the pose is dead-reckoned
+   * (velocity for a few frames, then held; rotation from the two-view prior
+   * when one exists), and on device a full turn that was lost half-way left
+   * it ~150° from the true pose — the correct candidate at the start view
+   * (NCC 0.97, 263 inliers in the synthetic replay) was rejected as a
+   * `rotation_jump` on every attempt. Beyond this age the jump is recorded
+   * as a diagnostic only; the other validators (inliers, error, ratio,
+   * spatial, NCC, confirmation, post-monitor) still apply. Same horizon as
+   * `landmarks.longLostFrames`, after which relocalization is the preferred
+   * way back anyway.
+   */
+  jumpLimitMaxLostFrames: number;
   /** Frames the map may stay lost before a relocalization attempt starts. */
   startAfterLostFrames: number;
   /** Failed relocalization attempts required (besides the lost time) before the map / world are reset. */
@@ -775,6 +789,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     relaxedMinMatchScore: 0.5,
     maxTranslationJumpDepthRatio: 1.0,
     maxRotationJumpDeg: 90,
+    jumpLimitMaxLostFrames: 30,
     startAfterLostFrames: 1,
     minAttemptsBeforeReset: 10,
     // Every 3rd frame: relocalization attempts dominated the lost-frame cost
