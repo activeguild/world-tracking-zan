@@ -609,6 +609,8 @@ export class Relocalizer {
 
   reset(): void {
     this.keyframes.length = 0;
+    this.nextId = 1;
+    this.evictedCount = 0;
     this.lastKeyframePose = null;
     this.lastKeyframeFrame = -Infinity;
     this.retry.clear();
@@ -634,19 +636,104 @@ export class Relocalizer {
    * Decide whether the current (tracked) frame should become a keyframe
    * (spec §35: movement / rotation / time since the last one).
    */
-  shouldCreate(pose: RigidTransform, frameId: number, inliers: number, medianParallaxPx: number): boolean {
+  shouldCreate(pose: RigidTransform, frameId: number, inliers: number, medianParallaxPx: number, sceneDepth = 0): boolean {
     const cfg = this.config;
     if (inliers < cfg.keyframeMinInliers) return false;
     if (!this.lastKeyframePose) return true;
     if (frameId - this.lastKeyframeFrame < cfg.keyframeMinFrameGap) return false;
+    // Time-based refresh of the current view (lighting / exposure drift).
+    if (frameId - this.lastKeyframeFrame >= cfg.keyframeMaxFrameGap) return true;
     const rot = (rotationDistance(this.lastKeyframePose.rotation, pose.rotation) * 180) / Math.PI;
-    if (rot > cfg.keyframeRotationDeg) return true;
-    if (medianParallaxPx > cfg.keyframeParallaxPx) return true;
-    return frameId - this.lastKeyframeFrame >= cfg.keyframeMaxFrameGap;
+    if (rot <= cfg.keyframeRotationDeg && medianParallaxPx <= cfg.keyframeParallaxPx) return false;
+    // View coverage (v15): the view must also be new with respect to *every*
+    // stored keyframe, not only the last one — a camera swinging back and
+    // forth otherwise creates a near-duplicate every `keyframeMinFrameGap`
+    // frames and the 8 slots churn through the same two views (keyframe ids
+    // reached 56 on device while 8 were kept).
+    return this.nearestKeyframeDistance(pose, sceneDepth) >= 1;
   }
 
-  /** Store a keyframe from the current pyramid, pose and landmark-linked tracks. */
-  create(pyramid: ImagePyramid, pose: RigidTransform, tracks: readonly Track[], frameId: number, timestamp: number): Keyframe {
+  /**
+   * Distance of a pose to the nearest stored keyframe in units of the
+   * keyframe thresholds: max(rotation / keyframeRotationDeg, camera-center
+   * translation / (keyframeTranslationDepthRatio × sceneDepth)); ≥ 1 means
+   * "a different view". Infinity with no keyframes; the translation term is
+   * skipped while the scene depth is unknown.
+   */
+  nearestKeyframeDistance(pose: RigidTransform, sceneDepth: number, except?: Keyframe): number {
+    let best = Number.POSITIVE_INFINITY;
+    for (const kf of this.keyframes) {
+      if (kf === except) continue;
+      const d = this.keyframeDistance(kf.pose, pose, sceneDepth);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  private keyframeDistance(a: RigidTransform, b: RigidTransform, sceneDepth: number): number {
+    const cfg = this.config;
+    const d = poseDelta(a, b);
+    const rot = d.rotationDeg / Math.max(1e-9, cfg.keyframeRotationDeg);
+    const transLimit = sceneDepth > 0 && cfg.keyframeTranslationDepthRatio > 0 ? cfg.keyframeTranslationDepthRatio * sceneDepth : 0;
+    const trans = transLimit > 0 ? d.translation / transLimit : 0;
+    return Math.max(rot, trans);
+  }
+
+  /**
+   * Make room for a new keyframe (v15): instead of the oldest, drop the most
+   * *redundant* keyframe — the one closest to another stored keyframe (ties:
+   * fewer observations whose landmarks are still in the map). The first
+   * keyframe (map origin view) and the newest are never dropped, so the
+   * store keeps covering distinct viewpoints rather than the last few
+   * seconds of motion.
+   */
+  private evictRedundant(map: LandmarkMap | null, sceneDepth: number): Keyframe | null {
+    const n = this.keyframes.length;
+    if (n <= this.config.maxKeyframes) return null;
+    let victim: Keyframe | null = null;
+    let victimKey = Number.POSITIVE_INFINITY;
+    let victimAlive = Number.POSITIVE_INFINITY;
+    for (let i = 1; i < n - 1; i++) {
+      const kf = this.keyframes[i];
+      const d = this.nearestKeyframeDistance(kf.pose, sceneDepth, kf);
+      const alive = map ? kf.observations.reduce((c, o) => c + (map.get(o.landmarkId) ? 1 : 0), 0) : kf.observations.length;
+      if (d < victimKey || (d === victimKey && alive < victimAlive)) {
+        victim = kf;
+        victimKey = d;
+        victimAlive = alive;
+      }
+    }
+    if (!victim) victim = this.keyframes[1];
+    const idx = this.keyframes.indexOf(victim);
+    this.keyframes.splice(idx, 1);
+    this.retry.delete(victim.id);
+    this.evictedCount++;
+    return victim;
+  }
+
+  /** Keyframes created / evicted in this map (diagnostics). */
+  get createdCount(): number {
+    return this.nextId - 1;
+  }
+  private evictedCount = 0;
+  get evictions(): number {
+    return this.evictedCount;
+  }
+
+  /**
+   * Store a keyframe from the current pyramid, pose and landmark-linked
+   * tracks. `map` / `sceneDepth` drive the redundancy-based eviction (v15);
+   * without them the most redundant keyframe is judged by pose alone.
+   */
+  create(
+    pyramid: ImagePyramid,
+    pose: RigidTransform,
+    tracks: readonly Track[],
+    frameId: number,
+    timestamp: number,
+    map: LandmarkMap | null = null,
+    sceneDepth = 0,
+  ): Keyframe {
     const observations: KeyframeObservation[] = [];
     for (const t of tracks) {
       if (t.landmarkId >= 0) observations.push({ landmarkId: t.landmarkId, x: t.x, y: t.y });
@@ -664,11 +751,7 @@ export class Relocalizer {
       observations,
     };
     this.keyframes.push(kf);
-    if (this.keyframes.length > this.config.maxKeyframes) {
-      // Drop the oldest, but always keep the first (map origin view).
-      const dropped = this.keyframes.splice(1, 1);
-      for (const d of dropped) this.retry.delete(d.id);
-    }
+    this.evictRedundant(map, sceneDepth);
     this.lastKeyframePose = kf.pose;
     this.lastKeyframeFrame = frameId;
     this.prepared = null;
@@ -960,12 +1043,23 @@ export class Relocalizer {
       trial.lkTracked = res.okCount;
       trial.lkRatio = res.okCount / n;
       // Per-status breakdown (v14 §49): says whether the keyframe, the initial
-      // guess or the search window is what fails.
+      // guess or the search window is what fails. A point whose start was
+      // inside the image but that ended out of bounds *diverged* — the LK
+      // iterations ran away, typically on a motion-blurred frame (on device
+      // 154 of 179 points on a 36–80 px/frame blur) — and is counted apart
+      // from a start outside the image.
       const st = trial.lkStatus;
       for (let i = 0; i < n; i++) {
         switch (res.status[i]) {
           case TrackStatus.OK: st.ok++; break;
-          case TrackStatus.OUT_OF_BOUNDS: st.outOfBounds++; break;
+          case TrackStatus.OUT_OF_BOUNDS: {
+            const gx = guesses[i * 2];
+            const gy = guesses[i * 2 + 1];
+            const inside = gx >= margin && gy >= margin && gx < current.width - margin && gy < current.height - margin;
+            if (inside) st.diverged++;
+            else st.outOfBounds++;
+            break;
+          }
           case TrackStatus.LOW_TEXTURE: st.lowTexture++; break;
           case TrackStatus.HIGH_RESIDUAL: st.highResidual++; break;
           case TrackStatus.FB_ERROR: st.fbError++; break;
@@ -979,7 +1073,7 @@ export class Relocalizer {
         record(
           trial,
           { matchScore: shift.score, lkRatio: trial.lkRatio },
-          `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (${trial.lkFailureReason}: fb ${st.fbError} res ${st.highResidual} far ${st.tooFar} oob ${st.outOfBounds} tex ${st.lowTexture}; score ${shift.score.toFixed(2)})`,
+          `kf ${kf.id}: lk ${res.okCount}/${n} < ${cfg.minInliers} (${trial.lkFailureReason}: fb ${st.fbError} res ${st.highResidual} far ${st.tooFar} div ${st.diverged} oob ${st.outOfBounds} tex ${st.lowTexture}; score ${shift.score.toFixed(2)})`,
         );
         continue;
       }

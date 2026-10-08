@@ -668,7 +668,7 @@ export class ARSession {
       if (rl.rejectCode && key !== this.loggedRelocReject) {
         const b = d?.best;
         const lk = b && b.lkObservations > 0
-          ? `\nlk (best) = ${b.lkTracked}/${b.lkObservations}${b.lkFailureReason ? ` ${b.lkFailureReason}` : ""}  fb ${b.lkStatus.fbError} res ${b.lkStatus.highResidual} far ${b.lkStatus.tooFar} oob ${b.lkStatus.outOfBounds} tex ${b.lkStatus.lowTexture}`
+          ? `\nlk (best) = ${b.lkTracked}/${b.lkObservations}${b.lkFailureReason ? ` ${b.lkFailureReason}` : ""}  fb ${b.lkStatus.fbError} res ${b.lkStatus.highResidual} far ${b.lkStatus.tooFar} div ${b.lkStatus.diverged} oob ${b.lkStatus.outOfBounds} tex ${b.lkStatus.lowTexture}`
           : "";
         const stages = d
           ? `\nkeyframes = ${d.keyframes}  ranked = ${d.ranked.length}  lk budget = ${d.lkCandidates}  pnp budget = ${d.pnpCandidates}  retry suppressed = ${d.retrySuppressed}${d.usedPreparedRanking ? "  (prepared ranking)" : ""}` +

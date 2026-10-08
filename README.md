@@ -315,7 +315,16 @@ refinement (`coarseRefineRadius`) → LK → PnP; a strong candidate stops the
 search. Shifts are chosen by NCC × √overlap (`coarseMinOverlap`) so a large
 shift with little overlap cannot win by chance, and a shift that leaves
 fewer than `minInliers` observations inside the image skips LK as
-`out_of_bounds`. Keyframe → current LK has its own forward-backward / residual
+`out_of_bounds`; an LK run that started inside the image and ended outside
+it is reported as `diverged` (what a motion-blurred frame does).
+
+Keyframe coverage (v15): a new keyframe must be a new *view* with respect
+to every stored keyframe (rotation above `keyframeRotationDeg` or
+camera-center translation above `keyframeTranslationDepthRatio` × scene
+depth), not only the last one, and when the store is full the most
+redundant keyframe is evicted — never the first (origin view) or the
+newest. A camera swinging between two views keeps two keyframes instead of
+churning through the 8 slots. HUD `Reloc … kf 8 (N made, M out)`. Keyframe → current LK has its own forward-backward / residual
 bounds (`lkForwardBackwardPx` 2.0, `lkMaxResidual`); the frame-to-frame
 tracker is unchanged. A keyframe that failed is not retried on an
 unchanged view for `retryCooldownFrames` (image change = zero-shift NCC

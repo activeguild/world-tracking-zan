@@ -48,7 +48,7 @@ export interface HudRelocDiagnostics {
     spatialCells: number;
     coarseScore: number;
     /** v14 §49: LK breakdown of the best candidate. */
-    lk: { observations: number; tracked: number; fb: number; residual: number; far: number; oob: number; texture: number; reason: string | null };
+    lk: { observations: number; tracked: number; fb: number; residual: number; far: number; diverged: number; oob: number; texture: number; reason: string | null };
     /** Per-condition validation of the best candidate (v9 §21), null before PnP. */
     validation: {
       inliers: number;
@@ -222,6 +222,9 @@ export interface HudStats {
   timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
   reloc?: {
     keyframes: number;
+    /** Keyframes created / evicted so far (v15 churn). */
+    keyframesCreated: number;
+    keyframesEvicted: number;
     /** none / candidate / success / fail (v5 §18). */
     attempt: string;
     inliers: number;
@@ -371,7 +374,7 @@ export class DebugOverlay {
       rows.push(
         row(
           "Reloc",
-          `${r.attempt}  kf ${r.keyframes}  ok×${r.successes}${r.diag && r.diag.age > 0 && r.attempt === "none" ? `  (last ${r.diag.age}f ago)` : ""}`,
+          `${r.attempt}  kf ${r.keyframes} (${r.keyframesCreated} made, ${r.keyframesEvicted} out)  ok×${r.successes}${r.diag && r.diag.age > 0 && r.attempt === "none" ? `  (last ${r.diag.age}f ago)` : ""}`,
           r.attempt === "fail" ? "hud-warn" : undefined,
         ),
       );
@@ -427,7 +430,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "LKpts",
-            `${lk.tracked}/${lk.observations}${lk.reason ? `  ${lk.reason}` : ""}  fb ${lk.fb} res ${lk.residual} far ${lk.far} oob ${lk.oob} tex ${lk.texture}`,
+            `${lk.tracked}/${lk.observations}${lk.reason ? `  ${lk.reason}` : ""}  fb ${lk.fb} res ${lk.residual} far ${lk.far} div ${lk.diverged} oob ${lk.oob} tex ${lk.texture}`,
             lk.reason ? "hud-warn" : undefined,
           ),
         );

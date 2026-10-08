@@ -207,6 +207,16 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### v15 — Keyframe の視点カバレッジ + LK 発散の分類（2026-10-08、実機確認待ち）
+
+3 本目の画面録画（`f0ae2cd`、33 s）の読み取り: 復帰 4 回すべて `RELOCALIZING → AR_ACTIVE` 直行、Cube は同じ位置、Vision 13–28 ms（失探中の試行込みで 17–25 ms）。再局所化はフレームがブレていない瞬間に成立（MED 20 px で `CONFIRMING`、168 ms で `PNP` 段階）。**`out_of_bounds` の訂正**: `LKpts 56/115 … oob 50`（LK 成功 56 点と同じ試行）、`5/179 … fb 15 res 3 oob 154`（LK は走っている）から、画面内チェックを通った初期位置から始めた LK の反復が**ブレたフレーム上で発散して画像外へ出た**もので、シフトの間違いではない。Motion FAST 36–80 px のフレームでは原理的に成立せず、復帰は「減速後 1〜3 フレーム」になっている。残る改善点として Keyframe 生成（id が 56 まで進み、8 枚が 10 フレームごとに入れ替わっていた）に着手。**PnP / LK / RANSAC / Validation / Confirmation / Visibility / Plane は変更していない**。
+
+- **LK 発散の分類**: `LkStatusCounts.diverged`（初期位置は画像内だったのに `OUT_OF_BOUNDS` で終わった点）を `outOfBounds`（初期位置が画像外）から分離。`lkFailureReason` に `diverged`。HUD `LKpts 5/179 diverged fb 15 res 3 far 2 div 154 oob 0 tex 0`、ログ `lk (best) = … div N oob M`。FeatureTracker は不変（status の後分類のみ）
+- **Keyframe 生成の視点カバレッジ（`shouldCreate`）**: 従来は「直前の Keyframe から回転 10° または視差 40 px」だけで、左右に振るカメラは同じ 2 視点を 10 フレームごとに作り直していた。新規作成は従来の発火条件に加えて **全 Keyframe に対する最近傍距離 ≥ 1**（`max(回転 / keyframeRotationDeg, カメラ中心移動 / (keyframeTranslationDepthRatio × 奥行き))`、`nearestKeyframeDistance`）を要求。`keyframeTranslationDepthRatio` 0.06 は視差 40 px（f ≈ 640）相当。奥行き不明時は回転のみ。`keyframeMaxFrameGap`（90）の時間リフレッシュは維持（露出変化対策、同一視点の重複は次の削除で消える）
+- **削除（`evictRedundant`）**: 上限超過時は「最も古いもの」ではなく**最も冗長なもの**（他の Keyframe への最近傍距離が最小、同値なら Map に残る Landmark 観測が少ない方）を削除。最初の 1 枚（原点ビュー）と最新の 1 枚は削除しない。`Relocalizer.create(pyramid, pose, tracks, frameId, timestamp, map?, sceneDepth?)`。`createdCount` / `evictions` を `RelocalizationOutput.keyframesCreated / keyframesEvicted` で出力、HUD `Reloc none kf 8 (56 made, 48 out) ok×4`
+- テスト 224 件（+2）: 0° ↔ 15° を 10 フレームごとに 30 往復 → 作成 5 枚（旧方針 ≈ 30、時間リフレッシュ分のみ）、両視点がカバーされ原点 id 1 を保持。8 視点（15° 間隔）に 4° 差の近接ビューを強制追加 → 双子（id 4）が削除され id 1 / 2 / 9 は残る、`shouldCreate` は近接ビューを拒否・新視点と奥行き比超えの並進を受理・原点に戻った視点（直前 Keyframe から 49° でも）を拒否・時間リフレッシュは有効。既存テスト「90 フレームで 3 枚以上」は 0.06 で合格（0.15 では 2 枚）。`lkFailureReason` に `diverged` 優位。ブラウザテスト 2 件合格
+- **実機で読むべきもの**: `Reloc … kf 8 (N made, M out)` の N が録画中に 50 を超えないこと（1 分で 10〜20 程度が目安）、`Rank` 上位に Cube を置いた視点の Keyframe（小さい id）が残っていること、`LKpts` の `div` と `oob` の比率（`div` が多ければブラー、`oob` が多ければシフト）
+
 ### 修正指示書 v14 対応 — Relocalization Recovery Speed（2026-10-05、実機確認待ち）
 
 目的は「正しい Keyframe と特徴対応をより早く見つける」ことで、「雑に通す」ことではない。**PnP / 通常 Tracking の LK / Jump Gate / Plane RANSAC / Plane Recovery / WorldAnchor / ARObject / Frame Sync / v12 の Strong・Acceptable・Reject / v13 の Object Visibility / Confirmation / Map reset 条件は変更していない**（§1、§52）。

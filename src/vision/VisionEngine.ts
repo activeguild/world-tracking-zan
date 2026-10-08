@@ -497,6 +497,8 @@ export class VisionEngine {
     this.relocStatus = {
       ...emptyReloc(),
       keyframes: this.relocalizer.count,
+      keyframesCreated: this.relocalizer.createdCount,
+      keyframesEvicted: this.relocalizer.evictions,
       lastSuccessFrame: this.relocLastSuccessFrame,
       successCount: this.relocSuccessCount,
       postDeltaTranslation: this.relocMonitor?.maxDeltaTranslation ?? 0,
@@ -768,8 +770,8 @@ export class VisionEngine {
         }
         // Keyframe policy (spec §35).
         const par = this.medianParallaxSinceLastKeyframe();
-        if (this.relocalizer.shouldCreate(tracker.pose, frameId, res.inlierCount, par)) {
-          this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
+        if (this.relocalizer.shouldCreate(tracker.pose, frameId, res.inlierCount, par, tracker.sceneDepth)) {
+          this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, tracker.map, tracker.sceneDepth);
           this.relocStatus.keyframes = this.relocalizer.count;
         }
       } else if (
@@ -1472,6 +1474,8 @@ function medianOf(values: Float32Array, n: number): number {
 function emptyReloc(): RelocalizationOutput {
   return {
     keyframes: 0,
+    keyframesCreated: 0,
+    keyframesEvicted: 0,
     attempt: "none",
     inlierCount: 0,
     candidatesTried: 0,

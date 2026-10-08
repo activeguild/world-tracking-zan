@@ -275,6 +275,7 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
             fb: b.lkStatus.fbError,
             residual: b.lkStatus.highResidual,
             far: b.lkStatus.tooFar,
+            diverged: b.lkStatus.diverged,
             oob: b.lkStatus.outOfBounds,
             texture: b.lkStatus.lowTexture,
             reason: b.lkFailureReason,
@@ -453,6 +454,8 @@ function refreshHud(): void {
     reloc: s.relocalization
       ? {
           keyframes: s.relocalization.keyframes,
+          keyframesCreated: s.relocalization.keyframesCreated,
+          keyframesEvicted: s.relocalization.keyframesEvicted,
           attempt: s.relocalization.attempt,
           inliers: s.relocalization.inlierCount,
           errorPx: s.relocalization.meanReprojectionErrorPx,

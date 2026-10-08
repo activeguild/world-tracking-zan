@@ -338,6 +338,15 @@ export interface RelocalizationConfig {
   /** Median landmark displacement since the last keyframe (px) that triggers a new one. */
   keyframeParallaxPx: number;
   /**
+   * View coverage (v15): a new keyframe must also differ from *every* stored
+   * keyframe by more than `keyframeRotationDeg` or by a camera-center
+   * translation above this fraction of the scene depth; when the store is
+   * full the most redundant keyframe (closest to another one) is dropped,
+   * never the first or the newest. Stops the 8 slots from churning through
+   * the same two views while the camera swings back and forth.
+   */
+  keyframeTranslationDepthRatio: number;
+  /**
    * Keyframe ranking (v14 §8–§12): every attempt ranks *all* keyframes by a
    * cheap coarse similarity (zero-mean NCC on a 1/16 image, shift search of
    * this radius in its pixels — the same ±level-0 range as
@@ -721,6 +730,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     keyframeMaxFrameGap: 90,
     keyframeRotationDeg: 10,
     keyframeParallaxPx: 40,
+    // Consistent with keyframeParallaxPx: 40 px at the default focal length
+    // (≈ 640 px) is a camera translation of about 6 % of the scene depth.
+    keyframeTranslationDepthRatio: 0.06,
     // v14 §10–§11: rank all keyframes on the 1/16 image (±12 px there = the
     // ±192 level-0 px the old ±24 px search on the 1/8 image covered, at
     // ~1/8 of its cost per keyframe), refine the top ones on the 1/8 image.

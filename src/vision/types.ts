@@ -310,6 +310,9 @@ export interface TriangulationStats {
 
 export interface RelocalizationOutput {
   keyframes: number;
+  /** Keyframes created / evicted in this map so far (v15 churn diagnostics). */
+  keyframesCreated: number;
+  keyframesEvicted: number;
   /**
    * Result of the attempt made in this frame (v5 §18): `candidate` = passed
    * the global validation, held for confirmation; `success` = applied to the

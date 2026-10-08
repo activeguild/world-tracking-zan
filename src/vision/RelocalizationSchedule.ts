@@ -24,12 +24,19 @@ export type RelocalizationSearchStage = "idle" | "prepare" | "coarse" | "lk" | "
  * the dominant per-point status among the rejected points. `insufficient_tracks`
  * when no status dominates (or nothing was rejected but the count is short).
  */
-export type LkFailureReason = "insufficient_tracks" | "high_fb_error" | "high_lk_error" | "out_of_bounds" | "low_texture" | "too_far";
+export type LkFailureReason = "insufficient_tracks" | "high_fb_error" | "high_lk_error" | "out_of_bounds" | "diverged" | "low_texture" | "too_far";
 
-/** Per-status counts of one LK run (FeatureTracker statuses). */
+/**
+ * Per-status counts of one LK run (FeatureTracker statuses). `diverged` is
+ * an out-of-bounds result from a start *inside* the image: the iterations
+ * ran away, which is what a motion-blurred current frame does to a sharp
+ * keyframe template; `outOfBounds` is a start already outside the image
+ * (the coarse shift moved it out).
+ */
 export interface LkStatusCounts {
   ok: number;
   outOfBounds: number;
+  diverged: number;
   lowTexture: number;
   highResidual: number;
   fbError: number;
@@ -37,7 +44,7 @@ export interface LkStatusCounts {
 }
 
 export function emptyLkStatusCounts(): LkStatusCounts {
-  return { ok: 0, outOfBounds: 0, lowTexture: 0, highResidual: 0, fbError: 0, tooFar: 0 };
+  return { ok: 0, outOfBounds: 0, diverged: 0, lowTexture: 0, highResidual: 0, fbError: 0, tooFar: 0 };
 }
 
 /** Dominant failure of an LK run that kept too few points (v14 §49). */
@@ -46,6 +53,7 @@ export function lkFailureReason(c: LkStatusCounts): LkFailureReason {
     ["high_fb_error", c.fbError],
     ["high_lk_error", c.highResidual],
     ["out_of_bounds", c.outOfBounds],
+    ["diverged", c.diverged],
     ["low_texture", c.lowTexture],
     ["too_far", c.tooFar],
   ];
@@ -61,7 +69,7 @@ export function lkFailureReason(c: LkStatusCounts): LkFailureReason {
   }
   // A clear majority among the rejections names the reason; otherwise the
   // run simply did not keep enough points.
-  const rejected = c.fbError + c.highResidual + c.outOfBounds + c.lowTexture + c.tooFar;
+  const rejected = c.fbError + c.highResidual + c.outOfBounds + c.diverged + c.lowTexture + c.tooFar;
   if (best[1] === 0 || best[1] * 2 < rejected) return "insufficient_tracks";
   return best[0];
 }

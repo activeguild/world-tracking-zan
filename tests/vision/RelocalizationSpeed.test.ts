@@ -116,8 +116,10 @@ describe("v14 scheduling (Tests 1–4, 10–14, 17)", () => {
   });
 
   it("§49: the LK failure reason is the dominant rejected status, insufficient_tracks without one", () => {
-    const base = { ok: 10, outOfBounds: 0, lowTexture: 0, highResidual: 0, fbError: 0, tooFar: 0 };
+    const base = { ok: 10, outOfBounds: 0, diverged: 0, lowTexture: 0, highResidual: 0, fbError: 0, tooFar: 0 };
     expect(lkFailureReason(base)).toBe("insufficient_tracks");
+    // Blur: starts inside the image, iterations ran out of it (on-device 154/179).
+    expect(lkFailureReason({ ...base, diverged: 154, fbError: 15, highResidual: 3 })).toBe("diverged");
     expect(lkFailureReason({ ...base, fbError: 40, highResidual: 5 })).toBe("high_fb_error");
     expect(lkFailureReason({ ...base, highResidual: 30, tooFar: 4 })).toBe("high_lk_error");
     expect(lkFailureReason({ ...base, tooFar: 25 })).toBe("too_far");
@@ -348,6 +350,79 @@ describe("v14 keyframe ranking and search budget (Tests 5–11, 14, AC-2 / AC-3)
     const far = coarseShift(a, shifted, 60, 0.5);
     expect(Math.abs(far.dx)).toBeLessThanOrEqual(a.width / 2);
     expect(Math.abs(far.dy)).toBeLessThanOrEqual(a.height / 2);
+  });
+});
+
+describe("v15 keyframe coverage: no churn on a swinging camera, redundancy-based eviction", () => {
+  const rotY = (deg: number): RigidTransform => {
+    const a = (deg * Math.PI) / 180;
+    const c = Math.cos(a), s = Math.sin(a);
+    return { rotation: new Float64Array([c, 0, s, 0, 1, 0, -s, 0, c]), translation: new Float64Array([0, 0, 0]) };
+  };
+  const tracksFor = (n: number): Track[] => Array.from({ length: n }, (_, i) => track(i + 1, 100 + i, 100 + i, i + 1));
+  const pyramid = pyramidOf(textures[0]);
+  const DEPTH = 2;
+
+  it("a camera swinging between two views creates two keyframes, not one every keyframeMinFrameGap frames", () => {
+    const reloc = new Relocalizer(RC, CFG.tracker);
+    let frame = 0;
+    let created = 0;
+    // 30 swings A (0°) ↔ B (+15°), each held for keyframeMinFrameGap frames.
+    for (let swing = 0; swing < 30; swing++) {
+      const pose = rotY(swing % 2 === 0 ? 0 : 15);
+      for (let f = 0; f < RC.keyframeMinFrameGap; f++, frame++) {
+        if (reloc.shouldCreate(pose, frame, 100, 0, DEPTH)) {
+          reloc.create(pyramid, pose, tracksFor(100), frame, frame * 33, null, DEPTH);
+          created++;
+        }
+      }
+    }
+    // The two views are stored once each; only the time-based refresh
+    // (keyframeMaxFrameGap) adds to the count, never the swinging itself.
+    const refreshes = Math.floor(frame / RC.keyframeMaxFrameGap);
+    expect(created).toBeLessThanOrEqual(2 + refreshes);
+    expect(reloc.count).toBeLessThanOrEqual(RC.maxKeyframes);
+    expect(reloc.keyframes[0].id).toBe(1); // the origin view is never dropped
+    // Both views are still covered.
+    expect(reloc.nearestKeyframeDistance(rotY(0), DEPTH)).toBeLessThan(1);
+    expect(reloc.nearestKeyframeDistance(rotY(15), DEPTH)).toBeLessThan(1);
+    console.log(`[v15] 30 swings over ${frame} frames: ${created} keyframes created (old policy: ~${Math.floor(frame / RC.keyframeMinFrameGap)}), ${reloc.count} kept`);
+  });
+
+  it("when full, the most redundant keyframe is dropped — never the first or the newest — so distinct views survive", () => {
+    const reloc = new Relocalizer(RC, CFG.tracker);
+    // 8 distinct views 15° apart …
+    for (let i = 0; i < RC.maxKeyframes; i++) reloc.create(pyramid, rotY(i * 15), tracksFor(50), i * 20, 0, null, DEPTH);
+    expect(reloc.count).toBe(RC.maxKeyframes);
+    // … then a view only 4° from view 3 (a near duplicate) is forced in: it
+    // is the newest, so its twin (view 3, id 4) is the one evicted — not the
+    // oldest non-origin view (id 2).
+    reloc.create(pyramid, rotY(3 * 15 + 4), tracksFor(50), 200, 0, null, DEPTH);
+    const ids = reloc.keyframes.map((k) => k.id);
+    expect(reloc.count).toBe(RC.maxKeyframes);
+    expect(ids).toContain(1);
+    expect(ids).toContain(2);
+    expect(ids).not.toContain(4);
+    expect(ids).toContain(9);
+    expect(reloc.evictions).toBe(1);
+    expect(reloc.createdCount).toBe(9);
+    // shouldCreate refuses that near-duplicate view in the first place (within
+    // the min / max frame gaps, so neither time rule applies).
+    const f = 200 + RC.keyframeMinFrameGap + 1;
+    expect(f - 200).toBeLessThan(RC.keyframeMaxFrameGap);
+    expect(reloc.shouldCreate(rotY(3 * 15 + 4), f, 100, 0, DEPTH)).toBe(false);
+    // A genuinely new view (far from all) is accepted; so is a pure translation beyond the depth ratio.
+    expect(reloc.shouldCreate(rotY(8 * 15), f, 100, 0, DEPTH)).toBe(true);
+    const shifted: RigidTransform = { rotation: mat3Identity(), translation: new Float64Array([DEPTH * RC.keyframeTranslationDepthRatio * 1.5, 0, 0]) };
+    expect(reloc.shouldCreate(shifted, f, 100, RC.keyframeParallaxPx + 1, DEPTH)).toBe(true);
+    // Back at the origin view: 49° from the last keyframe (the old trigger
+    // would fire) but identical to keyframe 1 → refused (coverage).
+    expect(reloc.shouldCreate(rotY(0), f, 100, 0, DEPTH)).toBe(false);
+    // A small translation from the origin view, below the depth ratio, is not a new view either.
+    const near: RigidTransform = { rotation: mat3Identity(), translation: new Float64Array([DEPTH * RC.keyframeTranslationDepthRatio * 0.5, 0, 0]) };
+    expect(reloc.shouldCreate(near, f, 100, RC.keyframeParallaxPx + 1, DEPTH)).toBe(false);
+    // The time-based refresh still applies after keyframeMaxFrameGap frames.
+    expect(reloc.shouldCreate(rotY(3 * 15 + 4), 200 + RC.keyframeMaxFrameGap, 100, 0, DEPTH)).toBe(true);
   });
 });
 
