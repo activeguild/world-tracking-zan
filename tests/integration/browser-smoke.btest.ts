@@ -246,7 +246,11 @@ describe("Phase 1 browser smoke test", () => {
       grabber: window.__ar.stats().grabber,
       proc: (document.querySelector(".ar-hud") as HTMLElement).innerText.match(/Proc.*/)?.[0] ?? "",
       cmp: window.__ar.grabCompare(),
-    }))) as { grabber: string | null; proc: string; cmp: { meanAbsDiff: number; maxAbsDiff: number; width: number; height: number } | null };
+    }))) as {
+      grabber: string | null;
+      proc: string;
+      cmp: { meanAbsDiff: number; maxAbsDiff: number; width: number; height: number; alternatives: Record<string, number>; twoDRepeat: number } | null;
+    };
     console.log("[browser-smoke] grabber compare " + JSON.stringify(probe));
     expect(probe.grabber).toBe("webgl");
     expect(probe.proc).toMatch(/grab gl/);
