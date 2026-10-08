@@ -440,11 +440,14 @@ describe("v15 keyframe landmarks: protected from the age prune, thin keyframes n
     expect(map.get(2)).toBeDefined();
     expect(map.get(3)).toBeUndefined();
     expect(map.size).toBe(7);
-    // Cap: 7 → 4 removes the three least recently seen *unprotected* ones (6, 7, 8 share the same frame → by order), never 1 / 2.
-    expect(map.prune(200, 150, 4, protectedIds)).toBe(3);
+    // Cap: applies to the 5 unprotected landmarks only (5 → 4 removes one), never to 1 / 2,
+    // so a large protected set cannot starve the current view of fresh landmarks.
+    expect(map.prune(200, 150, 4, protectedIds)).toBe(1);
     expect(map.get(1)).toBeDefined();
     expect(map.get(2)).toBeDefined();
-    expect(map.size).toBe(4);
+    expect(map.size).toBe(6);
+    expect(map.countUnprotected(protectedIds)).toBe(4);
+    expect(map.countUnprotected(null)).toBe(6);
     // Without a protected set the old behaviour: everything old goes.
     const plain = new LandmarkMap();
     for (let i = 1; i <= 3; i++) plain.add([i, 0, 2], i, 0).lastSeenFrame = 0;

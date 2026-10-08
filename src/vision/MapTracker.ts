@@ -686,6 +686,9 @@ export class MapTracker {
       // Depth sanity against the existing map (a point "at infinity" or in
       // front of the lens is a triangulation failure, not a landmark).
       const medDepth = n > 0 ? this.medianDepth(this._pose, n) : 0;
+      // The landmark cap bounds the *unprotected* landmarks (v15): the
+      // keyframe-protected ones must not block triangulation in a new view.
+      let unprotectedCount = this.map.countUnprotected(this.protectedLandmarkIds);
       for (const t of tracks) {
         if (t.landmarkId >= 0 || !t.anchorPose || t.anchorFrame === frameId) continue;
         tri.candidates++;
@@ -693,7 +696,7 @@ export class MapTracker {
           tri.parallaxRejected++;
           continue;
         }
-        if (this.map.size >= cfg.maxLandmarks) break;
+        if (unprotectedCount >= cfg.maxLandmarks) break;
         // Relative pose anchor → current, triangulate in the anchor frame.
         const anchorInv = invertTransform(t.anchorPose);
         const rel = composeTransforms(this._pose, anchorInv);
@@ -726,6 +729,7 @@ export class MapTracker {
         const Y = r[3] * pa[0] + r[4] * pa[1] + r[5] * pa[2] + tt[1];
         const Z = r[6] * pa[0] + r[7] * pa[1] + r[8] * pa[2] + tt[2];
         const lm = this.map.add([X, Y, Z], t.id, frameId);
+        unprotectedCount++;
         lm.observations = 2;
         lm.anchorPose = t.anchorPose;
         lm.anchorX = t.anchorX;

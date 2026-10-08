@@ -90,33 +90,44 @@ export class LandmarkMap {
    * `maxCount`, the least recently seen ones (spec §48).
    *
    * `protectedIds` (v15): landmarks a stored keyframe observes are exempt
-   * from the age rule — a keyframe whose landmarks have been pruned can no
+   * from both rules — a keyframe whose landmarks have been pruned can no
    * longer relocalize (on device a keyframe matched at NCC 0.91 had 26 of
-   * its observations left after 5 s out of view). They still count toward
-   * `maxCount`, but the unprotected landmarks go first.
+   * its observations left after 5 s out of view). `maxCount` applies to the
+   * *unprotected* landmarks: on device the protected set alone filled the
+   * 1000 cap, the cap then removed the current view's fresh landmarks and
+   * blocked new triangulation (PnP fell to 32 inliers while exploring). The
+   * protected set is bounded by the keyframe store (maxKeyframes ×
+   * observations per keyframe).
    */
   prune(frameId: number, maxAge: number, maxCount: number, protectedIds: ReadonlySet<number> | null = null): number {
     let removed = 0;
+    const unprotected: Landmark[] = [];
     for (const lm of this.landmarks.values()) {
-      if (frameId - lm.lastSeenFrame > maxAge && !(protectedIds && protectedIds.has(lm.id))) {
+      if (protectedIds && protectedIds.has(lm.id)) continue;
+      if (frameId - lm.lastSeenFrame > maxAge) {
         this.landmarks.delete(lm.id);
         removed++;
+      } else {
+        unprotected.push(lm);
       }
     }
-    if (this.landmarks.size > maxCount) {
-      const sorted = [...this.landmarks.values()].sort((a, b) => {
-        const pa = protectedIds?.has(a.id) ? 1 : 0;
-        const pb = protectedIds?.has(b.id) ? 1 : 0;
-        if (pa !== pb) return pa - pb; // unprotected first
-        return a.lastSeenFrame - b.lastSeenFrame;
-      });
-      const excess = this.landmarks.size - maxCount;
+    if (unprotected.length > maxCount) {
+      unprotected.sort((a, b) => a.lastSeenFrame - b.lastSeenFrame);
+      const excess = unprotected.length - maxCount;
       for (let i = 0; i < excess; i++) {
-        this.landmarks.delete(sorted[i].id);
+        this.landmarks.delete(unprotected[i].id);
         removed++;
       }
     }
     return removed;
+  }
+
+  /** Landmarks not in `protectedIds` (the set `maxLandmarks` bounds). */
+  countUnprotected(protectedIds: ReadonlySet<number> | null): number {
+    if (!protectedIds) return this.landmarks.size;
+    let n = 0;
+    for (const id of this.landmarks.keys()) if (!protectedIds.has(id)) n++;
+    return n;
   }
 
   /**

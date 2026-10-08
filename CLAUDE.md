@@ -221,6 +221,8 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **使えない Keyframe の扱い**: ランキング後、Map に残る観測（`RankedKeyframe.alive`）が `minInliers`（25）未満の Keyframe は `unusable` として LK 枠を消費せず（`diag.unusableKeyframes`、全部が該当なら `insufficient_landmarks`）、削除では視点に関係なく最優先の対象。HUD `KF 8 … thin 2`、`Rank KF17 0.91×26`（× の後が生存観測数）。画面内チェックの不足が「外に出た点が半数未満」= 観測自体が薄い場合は `landmarks` 段階として `only 24 usable observations (26 with landmarks, 2 outside the image) < 25` と出す（`out_of_bounds` と区別）
 - `VisionEngine.keyframeSummary()`（id / frameId / observations / alive）。テスト 226 件（+2）: `prune` が保護 Landmark を寿命から守り上限超過では非保護から削る、観測を失った Keyframe はランキングに出るが試行されず（`unusable`、`alive 0`）正常な Keyframe で成功、削除は視点が遠くても薄い Keyframe を先に選ぶ、エンジンで 220 フレーム追跡後も全 Keyframe の生存観測が 25 以上（最初の Keyframe は寿命 150 フレームより古い）。ブラウザテスト 2 件合格
 - **実機で読むべきもの**: 5〜10 秒別の場所を見てから戻したときの `Rank` 行に `×` が出ないこと、`LKpts` が `landmarks` ではなく LK / PnP 段階へ進むこと、`LM` 総数が 1000 の上限に張り付かないこと（張り付くなら保護分が多すぎる）
+- **実機結果（`1c1860e`、5 本目 12.6 s）**: 別の場所（タンス）へ振って戻しても失探なし（Lost 0 ms、ok×0）、Cube 同位置、Vision 16–19 ms。ただし懸念どおり **`LM 1000` に張り付き**、新しい場所での PnP が 32–34i に落ちた（4 本目の同じ探索では LM 475–690 / PnP 42–89i）。保護された Landmark（8 枚 × 200–300 観測）だけで上限を埋め、上限超過の削除が「非保護を先に」で現在の視野の新しい Landmark を消し、さらに `map.size >= maxLandmarks` で三角測量が止まっていた
+- **対処（同日）**: `maxLandmarks`（1000）は **非保護の Landmark だけ**を数える（`prune` の上限削除は非保護のみ、`LandmarkMap.countUnprotected`）。三角測量の停止条件も非保護数で判定（`MapTracker`）。保護分の上限は Keyframe 保存数 × 観測数（≤ 8 × 300）で自然に有界。HUD の `LM` は保護分を含むので 1000 を超えうる。テスト更新: 上限は非保護 5 → 4 で 1 点だけ削除し保護 2 点は残る
 
 ### 修正指示書 v14 対応 — Relocalization Recovery Speed（2026-10-05、実機確認待ち）
 
