@@ -419,9 +419,13 @@ export class VisionEngine {
       inlierCount,
       featureCount,
       mapInitialized: this.mapTracker.initialized,
-      // Once anchored, the plane is the fixed world reference: it stays
-      // "found" even when the per-frame detector does not re-detect it.
-      planeFound: this.planeTracker.anchored || (this.lastPlane?.found ?? false),
+      // Once the world is established (or a plane anchored), the plane is the
+      // fixed world reference: it stays "found" even when the per-frame
+      // detector does not re-detect it — after a loss the detector needs a
+      // re-grown map and 5 stable frames, and the on-device cube stayed
+      // hidden in PLANE_DETECTING for seconds although the map pose was
+      // back (v14 follow-up; v13 hides objects outside PLANE_FOUND / AR_ACTIVE).
+      planeFound: this.planeTracker.anchored || this.worldEstablished || (this.lastPlane?.found ?? false),
       mapLost:
         this.mapTracker.initialized && this.mapTracker.framesSinceTracked > this.config.state.mapLostFrameTolerance,
       worldEstablished: this.worldEstablished,

@@ -419,6 +419,19 @@ export class DebugOverlay {
         ),
       );
       const d = r.diag;
+      // v14 §48–§49: the LK breakdown of the best candidate says whether the
+      // keyframe, the initial guess or the window fails. Right under Stage so
+      // it is above the fold on a phone (the on-device recording cut it off).
+      const lk = d?.best?.lk;
+      if (lk && lk.observations > 0) {
+        rows.push(
+          row(
+            "LKpts",
+            `${lk.tracked}/${lk.observations}${lk.reason ? `  ${lk.reason}` : ""}  fb ${lk.fb} res ${lk.residual} far ${lk.far} oob ${lk.oob} tex ${lk.texture}`,
+            lk.reason ? "hud-warn" : undefined,
+          ),
+        );
+      }
       if (d) {
         // v14 §23, §36: total keyframes, how many were ranked (all), sent to LK
         // / PnP (the budget), validated, held back by the retry cooldown.
@@ -437,16 +450,6 @@ export class DebugOverlay {
         if (d.best) {
           const b = d.best;
           rows.push(row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}`));
-          // v14 §48–§49: the LK breakdown says whether the keyframe, the initial guess or the window fails.
-          if (b.lk.observations > 0) {
-            rows.push(
-              row(
-                "LKpts",
-                `${b.lk.tracked}/${b.lk.observations}${b.lk.reason ? `  ${b.lk.reason}` : ""}  fb ${b.lk.fb} res ${b.lk.residual} far ${b.lk.far} oob ${b.lk.oob} tex ${b.lk.texture}`,
-                b.lk.reason ? "hud-warn" : undefined,
-              ),
-            );
-          }
           const v = b.validation;
           if (v) {
             // v9 §21: every condition with its value, its threshold and PASS / FAIL.

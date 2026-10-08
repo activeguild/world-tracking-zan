@@ -383,13 +383,20 @@ describe("v14 engine: episode timeline, search stage, unchanged tracking (Tests 
     console.log(
       `[v14] timeline (ms since lost): attempts ${tl.attempts} coarse ${tl.firstCoarseMatchMs.toFixed(0)} lk ${tl.firstLkSuccessMs.toFixed(0)} pnp ${tl.firstPnpSuccessMs.toFixed(0)} val ${tl.validationSuccessMs.toFixed(0)} applied ${tl.confirmationSuccessMs.toFixed(0)}`,
     );
-    // Test 19: the apply frame is the v13 CONFIRMING window (relocalized), the same map.
+    // Test 19: the apply frame is the v13 CONFIRMING window (relocalized), the same map,
+    // and the state is back in world tracking at once (v14 §60): on device the
+    // state fell to PLANE_DETECTING until the plane detector re-found the plane,
+    // which kept the cube hidden for seconds after a good map pose.
     expect(applied!.mapPose!.relocalized).toBe(true);
     expect(applied!.mapPose!.mapFrameId).toBe(mapFrameId);
     expect(applied!.mapPose!.framesSinceTracked).toBe(0);
+    expect(applied!.state).toBe(TrackingState.PLANE_FOUND);
     // The following frames track normally on a fresh map pose (visible under v13 once the monitor window closes).
     let o: VisionOutput = applied!;
-    for (let f = 60; f < 66; f++, frameId++) o = engine.process(input(frameId, deskFrame(f)));
+    for (let f = 60; f < 66; f++, frameId++) {
+      o = engine.process(input(frameId, deskFrame(f)));
+      expect(o.state).toBe(TrackingState.PLANE_FOUND);
+    }
     expect(o.mapPose!.framesSinceTracked).toBe(0);
     expect(o.mapPose!.relocalized).toBe(false);
     expect(o.relocalization.searchStage === "idle" || o.relocalization.searchStage === "prepare").toBe(true);
