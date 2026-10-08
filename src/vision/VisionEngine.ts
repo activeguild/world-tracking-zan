@@ -741,12 +741,16 @@ export class VisionEngine {
         // or fast motion) keep the keyframe ranking warm so that the first
         // lost frame starts from it. Rate-limited to the attempt period; no
         // LK, no PnP, no pose or visibility change (v13 decides visibility).
-        const prepare = shouldPrepareRelocalization({
-          worldEstablished: this.worldEstablished,
-          tracked: true,
-          trusted: sel.map?.trusted ?? false,
-          motionLevel: this.lastMotion.level,
-        });
+        const prepare = shouldPrepareRelocalization(
+          {
+            worldEstablished: this.worldEstablished,
+            tracked: true,
+            inliers: res.inlierCount,
+            errorPx: res.meanReprojectionErrorPx,
+            motionLevel: this.lastMotion.level,
+          },
+          { minInliers: this.config.relocalization.prepareMinInliers, maxErrorPx: this.config.relocalization.prepareMaxErrorPx },
+        );
         if (prepare && this.relocalizer.count > 0) {
           this.relocStatus.preparing = true;
           if (!relocalizedNow) this.relocStatus.searchStage = "prepare";
@@ -1341,8 +1345,11 @@ export class VisionEngine {
       return this.lastPose;
     }
 
+    // v16: with an established world the two-view result is a prior only;
+    // cap the RANSAC work (the full cap stays before the world exists).
+    const capped = this.worldEstablished && cfg.maxIterationsWhileMapped > 0 ? cfg.maxIterationsWhileMapped : undefined;
     const rel: RelativePose = this.poseEstimator.estimate(
-      r1x, r1y, r2x, r2y, n, input.intrinsics, this.lastPlaneNormal,
+      r1x, r1y, r2x, r2y, n, input.intrinsics, this.lastPlaneNormal, capped,
     );
     this.lastRelative = rel;
     this.lastRelativeRefFrame = this.referenceFrameId;

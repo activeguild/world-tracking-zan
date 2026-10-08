@@ -340,7 +340,14 @@ readback of the camera frame). The frame grabber therefore has a WebGL path
 texel, `readPixels` straight into the pooled buffer) and `processing.grabber`
 defaults to `auto`: the 2D path is measured on the first frames and WebGL
 takes over when its median grab exceeds `grabAutoSwitchMs`; `?grab=2d|gl`
-forces one, HUD `Proc … grab 2d|gl`. Before a world exists a plane search that keeps
+forces one, HUD `Proc … grab 2d|gl`. Two engine-side savings for slower
+devices: the relocalization preparation (keyframe ranking while tracking is
+weak) is gated by its own thresholds (`prepareMinInliers`, `prepareMaxErrorPx`)
+rather than the `trusted` label — Android tracks healthily at 2.6–3.3 px and
+never reaches the 1.5 px label, so the ranking ran all session — and once the
+world exists the two-view RANSAC is capped at `pose.maxIterationsWhileMapped`
+iterations (the map PnP is the canonical pose then; the two-view result is a
+rotation prior). Before a world exists a plane search that keeps
 failing the 2D-extent test for `sidewaysGuidanceDelayMs` asks the user to
 move the phone sideways (`MOVE_SIDEWAYS`) instead of "show a flat surface".
 

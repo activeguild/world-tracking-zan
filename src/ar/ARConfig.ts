@@ -137,6 +137,15 @@ export interface PoseConfig {
   /** Hard cap on RANSAC iterations for E. */
   maxIterations: number;
   /**
+   * RANSAC iteration cap (H and E) once the world is established (v16). The
+   * map PnP is then the canonical pose and the two-view estimate only a
+   * rotation prior for lost frames; a low inlier ratio otherwise ran the
+   * essential RANSAC to `maxIterations` (6–17 ms per frame on Android).
+   * Before the world exists the full cap applies (map initialization, plane
+   * recovery triggers). 0 = no reduction.
+   */
+  maxIterationsWhileMapped: number;
+  /**
    * Choose the homography model when H_inliers / (H_inliers + E_inliers)
    * exceeds this (planar scene or pure rotation; ORB-SLAM uses 0.45).
    */
@@ -389,6 +398,16 @@ export interface RelocalizationConfig {
    * has not changed.
    */
   prepareEveryNFrames: number;
+  /**
+   * The located PnP counts as weak — and the ranking is prepared — below
+   * this many inliers or above this mean reprojection error (px) (v16).
+   * Separate from the `jumpRejectTrusted*` label: Android Chrome tracks
+   * healthily at 2.6–3.3 px (never ≤ 1.5 px), and with the trusted label as
+   * the gate the preparation ran all session long. The on-device case the
+   * preparation was made for (29 inliers / 1.82 px) still qualifies.
+   */
+  prepareMinInliers: number;
+  prepareMaxErrorPx: number;
   /** Minimum NCC score of the coarse alignment to proceed. */
   coarseMinScore: number;
   /**
@@ -700,6 +719,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     minCorrespondences: 20,
     ransacThresholdPx: 1.5,
     maxIterations: 300,
+    maxIterationsWhileMapped: 80,
     homographyRatioThreshold: 0.45,
     minParallaxPx: 2.0,
     fullConfidenceParallaxPx: 25,
@@ -780,6 +800,8 @@ export const DEFAULT_CONFIG: ARConfig = {
     // whole time) cost 25 → 43 ms per frame; every 10 frames keeps the
     // ranking at most a third of a second old.
     prepareEveryNFrames: 10,
+    prepareMinInliers: 40,
+    prepareMaxErrorPx: 3.5,
     // The PnP acceptance (≥ 25 inliers, ≤ 1.5 px) is the real verifier; the
     // coarse score only saves work. 0.45 refused views that came back with a
     // few degrees of rotation.

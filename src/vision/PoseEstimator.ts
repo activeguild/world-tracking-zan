@@ -72,9 +72,19 @@ export class PoseEstimator {
     n: number,
     k: CameraIntrinsics,
     previousNormal: Float64Array | null = null,
+    /**
+     * Cap on the RANSAC iterations of both models (v16). The engine lowers
+     * it once the world exists: the map PnP is then the canonical pose and
+     * the two-view result only a frame-to-frame rotation prior, while a
+     * low inlier ratio made the essential RANSAC run to its 300-iteration
+     * cap (6–17 ms on Android). Undefined = the configured maxima.
+     */
+    maxIterations?: number,
   ): RelativePose {
     const cfg = this.config;
     if (n < cfg.minCorrespondences) return noPose(n);
+    const hIter = maxIterations === undefined ? this.homographyRansac.maxIterations : Math.min(this.homographyRansac.maxIterations, maxIterations);
+    const eIter = maxIterations === undefined ? cfg.maxIterations : Math.min(cfg.maxIterations, maxIterations);
 
     // Parallax in pixels (median displacement).
     const disp = new Float64Array(n);
@@ -94,14 +104,18 @@ export class PoseEstimator {
     const f = (k.fx + k.fy) / 2;
 
     // Homography (pixel space) — reuse the Phase 1 RANSAC.
-    const hRes = ransacHomography(x1, y1, x2, y2, n, { ...this.homographyRansac, inlierThreshold: cfg.ransacThresholdPx }, this.rng);
+    const hRes = ransacHomography(
+      x1, y1, x2, y2, n,
+      { ...this.homographyRansac, inlierThreshold: cfg.ransacThresholdPx, maxIterations: hIter },
+      this.rng,
+    );
     // Essential (normalized space).
     const eRes = ransacEssential(
       nx1, ny1, nx2, ny2, n,
       {
         threshold: cfg.ransacThresholdPx / f,
         confidence: this.homographyRansac.confidence,
-        maxIterations: cfg.maxIterations,
+        maxIterations: eIter,
         minCorrespondences: cfg.minCorrespondences,
       },
       this.rng,

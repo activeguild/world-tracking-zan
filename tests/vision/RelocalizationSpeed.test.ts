@@ -76,13 +76,19 @@ const textures = Array.from({ length: 8 }, (_, i) => makeTexture(W, H, createRng
 
 describe("v14 scheduling (Tests 1–4, 10–14, 17)", () => {
   it("Test 1 / 2 / 3: preparation follows the tracking quality, never a lost state; fast motion with a healthy PnP prepares only", () => {
-    const healthy = { worldEstablished: true, tracked: true, trusted: true, motionLevel: "normal" as const };
-    expect(shouldPrepareRelocalization(healthy)).toBe(false);
-    expect(shouldPrepareRelocalization({ ...healthy, trusted: false })).toBe(true); // PnP below the trusted quality
-    expect(shouldPrepareRelocalization({ ...healthy, motionLevel: "fast" })).toBe(true); // fast motion, healthy PnP
-    expect(shouldPrepareRelocalization({ ...healthy, motionLevel: "medium" })).toBe(false);
-    expect(shouldPrepareRelocalization({ ...healthy, tracked: false, trusted: false })).toBe(false); // lost: attempt, not prepare
-    expect(shouldPrepareRelocalization({ ...healthy, worldEstablished: false, trusted: false })).toBe(false);
+    const th = { minInliers: RC.prepareMinInliers, maxErrorPx: RC.prepareMaxErrorPx };
+    const healthy = { worldEstablished: true, tracked: true, inliers: 120, errorPx: 1.0, motionLevel: "normal" as const };
+    expect(shouldPrepareRelocalization(healthy, th)).toBe(false);
+    expect(shouldPrepareRelocalization({ ...healthy, inliers: 29, errorPx: 1.82 }, th)).toBe(true); // the on-device weak PnP (v14)
+    expect(shouldPrepareRelocalization({ ...healthy, errorPx: 4.0 }, th)).toBe(true); // large error alone
+    expect(shouldPrepareRelocalization({ ...healthy, motionLevel: "fast" }, th)).toBe(true); // fast motion, healthy PnP
+    expect(shouldPrepareRelocalization({ ...healthy, motionLevel: "medium" }, th)).toBe(false);
+    expect(shouldPrepareRelocalization({ ...healthy, tracked: false, inliers: 0 }, th)).toBe(false); // lost: attempt, not prepare
+    expect(shouldPrepareRelocalization({ ...healthy, worldEstablished: false, inliers: 10 }, th)).toBe(false);
+    // v16: Android-style healthy tracking (many inliers, 2.6–3.3 px error,
+    // never "trusted" at 1.5 px) does not keep the preparation running.
+    expect(shouldPrepareRelocalization({ ...healthy, inliers: 101, errorPx: 2.65 }, th)).toBe(false);
+    expect(shouldPrepareRelocalization({ ...healthy, inliers: 64, errorPx: 3.27 }, th)).toBe(false);
   });
 
   it("Test 3 / 4 / 7: an attempt needs an established world and a map PnP that is not locating the camera", () => {

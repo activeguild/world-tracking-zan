@@ -107,3 +107,22 @@ describe("PoseEstimator (two-view relative pose, pixel input)", () => {
     expect(rel.confidence).toBe(0);
   });
 });
+
+describe("PoseEstimator iteration cap (v16)", () => {
+  it("a per-call cap bounds the RANSAC work and still recovers the pose on a clean scene", () => {
+    const rng = createRng(31);
+    const R = rotationAxisAngle([0.05, 1, 0.1], 0.08);
+    const pose = poseFromCenter(R, [0.25, 0.02, 0.05]);
+    const pts = randomBoxPoints(rng, 250, 1, 4);
+    const c = projectTwoViews(pts, pose, TEST_K, 0.4, rng);
+    // A third of outliers: the essential RANSAC needs many samples (p = 0.67^8 ≈ 4%).
+    corrupt(c, 0.33, TEST_K, rng);
+    const full = estimator(5).estimate(c.x1, c.y1, c.x2, c.y2, c.n, TEST_K);
+    const capped = estimator(5).estimate(c.x1, c.y1, c.x2, c.y2, c.n, TEST_K, null, DEFAULT_CONFIG.pose.maxIterationsWhileMapped);
+    expect(full.model).toBe("essential");
+    expect(capped.model).not.toBe("none");
+    // The cap changes the budget, not the geometry: the rotation stays usable as a prior.
+    expect(deg(rotationDistance(capped.rotation, R))).toBeLessThan(2.0);
+    expect(DEFAULT_CONFIG.pose.maxIterationsWhileMapped).toBeLessThan(DEFAULT_CONFIG.pose.maxIterations);
+  });
+});

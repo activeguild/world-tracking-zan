@@ -79,21 +79,35 @@ export interface RelocalizationPrepareInput {
   worldEstablished: boolean;
   /** Map PnP located the camera this frame. */
   tracked: boolean;
-  /** PnP quality label of the accepted candidate (many inliers, small error; `jumpRejectTrusted*`). */
-  trusted: boolean;
+  /** PnP inliers and mean reprojection error (px) of the accepted candidate. */
+  inliers: number;
+  errorPx: number;
   motionLevel: MotionLevel;
+}
+
+/** Below / above these the located PnP counts as weak for preparation (v16). */
+export interface RelocalizationPrepareThresholds {
+  minInliers: number;
+  maxErrorPx: number;
 }
 
 /**
  * Keep the relocalization warm while tracking is weak (v14 §3–§6): an
  * established world, a camera that *is* located this frame, and either a
- * PnP solve below the trusted quality or fast motion. Preparation never
- * replaces tracking and never hides objects (v13 decides that); it only
- * ranks the keyframes so the first lost frame starts with a ranking.
+ * weak PnP solve or fast motion. Preparation never replaces tracking and
+ * never hides objects (v13 decides that); it only ranks the keyframes so the
+ * first lost frame starts with a ranking.
+ *
+ * "Weak" (v16) is fewer than `minInliers` inliers or a mean error above
+ * `maxErrorPx` — its own thresholds, not the `trusted` label: on Android
+ * Chrome the reprojection error sits at 2.6–3.3 px during healthy tracking
+ * (1.5 px is never reached, the trusted label is never set) and the
+ * preparation ran every 10 frames for the whole session, 6–8 ms each.
  */
-export function shouldPrepareRelocalization(i: RelocalizationPrepareInput): boolean {
+export function shouldPrepareRelocalization(i: RelocalizationPrepareInput, t: RelocalizationPrepareThresholds): boolean {
   if (!i.worldEstablished || !i.tracked) return false;
-  return !i.trusted || i.motionLevel === "fast";
+  const weak = i.inliers < t.minInliers || i.errorPx > t.maxErrorPx;
+  return weak || i.motionLevel === "fast";
 }
 
 export interface RelocalizationAttemptInput {
