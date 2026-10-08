@@ -426,6 +426,87 @@ describe("v15 keyframe coverage: no churn on a swinging camera, redundancy-based
   });
 });
 
+describe("v15 keyframe landmarks: protected from the age prune, thin keyframes never spend an LK slot", () => {
+  it("LandmarkMap.prune keeps protected landmarks past maxAge and removes unprotected ones first at the cap", () => {
+    const map = new LandmarkMap();
+    for (let i = 1; i <= 10; i++) {
+      const lm = map.add([i, 0, 2], i, 0);
+      lm.lastSeenFrame = i <= 5 ? 0 : 100; // 1–5 old, 6–10 recent
+    }
+    const protectedIds = new Set([1, 2]);
+    // Age rule: old unprotected 3, 4, 5 go; protected 1, 2 stay although just as old.
+    expect(map.prune(200, 150, 1000, protectedIds)).toBe(3);
+    expect(map.get(1)).toBeDefined();
+    expect(map.get(2)).toBeDefined();
+    expect(map.get(3)).toBeUndefined();
+    expect(map.size).toBe(7);
+    // Cap: 7 → 4 removes the three least recently seen *unprotected* ones (6, 7, 8 share the same frame → by order), never 1 / 2.
+    expect(map.prune(200, 150, 4, protectedIds)).toBe(3);
+    expect(map.get(1)).toBeDefined();
+    expect(map.get(2)).toBeDefined();
+    expect(map.size).toBe(4);
+    // Without a protected set the old behaviour: everything old goes.
+    const plain = new LandmarkMap();
+    for (let i = 1; i <= 3; i++) plain.add([i, 0, 2], i, 0).lastSeenFrame = 0;
+    expect(plain.prune(200, 150, 1000)).toBe(3);
+  });
+
+  it("a keyframe whose landmarks left the map is ranked but not tried, is evicted first, and the engine protects keyframe landmarks", () => {
+    // Two matching keyframes of the same view; the landmarks of the second
+    // are removed from the map (as the age prune did on device).
+    const { map, reloc } = keyframeStore([textures[0], textures[0]]);
+    const thin = reloc.keyframes[1];
+    for (const o of thin.observations) map.remove(o.landmarkId);
+    expect(reloc.aliveObservations(thin, map)).toBe(0);
+    expect(reloc.referencedLandmarkIds().has(thin.observations[0].landmarkId)).toBe(true);
+    const current = pyramidOf(translateImage(textures[0], W, H, 6, -4, 128));
+    const r = reloc.relocalize(current, map, K, null, 0, { frameId: 10, preferKeyframeId: thin.id });
+    const d = r.diagnostics;
+    const rankedThin = d.ranked.find((k) => k.keyframeId === thin.id)!;
+    expect(rankedThin.unusable).toBe(true);
+    expect(rankedThin.alive).toBe(0);
+    expect(rankedThin.selected).toBe(false);
+    expect(d.unusableKeyframes).toBe(1);
+    expect(d.trials.some((t) => t.keyframeId === thin.id)).toBe(false); // no LK slot spent on it
+    expect(r.success).toBe(true);
+    expect(r.keyframeId).toBe(1);
+    // Eviction prefers the thin keyframe over any viewpoint argument.
+    const DEPTH = 2;
+    const far: RigidTransform = { rotation: mat3Identity(), translation: new Float64Array([DEPTH * 2, 0, 0]) };
+    const store = new Relocalizer(RC, CFG.tracker);
+    const mapB = new LandmarkMap();
+    const detector = new FeatureDetector(W, H, CFG.features);
+    let id = 1;
+    const mk = (pose: RigidTransform, frame: number, alive: boolean) => {
+      const tracks: Track[] = [];
+      for (const c of detector.detect(textures[frame % textures.length], { wanted: 300 })) {
+        const lm = mapB.add([((c.x - K.cx) / K.fx) * 2, ((c.y - K.cy) / K.fy) * 2, 2], id, 0);
+        lm.observations = 5;
+        tracks.push(track(id++, c.x, c.y, lm.id));
+      }
+      store.create(pyramidOf(textures[frame % textures.length]), pose, tracks, frame * 20, 0, mapB, DEPTH);
+      if (!alive) for (const t of tracks) mapB.remove(t.landmarkId);
+    };
+    for (let i = 0; i < RC.maxKeyframes; i++) mk({ rotation: mat3Identity(), translation: new Float64Array([i * 0.5, 0, 0]) }, i, i !== 3);
+    mk(far, 20, true); // 9th: the thin keyframe (id 4) must go, although it is far from its neighbours
+    expect(store.keyframes.map((k) => k.id)).not.toContain(4);
+    expect(store.keyframes.map((k) => k.id)).toContain(2);
+    expect(store.count).toBe(RC.maxKeyframes);
+
+    // Engine: after 220 tracked frames of a moving camera every stored keyframe
+    // still has at least minInliers landmarks in the map (the age prune alone
+    // would have removed the first view's landmarks after maxLandmarkAgeFrames).
+    const engine = new VisionEngine(W, H, resolveConfig(), createRng(13));
+    let last: VisionOutput | null = null;
+    for (let f = 0; f < 220; f++) last = engine.process(input(f, deskFrame(f)));
+    expect(last!.relocalization.keyframes).toBeGreaterThanOrEqual(3);
+    const summary = engine.keyframeSummary();
+    expect(summary[0].frameId).toBeLessThan(220 - resolveConfig().landmarks.maxLandmarkAgeFrames);
+    for (const kf of summary) expect(kf.alive).toBeGreaterThanOrEqual(RC.minInliers);
+    console.log(`[v15] keyframes after 220 frames: ${summary.map((k) => `KF${k.id}@${k.frameId} ${k.alive}/${k.observations}`).join("  ")}`);
+  });
+});
+
 // ---- Engine level: timeline, stages, no change to tracking / visibility inputs ----
 const Kmat = new Float64Array([K.fx, 0, K.cx, 0, K.fy, K.cy, 0, 0, 1]);
 const KInv = mat3Invert(Kmat)!;

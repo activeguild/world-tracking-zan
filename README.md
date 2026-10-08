@@ -324,7 +324,12 @@ camera-center translation above `keyframeTranslationDepthRatio` × scene
 depth), not only the last one, and when the store is full the most
 redundant keyframe is evicted — never the first (origin view) or the
 newest. A camera swinging between two views keeps two keyframes instead of
-churning through the 8 slots. HUD `Reloc … kf 8 (N made, M out)`. Keyframe → current LK has its own forward-backward / residual
+churning through the 8 slots. HUD `Reloc … kf 8 (N made, M out)`. The
+landmarks a stored keyframe observes are exempt from the map's age prune
+(they still count toward `maxLandmarks`), so a keyframe stays usable after
+the view has been out of sight for more than `maxLandmarkAgeFrames`; a
+keyframe with fewer live landmarks than `minInliers` is ranked but never
+spends an LK slot and is evicted first (`Rank KF17 0.91×26`). Keyframe → current LK has its own forward-backward / residual
 bounds (`lkForwardBackwardPx` 2.0, `lkMaxResidual`); the frame-to-frame
 tracker is unchanged. A keyframe that failed is not retried on an
 unchanged view for `retryCooldownFrames` (image change = zero-shift NCC

@@ -375,6 +375,8 @@ export interface RelocalizationDiagnostics {
   pnpCandidates: number;
   /** Keyframes skipped because they failed recently on an unchanged view (§21). */
   retrySuppressed: number;
+  /** Keyframes with fewer live landmarks than `minInliers` (v15): ranked, never tried. */
+  unusableKeyframes: number;
   /** Furthest stage any keyframe reached in this attempt (§24). */
   searchStage: RelocalizationSearchStage;
   /** The ranking came from a preparation made while still tracking (§3–§6, §33). */
@@ -499,6 +501,10 @@ export interface RankedKeyframe {
   selected: boolean;
   /** Held back by the retry cooldown (failed recently, view unchanged). */
   suppressed: boolean;
+  /** Observations whose landmarks are still in the map (v15); −1 when not evaluated. */
+  alive: number;
+  /** Fewer live landmarks than `minInliers`: cannot relocalize, never spends an LK slot (v15). */
+  unusable: boolean;
 }
 
 export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDiagnostics {
@@ -508,6 +514,7 @@ export function emptyRelocalizationDiagnostics(keyframes = 0): RelocalizationDia
     lkCandidates: 0,
     pnpCandidates: 0,
     retrySuppressed: 0,
+    unusableKeyframes: 0,
     searchStage: "coarse",
     usedPreparedRanking: false,
     candidatesTried: 0,
@@ -615,6 +622,7 @@ export class Relocalizer {
     this.lastKeyframeFrame = -Infinity;
     this.retry.clear();
     this.prepared = null;
+    this.referencedCache = null;
   }
 
   /** Ranking prepared on a tracked frame, if any (diagnostics). */
@@ -695,8 +703,10 @@ export class Relocalizer {
     let victimAlive = Number.POSITIVE_INFINITY;
     for (let i = 1; i < n - 1; i++) {
       const kf = this.keyframes[i];
-      const d = this.nearestKeyframeDistance(kf.pose, sceneDepth, kf);
-      const alive = map ? kf.observations.reduce((c, o) => c + (map.get(o.landmarkId) ? 1 : 0), 0) : kf.observations.length;
+      const alive = map ? this.aliveObservations(kf, map) : kf.observations.length;
+      // A keyframe with fewer live landmarks than a relocalization needs can
+      // never succeed: it is the most redundant whatever its viewpoint.
+      const d = alive < this.config.minInliers ? -1 : this.nearestKeyframeDistance(kf.pose, sceneDepth, kf);
       if (d < victimKey || (d === victimKey && alive < victimAlive)) {
         victim = kf;
         victimKey = d;
@@ -708,6 +718,7 @@ export class Relocalizer {
     this.keyframes.splice(idx, 1);
     this.retry.delete(victim.id);
     this.evictedCount++;
+    this.referencedCache = null;
     return victim;
   }
 
@@ -718,6 +729,34 @@ export class Relocalizer {
   private evictedCount = 0;
   get evictions(): number {
     return this.evictedCount;
+  }
+
+  private referencedCache: Set<number> | null = null;
+
+  /**
+   * Landmark ids any stored keyframe observes (v15): the map keeps these
+   * alive past the age limit so that the keyframes stay usable for
+   * relocalization. Cached until the keyframe set changes.
+   */
+  referencedLandmarkIds(): ReadonlySet<number> {
+    if (!this.referencedCache) {
+      const s = new Set<number>();
+      for (const kf of this.keyframes) for (const o of kf.observations) s.add(o.landmarkId);
+      this.referencedCache = s;
+    }
+    return this.referencedCache;
+  }
+
+  /** Observations of a keyframe whose landmarks are still in the map. */
+  aliveObservations(kf: Keyframe, map: LandmarkMap): number {
+    let n = 0;
+    for (const o of kf.observations) if (map.get(o.landmarkId)) n++;
+    return n;
+  }
+
+  /** Per-keyframe summary (diagnostics / tests): id, observations, observations still in the map. */
+  summary(map: LandmarkMap): { id: number; frameId: number; observations: number; alive: number }[] {
+    return this.keyframes.map((kf) => ({ id: kf.id, frameId: kf.frameId, observations: kf.observations.length, alive: this.aliveObservations(kf, map) }));
   }
 
   /**
@@ -751,6 +790,7 @@ export class Relocalizer {
       observations,
     };
     this.keyframes.push(kf);
+    this.referencedCache = null;
     this.evictRedundant(map, sceneDepth);
     this.lastKeyframePose = kf.pose;
     this.lastKeyframeFrame = frameId;
@@ -775,7 +815,7 @@ export class Relocalizer {
     const radius = this.config.rankSearchRadius;
     const ranked: RankedKeyframe[] = this.keyframes.map((kf) => {
       const s = coarseShift(kf.rank, rank, radius, this.config.coarseMinOverlap);
-      return { keyframeId: kf.id, rankScore: s.score, dx: s.dx, dy: s.dy, selected: false, suppressed: false };
+      return { keyframeId: kf.id, rankScore: s.score, dx: s.dx, dy: s.dy, selected: false, suppressed: false, alive: -1, unusable: false };
     });
     const recency = new Map<number, number>();
     this.keyframes.forEach((kf, i) => recency.set(kf.id, i));
@@ -816,7 +856,7 @@ export class Relocalizer {
     if (age < 0 || age > Math.max(1, this.config.prepareEveryNFrames)) return null;
     if (coarseShift(p.rank, rank, 0).score < this.config.retryImageChangeScore) return null;
     // Copy with fresh selection flags; the cached scores order the candidates.
-    return p.ranked.map((r) => ({ ...r, selected: false, suppressed: false }));
+    return p.ranked.map((r) => ({ ...r, selected: false, suppressed: false, alive: -1, unusable: false }));
   }
 
   /**
@@ -922,6 +962,16 @@ export class Relocalizer {
       if (candidates.length >= budget) break;
       const kf = byId.get(r.keyframeId);
       if (!kf) continue;
+      // v15: a keyframe whose landmarks have left the map cannot produce
+      // `minInliers` correspondences — it stays visible in the ranking but
+      // does not spend an LK slot (on device the NCC-0.91 top candidate had
+      // 26 live observations and the attempt was wasted on it).
+      r.alive = this.aliveObservations(kf, map);
+      if (r.alive < cfg.minInliers) {
+        r.unusable = true;
+        diag.unusableKeyframes++;
+        continue;
+      }
       if (this.suppressed(kf, curRank, frameId)) {
         r.suppressed = true;
         diag.retrySuppressed++;
@@ -932,6 +982,11 @@ export class Relocalizer {
     }
     diag.lkCandidates = candidates.length;
     if (candidates.length === 0) {
+      if (diag.unusableKeyframes === ranked.length) {
+        diag.rejectCode = "insufficient_landmarks";
+        diag.rejectReason = `all ${ranked.length} keyframes have fewer than ${cfg.minInliers} landmarks left in the map`;
+        return { ...fail, candidatesTried: 0, reason: diag.rejectReason, rejectCode: "insufficient_landmarks", diagnostics: diag };
+      }
       diag.rejectCode = "retry_cooldown";
       diag.rejectReason = `all ${ranked.length} keyframes in retry cooldown (view unchanged)`;
       return { ...fail, candidatesTried: 0, reason: diag.rejectReason, rejectCode: "retry_cooldown", diagnostics: diag };
@@ -1024,10 +1079,18 @@ export class Relocalizer {
       trial.lkObservations = n;
       if (inBounds < cfg.minInliers) {
         // v14 follow-up: the shift leaves too few observations inside the
-        // image for a validation to be possible — do not spend the LK; the
-        // keyframe does not show this view (or the shift is wrong).
+        // image for a validation to be possible — do not spend the LK. When
+        // most observations are still inside, the shortfall is the keyframe's
+        // thin landmark set, not the shift (v15: `landmarks` stage).
+        const outside = n - inBounds;
+        trial.lkStatus.outOfBounds = outside;
+        if (outside * 2 < n) {
+          trial.stage = "landmarks";
+          this.noteFailure(kf, curRank, frameId, "landmarks");
+          record(trial, { matchScore: shift.score }, `kf ${kf.id}: only ${inBounds} usable observations (${n} with landmarks, ${outside} outside the image) < ${cfg.minInliers}`);
+          continue;
+        }
         trial.stage = "lk";
-        trial.lkStatus.outOfBounds = n - inBounds;
         trial.lkFailureReason = "out_of_bounds";
         this.noteFailure(kf, curRank, frameId, "lk");
         record(

@@ -88,17 +88,28 @@ export class LandmarkMap {
   /**
    * Drop landmarks not seen for `maxAge` frames and, if still above
    * `maxCount`, the least recently seen ones (spec §48).
+   *
+   * `protectedIds` (v15): landmarks a stored keyframe observes are exempt
+   * from the age rule — a keyframe whose landmarks have been pruned can no
+   * longer relocalize (on device a keyframe matched at NCC 0.91 had 26 of
+   * its observations left after 5 s out of view). They still count toward
+   * `maxCount`, but the unprotected landmarks go first.
    */
-  prune(frameId: number, maxAge: number, maxCount: number): number {
+  prune(frameId: number, maxAge: number, maxCount: number, protectedIds: ReadonlySet<number> | null = null): number {
     let removed = 0;
     for (const lm of this.landmarks.values()) {
-      if (frameId - lm.lastSeenFrame > maxAge) {
+      if (frameId - lm.lastSeenFrame > maxAge && !(protectedIds && protectedIds.has(lm.id))) {
         this.landmarks.delete(lm.id);
         removed++;
       }
     }
     if (this.landmarks.size > maxCount) {
-      const sorted = [...this.landmarks.values()].sort((a, b) => a.lastSeenFrame - b.lastSeenFrame);
+      const sorted = [...this.landmarks.values()].sort((a, b) => {
+        const pa = protectedIds?.has(a.id) ? 1 : 0;
+        const pb = protectedIds?.has(b.id) ? 1 : 0;
+        if (pa !== pb) return pa - pb; // unprotected first
+        return a.lastSeenFrame - b.lastSeenFrame;
+      });
       const excess = this.landmarks.size - maxCount;
       for (let i = 0; i < excess; i++) {
         this.landmarks.delete(sorted[i].id);

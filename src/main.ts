@@ -255,10 +255,11 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
     pnpPassed: d.pnpPassed,
     validated: d.validated,
     bestCoarseScore: d.bestCoarseScore,
-    ranked: d.ranked.map((k) => ({ keyframeId: k.keyframeId, score: k.rankScore, selected: k.selected, suppressed: k.suppressed })),
+    ranked: d.ranked.map((k) => ({ keyframeId: k.keyframeId, score: k.rankScore, selected: k.selected, suppressed: k.suppressed, unusable: k.unusable, alive: k.alive })),
     lkCandidates: d.lkCandidates,
     pnpCandidates: d.pnpCandidates,
     retrySuppressed: d.retrySuppressed,
+    unusableKeyframes: d.unusableKeyframes,
     usedPreparedRanking: d.usedPreparedRanking,
     best: b
       ? {

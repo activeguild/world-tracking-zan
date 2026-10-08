@@ -125,6 +125,8 @@ const EMPTY_RESULT: MapTrackingResult = {
 
 export class MapTracker {
   readonly map = new LandmarkMap();
+  /** Landmarks exempt from the age prune (those a stored keyframe observes, v15); set by the engine each frame. */
+  protectedLandmarkIds: ReadonlySet<number> | null = null;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -748,7 +750,8 @@ export class MapTracker {
       reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, imageMotion ? null : this._pose);
     }
     // Pruning by age counts only tracked frames: a loss must not erode the map.
-    if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
+    // Landmarks a stored keyframe observes are exempt from the age rule (v15).
+    if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks, this.protectedLandmarkIds);
     const center = this.cameraCenter();
     this.lastResult = {
       tracked,

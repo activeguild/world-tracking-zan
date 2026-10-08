@@ -34,10 +34,12 @@ export interface HudRelocDiagnostics {
   validated: number;
   bestCoarseScore: number;
   /** v14: ranking of all keyframes (best first), the LK / PnP budget used and the keyframes held back by the retry cooldown. */
-  ranked: { keyframeId: number; score: number; selected: boolean; suppressed: boolean }[];
+  ranked: { keyframeId: number; score: number; selected: boolean; suppressed: boolean; unusable: boolean; alive: number }[];
   lkCandidates: number;
   pnpCandidates: number;
   retrySuppressed: number;
+  /** Keyframes with too few live landmarks to relocalize (v15). */
+  unusableKeyframes: number;
   usedPreparedRanking: boolean;
   best: {
     keyframeId: number;
@@ -438,11 +440,18 @@ export class DebugOverlay {
       if (d) {
         // v14 §23, §36: total keyframes, how many were ranked (all), sent to LK
         // / PnP (the budget), validated, held back by the retry cooldown.
-        rows.push(row("KF", `${d.keyframes}  ranked ${d.ranked.length}  lk ${d.lkCandidates}  pnp ${d.pnpCandidates}  val ${d.validated}${d.retrySuppressed > 0 ? `  retry ${d.retrySuppressed}` : ""}${d.age > 0 ? `  (${d.age}f ago)` : ""}`));
+        rows.push(
+          row(
+            "KF",
+            `${d.keyframes}  ranked ${d.ranked.length}  lk ${d.lkCandidates}  pnp ${d.pnpCandidates}  val ${d.validated}${d.retrySuppressed > 0 ? `  retry ${d.retrySuppressed}` : ""}${d.unusableKeyframes > 0 ? `  thin ${d.unusableKeyframes}` : ""}${d.age > 0 ? `  (${d.age}f ago)` : ""}`,
+            d.unusableKeyframes > 0 ? "hud-warn" : undefined,
+          ),
+        );
         if (d.ranked.length > 0) {
+          // × = too few live landmarks (v15), ~ = retry cooldown, · = not selected.
           const top = d.ranked
             .slice(0, 4)
-            .map((k) => `KF${k.keyframeId} ${k.score.toFixed(2)}${k.suppressed ? "~" : k.selected ? "" : "·"}`)
+            .map((k) => `KF${k.keyframeId} ${k.score.toFixed(2)}${k.unusable ? `×${k.alive}` : k.suppressed ? "~" : k.selected ? "" : "·"}`)
             .join("  ");
           rows.push(row("Rank", `${top}${d.usedPreparedRanking ? "  (prepared)" : ""}`));
         }

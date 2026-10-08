@@ -671,8 +671,8 @@ export class ARSession {
           ? `\nlk (best) = ${b.lkTracked}/${b.lkObservations}${b.lkFailureReason ? ` ${b.lkFailureReason}` : ""}  fb ${b.lkStatus.fbError} res ${b.lkStatus.highResidual} far ${b.lkStatus.tooFar} div ${b.lkStatus.diverged} oob ${b.lkStatus.outOfBounds} tex ${b.lkStatus.lowTexture}`
           : "";
         const stages = d
-          ? `\nkeyframes = ${d.keyframes}  ranked = ${d.ranked.length}  lk budget = ${d.lkCandidates}  pnp budget = ${d.pnpCandidates}  retry suppressed = ${d.retrySuppressed}${d.usedPreparedRanking ? "  (prepared ranking)" : ""}` +
-            `\nranking = ${d.ranked.map((k) => `KF${k.keyframeId}:${k.rankScore.toFixed(2)}${k.suppressed ? "~" : k.selected ? "" : "·"}`).join(" ")}` +
+          ? `\nkeyframes = ${d.keyframes}  ranked = ${d.ranked.length}  lk budget = ${d.lkCandidates}  pnp budget = ${d.pnpCandidates}  retry suppressed = ${d.retrySuppressed}  thin = ${d.unusableKeyframes}${d.usedPreparedRanking ? "  (prepared ranking)" : ""}` +
+            `\nranking = ${d.ranked.map((k) => `KF${k.keyframeId}:${k.rankScore.toFixed(2)}${k.unusable ? `×${k.alive}` : k.suppressed ? "~" : k.selected ? "" : "·"}`).join(" ")}` +
             `\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
             (b
               ? `\nbest = KF${b.keyframeId} stage ${b.stage}  ${b.inlierCount}i  ${b.meanReprojectionErrorPx.toFixed(2)}px  ratio ${b.inlierRatio.toFixed(2)}  cells ${b.spatialCells}/9  ncc ${b.coarseScore.toFixed(2)}`

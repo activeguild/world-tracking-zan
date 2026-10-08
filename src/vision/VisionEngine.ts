@@ -214,6 +214,11 @@ export class VisionEngine {
     return this.relocalizer.count;
   }
 
+  /** Stored keyframes with how many of their observed landmarks are still in the map (diagnostics / tests, v15). */
+  keyframeSummary(): { id: number; frameId: number; observations: number; alive: number }[] {
+    return this.relocalizer.summary(this.mapTracker.map);
+  }
+
   /** Last camera pose in the map frame (null until the map is initialized). */
   get mapPose(): MapPoseOutput | null {
     return this.lastMapPose;
@@ -688,6 +693,8 @@ export class VisionEngine {
         }
       }
 
+      // v15: landmarks a stored keyframe observes survive the age prune.
+      tracker.protectedLandmarkIds = this.relocalizer.count > 0 ? this.relocalizer.referencedLandmarkIds() : null;
       const res = tracker.update(this.tracks, frameId, k, rotationPrior, external, this.lastImageMotion);
       const sel = tracker.selection;
       this.lastPoseSource = res.tracked ? sel.source : "propagated";
