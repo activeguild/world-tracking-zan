@@ -774,13 +774,25 @@ export class ARSession {
     this.relocalization = r.relocalization;
     this.motion = r.motion;
     this.bundleAdjustment = r.bundleAdjustment;
-    if (r.bundleAdjustment.ranThisFrame && this.config.debug.log) {
+    if (r.bundleAdjustment.ranThisFrame) {
       const b = r.bundleAdjustment;
-      this.logger.info(
-        `BA #${b.runs}${b.rejected ? " REJECTED" : ""} at frame ${b.lastFrameId}: kf ${b.keyframes} (${b.freeKeyframes} free) lm ${b.landmarks} obs ${b.observations} (+${b.outliers} out, ${b.shifted} shifted) ` +
-          `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
-          `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}°`,
-      );
+      // v18: the map moved under the camera; move the world frame with it so
+      // that placed objects stay put relative to the local map (no hop).
+      let anchorMoved = false;
+      if (!b.rejected && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: b.correctionRotation, translation: b.correctionTranslation });
+      }
+      if (this.config.debug.log) {
+        const t = b.correctionTranslation;
+        const corr = Math.hypot(t[0], t[1], t[2]);
+        this.logger.info(
+          `BA #${b.runs}${b.rejected ? ` REJECTED (${b.rejectReason})` : ""} at frame ${b.lastFrameId}: kf ${b.keyframes} (${b.freeKeyframes} free) lm ${b.landmarks} obs ${b.observations} (+${b.outliers} out, ${b.shifted} shifted) ` +
+            `propagated ${b.propagated} untouched ${b.untouched} ` +
+            `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
+            `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}° ` +
+            `correction ${corr.toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
     }
     this.worldEstablished = r.worldEstablished;
     // v16 guidance: how long the plane search has been stuck at one stage

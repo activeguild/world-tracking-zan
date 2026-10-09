@@ -6,6 +6,7 @@ import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker } from "./MapTracker";
 import type { LandmarkMap } from "./LandmarkMap";
+import type { Keyframe } from "./Keyframe";
 import { PlaneDetector } from "./PlaneDetector";
 import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
@@ -26,6 +27,7 @@ import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from ".
 import {
   LANDMARK_STRIDE,
   type BundleAdjustmentOutput,
+  type BundleAdjustmentRejectReason,
   emptyBundleAdjustment,
   packTracks,
   type MapPoseOutput,
@@ -45,7 +47,7 @@ import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../ma
 import { type BAObservation, bundleAdjust } from "../math/BundleAdjustment";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { transpose3 } from "../math/Decomposition";
-import { rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
+import { applyTransform, composeTransforms, invertTransform, rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
 
 /**
  * Phase 1 vision pipeline (spec §55):
@@ -228,6 +230,25 @@ export class VisionEngine {
     return this.relocalizer.summary(this.mapTracker.map);
   }
 
+  /** The stored keyframes themselves (tests / diagnostics; poses are live, Phase 7). */
+  get keyframes(): readonly Keyframe[] {
+    return this.relocalizer.keyframes;
+  }
+
+  /** The canonical map-frame pose as the tracker holds it now (tests; after a manual BA it is already rebased). */
+  get currentMapPose(): RigidTransform {
+    return this.mapTracker.pose;
+  }
+
+  /** Store a keyframe from the last processed frame regardless of the policy (tests). */
+  createKeyframeForTests(timestamp: number): Keyframe {
+    const tracker = this.mapTracker;
+    const kf = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, this.lastFrameId, timestamp, tracker.map, tracker.sceneDepth);
+    tracker.referenceKeyframeId = kf.id;
+    this.relocStatus.keyframes = this.relocalizer.count;
+    return kf;
+  }
+
   /** Last camera pose in the map frame (null until the map is initialized). */
   get mapPose(): MapPoseOutput | null {
     return this.lastMapPose;
@@ -404,15 +425,62 @@ export class VisionEngine {
       maxShift = Math.max(maxShift, shift);
       if (shift > cfg.maxLandmarkShiftRatio * Math.max(depths[i], 1e-6)) shifted++;
     }
-    const rejected = shifted > cfg.maxShiftedFraction * ids.length;
+    let rejectReason: BundleAdjustmentRejectReason = "none";
+    if (shifted > cfg.maxShiftedFraction * ids.length) rejectReason = "shift";
+    else if (cfg.minGainFraction > 0 && res.errorAfter > res.errorBefore * (1 - cfg.minGainFraction)) rejectReason = "no_gain";
+    const rejected = rejectReason !== "none";
+    let propagated = 0;
+    let untouched = 0;
+    const correction: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
     if (rejected) {
       for (let i = 0; i < kfs.length; i++) {
         kfs[i].pose.rotation.set(savedPoses[i].rotation);
         kfs[i].pose.translation.set(savedPoses[i].translation);
       }
     } else {
-      for (let i = 0; i < ids.length; i++) map.get(ids[i])!.position.set(positions.subarray(i * 3, i * 3 + 3));
+      // Per-keyframe rigid correction old map → new map: a point fixed in
+      // that keyframe's camera frame, X_cam = T_old X_old = T_new X_new, so
+      // X_new = T_new⁻¹ T_old X_old.
+      const corrections = new Map<number, RigidTransform>();
+      for (let i = 0; i < kfs.length; i++) {
+        if (i === 0) continue;
+        corrections.set(kfs[i].id, composeTransforms(invertTransform(kfs[i].pose), savedPoses[i]));
+      }
+      for (let i = 0; i < ids.length; i++) {
+        const lm = map.get(ids[i])!;
+        lm.position.set(positions.subarray(i * 3, i * 3 + 3));
+        lm.baMode = "adjusted";
+      }
+      // Landmarks no stored keyframe observes follow their reference
+      // keyframe (v18): without this the solved and the unsolved part of the
+      // map drift apart (recording 21: old / young error ratio 1.7–2.4).
+      const tmp = new Float64Array(3);
+      for (const lm of map.values()) {
+        if (index.has(lm.id)) continue;
+        const c = corrections.get(lm.refKeyframeId);
+        if (!c) {
+          // Reference is the fixed first keyframe (no correction) or gone.
+          lm.baMode = "none";
+          untouched++;
+          continue;
+        }
+        applyTransform(c, lm.position, tmp);
+        lm.position.set(tmp);
+        lm.baMode = "propagated";
+        propagated++;
+      }
       this.mapTracker.resetAnchors(this.tracks);
+      // The keyframe created in this frame carries this frame's pose: its
+      // correction is the map motion under the camera. Re-express the
+      // canonical pose in the corrected map; the session moves the world
+      // anchor by the same transform so nothing hops on screen.
+      const newest = kfs[kfs.length - 1];
+      const c = corrections.get(newest.id);
+      if (c && newest.frameId === frameId) {
+        correction.rotation.set(c.rotation);
+        correction.translation.set(c.translation);
+        this.mapTracker.rebasePose(c);
+      }
     }
     const ms = now() - t0;
     this.timing.ba += ms;
@@ -428,6 +496,11 @@ export class VisionEngine {
       outliers,
       shifted,
       rejected,
+      rejectReason,
+      propagated,
+      untouched,
+      correctionRotation: correction.rotation,
+      correctionTranslation: correction.translation,
       errorBeforePx: res.errorBefore * f,
       errorAfterPx: res.errorAfter * f,
       iterations: res.iterations,
@@ -687,8 +760,11 @@ export class VisionEngine {
           this.worldEstablished = false;
           this.relocTimeline = null;
           this.relocPreparedFrame = -1;
-          // The initialization frame is the first keyframe.
-          this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
+          // The initialization frame is the first keyframe; the landmarks
+          // triangulated in the initialization reference it (Phase 7 v18).
+          const kf0 = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
+          tracker.referenceKeyframeId = kf0.id;
+          for (const lm of tracker.map.values()) lm.refKeyframeId = kf0.id;
           this.relocStatus.keyframes = this.relocalizer.count;
         }
       }
@@ -942,7 +1018,8 @@ export class VisionEngine {
         // Keyframe policy (spec §35).
         const par = this.medianParallaxSinceLastKeyframe();
         if (this.relocalizer.shouldCreate(tracker.pose, frameId, res.inlierCount, par, tracker.sceneDepth)) {
-          this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, tracker.map, tracker.sceneDepth);
+          const kf = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, tracker.map, tracker.sceneDepth);
+          tracker.referenceKeyframeId = kf.id;
           this.relocStatus.keyframes = this.relocalizer.count;
           // Phase 7: a new view joined the keyframe set — make the keyframe
           // poses and the landmarks they observe one consistent map.

@@ -667,7 +667,13 @@ export interface BundleAdjustmentConfig {
   enabled: boolean;
   /** Run only once this many keyframes exist (the first is fixed, so 2 = one free pose). */
   minKeyframes: number;
-  /** A landmark is refined when at least this many keyframes observe it. */
+  /**
+   * A landmark is refined when at least this many keyframes observe it. 1
+   * (v18): with the landmark prior holding the depth, a single keyframe
+   * observation still ties the landmark to that keyframe's corrected pose;
+   * at 2 (recording 21) only a third of the map was solved and the rest
+   * stayed in the old frame, splitting the map the BA was meant to unify.
+   */
   minLandmarkObservations: number;
   /** Observations whose error before the solve exceeds this (px) are left out as gross outliers. */
   maxObservationErrorPx: number;
@@ -695,6 +701,14 @@ export interface BundleAdjustmentConfig {
    */
   maxLandmarkShiftRatio: number;
   maxShiftedFraction: number;
+  /**
+   * v18 (iPhone recording 22): a run is also rejected when it does not cut
+   * the keyframe-observation error by at least this fraction. A consistent
+   * map (1.0 → 0.91 px on iPhone) gains nothing from the solve, yet every
+   * run moved the keyframes 0.3 u / 1° along weakly constrained directions
+   * and the placed cube hopped on screen at every keyframe. 0 disables.
+   */
+  minGainFraction: number;
 }
 
 export interface ARConfig {
@@ -959,7 +973,7 @@ export const DEFAULT_CONFIG: ARConfig = {
   bundleAdjustment: {
     enabled: true,
     minKeyframes: 2,
-    minLandmarkObservations: 2,
+    minLandmarkObservations: 1,
     maxObservationErrorPx: 10,
     huberPx: 2,
     maxIterations: 15,
@@ -968,6 +982,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     posePriorRotationDeg: 3,
     maxLandmarkShiftRatio: 0.2,
     maxShiftedFraction: 0.1,
+    minGainFraction: 0.15,
   },
   state: {
     minTrackedForTracking: 40,

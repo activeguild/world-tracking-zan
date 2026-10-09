@@ -136,6 +136,12 @@ export class MapTracker {
    * pruning are unchanged; only the triangulation block is skipped.
    */
   freezeTriangulation = false;
+  /**
+   * Id of the newest stored keyframe (set by the engine after each keyframe
+   * creation); recorded on every landmark triangulated from now on as its
+   * reference keyframe (Phase 7 v18). -1 before the first keyframe.
+   */
+  referenceKeyframeId = -1;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -244,6 +250,7 @@ export class MapTracker {
     this.framesSinceSwitch = 0;
     this.velocity.fill(0);
     this.lastDepth = 0;
+    this.referenceKeyframeId = -1;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -746,6 +753,7 @@ export class MapTracker {
         lm.anchorX = t.anchorX;
         lm.anchorY = t.anchorY;
         lm.parallax = this.tri.parallax;
+        lm.refKeyframeId = this.referenceKeyframeId;
         t.landmarkId = lm.id;
         created++;
       }
@@ -796,6 +804,21 @@ export class MapTracker {
       t.anchorFrame = -1;
       t.anchorPose = null;
     }
+  }
+
+  /**
+   * Phase 7 (v18): a bundle adjustment moved the map; `correction` maps old
+   * map coordinates to new ones near the current view (the correction of the
+   * keyframe created in this frame, whose pose *is* this frame's pose).
+   * Re-express the canonical pose in the corrected map so the next PnP
+   * starts from — and the temporal gate measures against — a pose
+   * consistent with the landmarks it will see. Not a candidate: the pose
+   * itself did not change, only the frame it is written in.
+   */
+  rebasePose(correction: RigidTransform): void {
+    // X_cam = T_cur X_old = T_cur C⁻¹ X_new  →  T_new = T_cur ∘ C⁻¹
+    const p = composeTransforms(this._pose, invertTransform(correction));
+    this._pose = { rotation: Float64Array.from(p.rotation), translation: Float64Array.from(p.translation) };
   }
 
   /**
@@ -882,7 +905,23 @@ export class MapTracker {
         out.oldLandmarkCount++;
         out.oldLandmarkErrorPx += errPx;
       }
+      // By how the last bundle adjustment treated the landmark (v18): a gap
+      // between the adjusted and the untouched group is a map BA split in two.
+      const mode = lm?.baMode ?? "none";
+      if (mode === "adjusted") {
+        out.adjustedCount++;
+        out.adjustedErrorPx += errPx;
+      } else if (mode === "propagated") {
+        out.propagatedCount++;
+        out.propagatedErrorPx += errPx;
+      } else {
+        out.untouchedCount++;
+        out.untouchedErrorPx += errPx;
+      }
     }
+    if (out.adjustedCount) out.adjustedErrorPx /= out.adjustedCount;
+    if (out.propagatedCount) out.propagatedErrorPx /= out.propagatedCount;
+    if (out.untouchedCount) out.untouchedErrorPx /= out.untouchedCount;
     if (out.centerCount) out.centerErrorPx /= out.centerCount;
     if (out.edgeCount) out.edgeErrorPx /= out.edgeCount;
     if (out.planeCount) out.planeErrorPx /= out.planeCount;

@@ -36,6 +36,16 @@ export function composeTransforms(b: RigidTransform, a: RigidTransform): RigidTr
   return { rotation, translation };
 }
 
+/** out = R p + t. */
+export function applyTransform(T: RigidTransform, p: ArrayLike<number>, out = new Float64Array(3)): Float64Array {
+  const r = T.rotation, t = T.translation;
+  const x = p[0], y = p[1], z = p[2];
+  out[0] = r[0] * x + r[1] * y + r[2] * z + t[0];
+  out[1] = r[3] * x + r[4] * y + r[5] * z + t[1];
+  out[2] = r[6] * x + r[7] * y + r[8] * z + t[2];
+  return out;
+}
+
 export function invertTransform(p: RigidTransform): RigidTransform {
   const rt = transpose3(p.rotation);
   const t = p.translation;

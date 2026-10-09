@@ -37,7 +37,20 @@ export interface Landmark {
   lastX: number;
   lastY: number;
   imageAge: number;
+  /**
+   * Phase 7 (v18): the keyframe that was the newest when this landmark was
+   * triangulated (-1 = none yet). A landmark no stored keyframe observes
+   * cannot enter the bundle adjustment; when that keyframe's pose is
+   * corrected the landmark is carried along with it instead, so the whole
+   * map stays one frame (ORB-SLAM's reference keyframe).
+   */
+  refKeyframeId: number;
+  /** How the last accepted bundle adjustment treated this landmark (diagnostics). */
+  baMode: LandmarkBaMode;
 }
+
+/** `adjusted` = solved in the BA, `propagated` = moved with its reference keyframe, `none` = untouched. */
+export type LandmarkBaMode = "none" | "adjusted" | "propagated";
 
 export class LandmarkMap {
   private readonly landmarks = new Map<number, Landmark>();
@@ -64,6 +77,8 @@ export class LandmarkMap {
       lastX: 0,
       lastY: 0,
       imageAge: -1,
+      refKeyframeId: -1,
+      baMode: "none",
     };
     this.landmarks.set(lm.id, lm);
     return lm;

@@ -14,7 +14,7 @@ implemented**; Phase 6 (IMU) and Phase 8 (WASM / SIMD) are not started.
 ## Phase 7 — local bundle adjustment
 
 ```
-new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 2 of them)
+new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 1 of them)
   first keyframe fixed (map origin), other poses + landmark positions free
   Levenberg–Marquardt, Huber 2 px, gross outliers (> 10 px) left out,
   landmarks eliminated with the Schur complement (dense ≤ 8×6 pose block)
@@ -23,9 +23,17 @@ new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 2 of them)
     (keyframes made by rotation alone leave depths nearly free otherwise)
   scale re-normalized to the median depth of the first keyframe's landmarks
   → the whole run is rejected when > 10% of the landmarks moved > 20% of
-    their depth (never a partial write-back: that splits the map in two)
+    their depth (never a partial write-back: that splits the map in two),
+    or when the error did not drop by 15% (a consistent map gains nothing
+    and would only be nudged along weakly constrained directions)
   → otherwise landmark positions and keyframe poses updated in place (next
     PnP, relocalization priors and plane fit see the refined map)
+  → landmarks no keyframe observes are carried with their reference
+    keyframe (the newest keyframe when they were triangulated): the whole
+    map stays one frame, not a solved part and a stale part
+  → the newest keyframe's correction (old map → new map) is applied to
+    the canonical pose and, in the session, to the world anchor: placed
+    objects stay put relative to the local map and do not hop on screen
   → track anchors reset (new triangulations use refined poses only)
 ```
 
@@ -36,7 +44,10 @@ landmarks joined the PnP (CLAUDE.md, recordings 14–19). Landmarks were
 frozen at their creation pose, so groups created at different times
 disagreed; BA makes them one map. A wrong focal length was ruled out with a
 synthetic floor-plus-wall scene (`tests/vision/FocalEstimate.test.ts`).
-`?ba=0` disables it for A/B; the HUD `BA` row reports each run.
+`?ba=0` disables it for A/B; the HUD `BA` row reports each run (`REJECTED no
+gain | shift`, `lm N +P prop +U none`, `corr` = the correction applied to
+the pose and the world anchor) and the `BAlm` row splits the PnP error by
+how the last run treated each landmark (solved / carried / untouched).
 
 ## Phase 5 — keyframes and relocalization
 

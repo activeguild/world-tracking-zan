@@ -123,6 +123,10 @@ export interface HudStats {
     outliers: number;
     shifted: number;
     rejected: boolean;
+    rejectReason: string;
+    propagated: number;
+    untouched: number;
+    correctionTranslation: ArrayLike<number>;
     errorBeforePx: number;
     errorAfterPx: number;
     iterations: number;
@@ -200,6 +204,12 @@ export interface HudStats {
       oldLandmarkErrorPx: number;
       ageYoungFrames: number;
       ageOldFrames: number;
+      adjustedCount: number;
+      adjustedErrorPx: number;
+      propagatedCount: number;
+      propagatedErrorPx: number;
+      untouchedCount: number;
+      untouchedErrorPx: number;
     } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
@@ -416,8 +426,13 @@ export class DebugOverlay {
       rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
     }
     if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
+    // v18: the processing size / grabber / flags were only in the TIMING
+    // section, below the fold of the iPhone recording — repeat them here.
     rows.push(
-      row("FPS", `${s.renderFps.toFixed(0)} / vis ${s.visionFps.toFixed(0)} (${s.visionMs.toFixed(0)}ms)${s.framesDropped ? `  drop ${s.framesDropped}` : ""}`),
+      row(
+        "FPS",
+        `${s.renderFps.toFixed(0)} / vis ${s.visionFps.toFixed(0)} (${s.visionMs.toFixed(0)}ms)${s.framesDropped ? `  drop ${s.framesDropped}` : ""}${s.processingSize ? `  ${s.processingSize}` : ""}`,
+      ),
     );
     // v16: where the vision time goes (the engine measured it all along; the
     // 17 → 120 ms climb before the world existed on device had no breakdown).
@@ -501,6 +516,20 @@ export class DebugOverlay {
             lmOldYoung >= 1.5 ? "hud-warn" : undefined,
           ),
         );
+        // v18: by how the last BA treated the landmark. Once a BA ran, a gap
+        // between the solved group and the rest is the map split in two.
+        if (rb.adjustedCount || rb.propagatedCount) {
+          const rest = rb.propagatedCount + rb.untouchedCount;
+          const restErr = rest ? (rb.propagatedErrorPx * rb.propagatedCount + rb.untouchedErrorPx * rb.untouchedCount) / rest : 0;
+          const ratio = rb.adjustedCount && rest && rb.adjustedErrorPx > 0 ? restErr / rb.adjustedErrorPx : 0;
+          rows.push(
+            row(
+              "BAlm",
+              `adj ${rb.adjustedErrorPx.toFixed(2)}px (${rb.adjustedCount})  prop ${rb.propagatedErrorPx.toFixed(2)} (${rb.propagatedCount})  none ${rb.untouchedErrorPx.toFixed(2)} (${rb.untouchedCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
+              ratio >= 1.5 || (ratio > 0 && ratio <= 1 / 1.5) ? "hud-warn" : undefined,
+            ),
+          );
+        }
       }
       rows.push(row("Source", `${lost ? "LOST" : m.source.toUpperCase()}${m.relocalized ? " (RELOC)" : ""}  ${m.history.slice(-20)}`));
     } else {
@@ -542,8 +571,8 @@ export class DebugOverlay {
       rows.push(
         row(
           "BA",
-          `×${ba.runs}${ba.rejected ? " REJECTED" : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°`,
-          ba.rejected || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
+          `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
+          (ba.rejected && ba.rejectReason === "shift") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
         ),
       );
     }

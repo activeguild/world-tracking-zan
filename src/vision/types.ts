@@ -358,7 +358,23 @@ export interface ReprojectionBreakdown {
   oldLandmarkErrorPx: number;
   ageYoungFrames: number;
   ageOldFrames: number;
+  /**
+   * The same inliers by how the last accepted bundle adjustment treated
+   * their landmark (v18, recording 21): solved in the BA (`adjusted`), moved
+   * with its reference keyframe (`propagated`), or left where it was
+   * (`untouched`). Before any BA every landmark is untouched. A gap between
+   * the groups means the BA moved part of the map and not the rest.
+   */
+  adjustedCount: number;
+  adjustedErrorPx: number;
+  propagatedCount: number;
+  propagatedErrorPx: number;
+  untouchedCount: number;
+  untouchedErrorPx: number;
 }
+
+/** Why a bundle adjustment run was discarded (v18). */
+export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain";
 
 /**
  * Local bundle adjustment report (Phase 7): what the last run over the
@@ -381,8 +397,26 @@ export interface BundleAdjustmentOutput {
   outliers: number;
   /** Landmarks the solve moved by more than maxLandmarkShiftRatio × depth. */
   shifted: number;
-  /** The whole run was discarded (too many shifted landmarks); map and keyframe poses untouched. */
+  /** The whole run was discarded (`rejectReason`); map and keyframe poses untouched. */
   rejected: boolean;
+  /** `shift` = too many shifted landmarks, `no_gain` = the error did not drop by `minGainFraction` (v18). */
+  rejectReason: BundleAdjustmentRejectReason;
+  /**
+   * v18: landmarks outside the solve that were moved with their reference
+   * keyframe's correction, and landmarks left where they were (reference
+   * keyframe gone or none). The three groups partition the map.
+   */
+  propagated: number;
+  untouched: number;
+  /**
+   * v18: rigid correction (old map → new map) near the current view, the
+   * one applied to the keyframe created in this frame and to the canonical
+   * pose. Identity when the run was rejected. The session applies it to the
+   * world anchor so that placed objects do not hop on screen when the map
+   * moves under the camera.
+   */
+  correctionRotation: Float64Array;
+  correctionTranslation: Float64Array;
   errorBeforePx: number;
   errorAfterPx: number;
   iterations: number;
@@ -405,6 +439,11 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     outliers: 0,
     shifted: 0,
     rejected: false,
+    rejectReason: "none",
+    propagated: 0,
+    untouched: 0,
+    correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    correctionTranslation: new Float64Array(3),
     errorBeforePx: 0,
     errorAfterPx: 0,
     iterations: 0,
@@ -449,6 +488,12 @@ export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
     oldLandmarkErrorPx: 0,
     ageYoungFrames: 30,
     ageOldFrames: 150,
+    adjustedCount: 0,
+    adjustedErrorPx: 0,
+    propagatedCount: 0,
+    propagatedErrorPx: 0,
+    untouchedCount: 0,
+    untouchedErrorPx: 0,
   };
 }
 

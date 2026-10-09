@@ -3,6 +3,7 @@ import { resolveConfig } from "../../src/ar/ARConfig";
 import { TrackingState } from "../../src/ar/ARState";
 import { WorldAnchor } from "../../src/ar/WorldAnchor";
 import { worldToMap } from "../../src/math/CoordinateSystem";
+import { applyTransform, composeTransforms, invertTransform, rotationAxisAngle, rotationDistance, type RigidTransform } from "../../src/math/Pose";
 import { createRng } from "../../src/vision/OutlierRejection";
 import type { VisionInput, VisionOutput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
@@ -145,7 +146,7 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
         ),
         createRng(5),
       );
-      let runs = 0, shifted = 0, landmarks = 0, rejected = 0, maxKfShift = 0;
+      let runs = 0, shifted = 0, landmarks = 0, rejected = 0, noGain = 0, maxKfShift = 0;
       let errSum = 0, errN = 0;
       for (let f = 0; f < frames; f++) {
         const o = engine.process({ frameId: f, timestamp: f * 33.3, width: W, height: H, gray: seq[f], intrinsics: TP_K, gravity: tpGravity });
@@ -154,7 +155,10 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
           runs++;
           shifted += ba.shifted;
           landmarks += ba.landmarks;
-          if (ba.rejected) rejected++;
+          // Only the shift rejection is the subject here; on a consistent
+          // synthetic map a run may legitimately be dropped for no gain (v18).
+          if (ba.rejected && ba.rejectReason === "shift") rejected++;
+          if (ba.rejected && ba.rejectReason === "no_gain") noGain++;
           maxKfShift = Math.max(maxKfShift, ba.maxKeyframeShift);
         }
         if (f > frames / 2 && o.mapPose?.framesSinceTracked === 0) {
@@ -162,12 +166,12 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
           errN++;
         }
       }
-      return { runs, shiftedFraction: landmarks ? shifted / landmarks : 0, rejected, maxKfShift, pnpErr: errSum / Math.max(1, errN) };
+      return { runs, shiftedFraction: landmarks ? shifted / landmarks : 0, rejected, noGain, maxKfShift, pnpErr: errSum / Math.max(1, errN) };
     };
     const withPriors = run(true);
     const without = run(false);
     console.log(
-      `[ba-engine] rotation sweep: with priors runs ${withPriors.runs} shifted ${(withPriors.shiftedFraction * 100).toFixed(1)}% rejected ${withPriors.rejected} kf shift max ${withPriors.maxKfShift.toFixed(3)} u PnP ${withPriors.pnpErr.toFixed(2)} px | without priors shifted ${(without.shiftedFraction * 100).toFixed(1)}% kf shift max ${without.maxKfShift.toFixed(3)} u PnP ${without.pnpErr.toFixed(2)} px`,
+      `[ba-engine] rotation sweep: with priors runs ${withPriors.runs} shifted ${(withPriors.shiftedFraction * 100).toFixed(1)}% rejected ${withPriors.rejected} (no gain ${withPriors.noGain}) kf shift max ${withPriors.maxKfShift.toFixed(3)} u PnP ${withPriors.pnpErr.toFixed(2)} px | without priors shifted ${(without.shiftedFraction * 100).toFixed(1)}% kf shift max ${without.maxKfShift.toFixed(3)} u PnP ${without.pnpErr.toFixed(2)} px`,
     );
     expect(withPriors.runs).toBeGreaterThanOrEqual(2);
     expect(withPriors.shiftedFraction).toBeLessThan(0.05);
@@ -175,6 +179,227 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(withPriors.pnpErr).toBeLessThan(1.0);
     // The unregularized solve lets more landmarks slide on this motion.
     expect(without.shiftedFraction).toBeGreaterThanOrEqual(withPriors.shiftedFraction);
+  });
+
+  it("v18: every landmark is solved or carried with its reference keyframe; a run that gains nothing is dropped", () => {
+    const engine = new VisionEngine(W, H, resolveConfig(), createRng(5));
+    let accepted = 0, noGain = 0, shiftRejected = 0;
+    let lastAccepted: VisionOutput["bundleAdjustment"] | null = null;
+    const outs: VisionOutput[] = [];
+    for (let f = 0; f < FRAMES; f++) {
+      const o = engine.process(input(f));
+      outs.push(o);
+      const ba = o.bundleAdjustment;
+      if (!ba.ranThisFrame) continue;
+      if (!ba.rejected) {
+        accepted++;
+        lastAccepted = ba;
+        // Accepted runs cut the keyframe-observation error by the configured fraction.
+        expect(ba.errorAfterPx).toBeLessThanOrEqual(ba.errorBeforePx * 0.85 + 1e-9);
+        // The three groups partition the map.
+        expect(ba.landmarks + ba.propagated + ba.untouched).toBe(engine.landmarkCount);
+        // Only landmarks whose reference keyframe is the fixed first one (no
+        // correction) may stay untouched: nothing is left behind otherwise.
+        for (const lm of engine.landmarkMap.values()) {
+          if (lm.baMode === "none") expect(lm.refKeyframeId).toBe(engine.keyframes[0].id);
+        }
+      } else if (ba.rejectReason === "no_gain") {
+        noGain++;
+        expect(ba.errorAfterPx).toBeGreaterThan(ba.errorBeforePx * 0.85 - 1e-9);
+      } else {
+        shiftRejected++;
+      }
+    }
+    const rb = outs[FRAMES - 1].mapPose!.reprojection;
+    console.log(
+      `[ba-engine] v18 runs accepted ${accepted} no-gain ${noGain} shift ${shiftRejected}; last accepted lm ${lastAccepted?.landmarks} prop ${lastAccepted?.propagated} none ${lastAccepted?.untouched}; final PnP groups adj ${rb.adjustedErrorPx.toFixed(2)} (${rb.adjustedCount}) prop ${rb.propagatedErrorPx.toFixed(2)} (${rb.propagatedCount}) none ${rb.untouchedErrorPx.toFixed(2)} (${rb.untouchedCount})`,
+    );
+    expect(shiftRejected).toBe(0);
+    expect(accepted + noGain).toBeGreaterThanOrEqual(2);
+    // Every landmark has a reference keyframe once the map exists.
+    for (const lm of engine.landmarkMap.values()) expect(lm.refKeyframeId).toBeGreaterThanOrEqual(1);
+    // The PnP breakdown accounts every inlier to one of the three groups.
+    const mp = outs[FRAMES - 1].mapPose!;
+    expect(rb.adjustedCount + rb.propagatedCount + rb.untouchedCount).toBe(mp.inlierCount);
+    // After an accepted run the solved group and the rest agree (no split map).
+    if (lastAccepted && rb.adjustedCount > 10 && rb.propagatedCount + rb.untouchedCount > 10) {
+      const rest = (rb.propagatedErrorPx * rb.propagatedCount + rb.untouchedErrorPx * rb.untouchedCount) / (rb.propagatedCount + rb.untouchedCount);
+      expect(Math.abs(rest - rb.adjustedErrorPx)).toBeLessThan(0.5);
+    }
+  });
+
+  it("v18: landmarks no keyframe observes move with their reference keyframe when the BA corrects its pose", () => {
+    const engine = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(5));
+    const outs: VisionOutput[] = [];
+    let f = 0;
+    for (; f < 80; f++) outs.push(engine.process(input(f)));
+    expect(engine.keyframes.length).toBeGreaterThanOrEqual(3);
+    const baseline = meanErr(outs, 60, 80);
+    const kfs = engine.keyframes;
+    // The free keyframe with the most landmarks that reference it and that no
+    // other keyframe observes.
+    const exclusiveOf = (L: (typeof kfs)[number]) => {
+      const seenElsewhere = new Set<number>();
+      for (const kf of kfs) if (kf !== L) for (const o of kf.observations) seenElsewhere.add(o.landmarkId);
+      return [...engine.landmarkMap.values()].filter((lm) => lm.refKeyframeId === L.id && !seenElsewhere.has(lm.id));
+    };
+    let L = kfs[1];
+    let refL = exclusiveOf(L);
+    for (let i = 2; i < kfs.length; i++) {
+      const cand = exclusiveOf(kfs[i]);
+      if (cand.length > refL.length) {
+        L = kfs[i];
+        refL = cand;
+      }
+    }
+    expect(refL.length).toBeGreaterThan(8);
+    // Half of them lose their keyframe observation: no keyframe observes them
+    // any more, so the solve cannot touch them — propagation must.
+    const orphan = new Set<number>();
+    refL.forEach((lm, i) => {
+      if (i % 2 === 0) orphan.add(lm.id);
+    });
+    L.observations = L.observations.filter((o) => !orphan.has(o.landmarkId));
+    // Perturb L and, consistently, every landmark that references it: the
+    // sub-map built from L is off by ΔT (0.5°, 0.5% of the depth ≈ 5 px, under
+    // the 10 px gross-outlier gate so L's other observations still pull it back).
+    const depth = Math.hypot(L.pose.translation[0], L.pose.translation[1], L.pose.translation[2]) + 1;
+    const dT: RigidTransform = { rotation: rotationAxisAngle([0.2, 1, 0.1], 0.0087), translation: new Float64Array([0.005 * depth, -0.002 * depth, 0.003 * depth]) };
+    const tOld: RigidTransform = { rotation: Float64Array.from(L.pose.rotation), translation: Float64Array.from(L.pose.translation) };
+    const tPert = composeTransforms(dT, tOld);
+    // X' = T_old⁻¹ ΔT⁻¹ T_old X keeps X' at the same image position in the perturbed L.
+    const Cpert = composeTransforms(invertTransform(tOld), composeTransforms(invertTransform(dT), tOld));
+    const original = new Map<number, Float64Array>();
+    for (const lm of engine.landmarkMap.values()) {
+      if (lm.refKeyframeId !== L.id) continue;
+      original.set(lm.id, Float64Array.from(lm.position));
+      lm.position.set(applyTransform(Cpert, lm.position));
+    }
+    L.pose.rotation.set(tPert.rotation);
+    L.pose.translation.set(tPert.translation);
+    expect(engine.runBundleAdjustment(TP_K)).toBe(true);
+    const ba = engine.bundleAdjustment;
+    expect(ba.rejected).toBe(false);
+    expect(ba.propagated).toBeGreaterThanOrEqual(orphan.size - 2);
+    // L moved back toward its true pose (the other keyframes' observations pull it).
+    const rotBack = (rotationDistance(L.pose.rotation, tOld.rotation) * 180) / Math.PI;
+    const rotPert = (rotationDistance(tPert.rotation, tOld.rotation) * 180) / Math.PI;
+    // Orphans were carried with L: they stay consistent with L's new pose at
+    // their original image positions, and they came back toward the truth.
+    let maxOrphanErrPx = 0, orphanBack = 0, orphanBefore = 0, n = 0;
+    const r = L.pose.rotation, t = L.pose.translation;
+    for (const id of orphan) {
+      const lm = engine.landmarkMap.get(id);
+      if (!lm) continue;
+      expect(lm.baMode).toBe("propagated");
+      const p0 = original.get(id)!;
+      // The original observation of this landmark in L: its projection through the unperturbed pose.
+      const zo = tOld.rotation[6] * p0[0] + tOld.rotation[7] * p0[1] + tOld.rotation[8] * p0[2] + tOld.translation[2];
+      const uo = (tOld.rotation[0] * p0[0] + tOld.rotation[1] * p0[1] + tOld.rotation[2] * p0[2] + tOld.translation[0]) / zo;
+      const vo = (tOld.rotation[3] * p0[0] + tOld.rotation[4] * p0[1] + tOld.rotation[5] * p0[2] + tOld.translation[1]) / zo;
+      const p = lm.position;
+      const z = r[6] * p[0] + r[7] * p[1] + r[8] * p[2] + t[2];
+      const u = (r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + t[0]) / z;
+      const v = (r[3] * p[0] + r[4] * p[1] + r[5] * p[2] + t[1]) / z;
+      maxOrphanErrPx = Math.max(maxOrphanErrPx, Math.hypot(u - uo, v - vo) * TP_K.fx);
+      orphanBack += Math.hypot(p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]);
+      const pp = applyTransform(Cpert, p0);
+      orphanBefore += Math.hypot(pp[0] - p0[0], pp[1] - p0[1], pp[2] - p0[2]);
+      n++;
+    }
+    orphanBack /= n;
+    orphanBefore /= n;
+    for (; f < 110; f++) outs.push(engine.process(input(f)));
+    const after = meanErr(outs, 85, 110);
+    console.log(
+      `[ba-engine] v18 propagation: L rotation off ${rotPert.toFixed(2)}° → ${rotBack.toFixed(2)}° after BA; ${n} orphans carried, image error vs L ${maxOrphanErrPx.toFixed(2)} px max, distance to truth ${orphanBefore.toFixed(4)} → ${orphanBack.toFixed(4)} u; PnP ${baseline.toFixed(2)} → ${after.toFixed(2)} px; propagated ${ba.propagated} untouched ${ba.untouched}`,
+    );
+    expect(rotBack).toBeLessThan(rotPert * 0.5);
+    expect(maxOrphanErrPx).toBeLessThan(0.05);
+    expect(orphanBack).toBeLessThan(orphanBefore * 0.6);
+    expect(after).toBeLessThan(baseline + 0.4);
+  });
+
+  it("v18: the world anchor follows the BA correction, so a placed point does not hop on screen when the map moves", () => {
+    const engine = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(5));
+    const outs: VisionOutput[] = [];
+    let f = 0;
+    for (; f < 80; f++) outs.push(engine.process(input(f)));
+    const foundIdx = outs.findIndex((o) => o.state === TrackingState.PLANE_FOUND);
+    expect(foundIdx).toBeGreaterThan(0);
+    const A = foundIdx + 2;
+    const makeAnchor = () => {
+      const a = new WorldAnchor({ assumedPlaneDistanceMeters: 0.5 });
+      expect(a.create(outs[A].plane!, outs[A].mapPose!)).toBe(true);
+      return a;
+    };
+    const follow = makeAnchor();
+    const stay = makeAnchor();
+    const placed = follow.hitTest(320, 300, TP_K, outs[A].mapPose!)!;
+    const placedStay = stay.hitTest(320, 300, TP_K, outs[A].mapPose!)!;
+    // The whole state built so far — landmarks, free keyframes, both anchors —
+    // drifts rigidly by ΔT (1°, 1% depth): a map that is self-consistent but
+    // no longer agrees with the fixed first keyframe. BA pulls it back.
+    const dT: RigidTransform = { rotation: rotationAxisAngle([0.1, 1, 0.2], 0.0175), translation: new Float64Array([0.03, -0.01, 0.02]) };
+    for (const lm of engine.landmarkMap.values()) lm.position.set(applyTransform(dT, lm.position));
+    for (let i = 1; i < engine.keyframes.length; i++) {
+      const kf = engine.keyframes[i];
+      const p = composeTransforms(kf.pose, invertTransform(dT));
+      kf.pose.rotation.set(p.rotation);
+      kf.pose.translation.set(p.translation);
+    }
+    follow.applyMapCorrection(dT);
+    stay.applyMapCorrection(dT);
+    const project = (anchor: WorldAnchor, hit: { position: Float64Array }, mp: NonNullable<VisionOutput["mapPose"]>): [number, number] => {
+      const pm = worldToMap(anchor.frame!, hit.position);
+      const r = mp.rotation, t = mp.translation;
+      const x = r[0] * pm[0] + r[1] * pm[1] + r[2] * pm[2] + t[0];
+      const y = r[3] * pm[0] + r[4] * pm[1] + r[5] * pm[2] + t[1];
+      const z = r[6] * pm[0] + r[7] * pm[1] + r[8] * pm[2] + t[2];
+      return [(x / z) * TP_K.fx + TP_K.cx, (y / z) * TP_K.fy + TP_K.cy];
+    };
+    // Track into the drifted map (the PnP follows the moved landmarks), then
+    // run BA in the frame of a new keyframe so the correction is this frame's.
+    for (; f < 92; f++) outs.push(engine.process(input(f)));
+    expect(outs[f - 1].mapPose!.framesSinceTracked).toBe(0);
+    const F = f - 1;
+    const before = project(follow, placed, outs[F].mapPose!);
+    const beforeStay = project(stay, placedStay, outs[F].mapPose!);
+    // Force a keyframe at F so the BA correction belongs to this frame's pose.
+    engine.createKeyframeForTests(outs[F].timestamp);
+    expect(engine.keyframes[engine.keyframes.length - 1].frameId).toBe(F);
+    expect(engine.runBundleAdjustment(TP_K)).toBe(true);
+    const ba = engine.bundleAdjustment;
+    expect(ba.rejected).toBe(false);
+    const corr = Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]);
+    expect(corr).toBeGreaterThan(0.005);
+    follow.applyMapCorrection({ rotation: ba.correctionRotation, translation: ba.correctionTranslation });
+    // The rebased pose of frame F with the corrected anchor projects the
+    // placed point where it was; the uncorrected anchor shows the hop.
+    const cp = engine.currentMapPose;
+    const rebased = { ...outs[F].mapPose!, rotation: Array.from(cp.rotation), translation: Array.from(cp.translation) };
+    const afterFollow = project(follow, placed, rebased);
+    const afterStay = project(stay, placedStay, rebased);
+    const hopFollow = Math.hypot(afterFollow[0] - before[0], afterFollow[1] - before[1]);
+    const hopStay = Math.hypot(afterStay[0] - beforeStay[0], afterStay[1] - beforeStay[1]);
+    // And the next tracked frame continues from there.
+    const o = engine.process(input(f));
+    expect(o.mapPose!.framesSinceTracked).toBe(0);
+    const next = project(follow, placed, o.mapPose!);
+    const truthF = tpProject(poseAt(F), tpFloorPoint(poseAt(F), 320, 300)!)!;
+    void truthF;
+    const expectedMove = ((): number => {
+      const X = tpFloorPoint(poseAt(A), 320, 300)!;
+      const a = tpProject(poseAt(F), X)!, b = tpProject(poseAt(f), X)!;
+      return Math.hypot(b[0] - a[0], b[1] - a[1]);
+    })();
+    const moveFollow = Math.hypot(next[0] - before[0], next[1] - before[1]);
+    console.log(
+      `[ba-engine] v18 anchor follow: correction ${corr.toFixed(4)} u, hop at the BA frame ${hopFollow.toFixed(2)} px (anchor follows) vs ${hopStay.toFixed(2)} px (anchor stays); next frame moved ${moveFollow.toFixed(2)} px, true floor motion ${expectedMove.toFixed(2)} px`,
+    );
+    expect(hopFollow).toBeLessThan(0.05);
+    expect(hopStay).toBeGreaterThan(1.0);
+    expect(Math.abs(moveFollow - expectedMove)).toBeLessThan(1.5);
   });
 
   it("a placed world point stays on its true floor pixel through the motion, with BA at least as well as without", () => {

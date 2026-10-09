@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { WorldAnchor } from "../../src/ar/WorldAnchor";
 import { worldToMap } from "../../src/math/CoordinateSystem";
-import { rotationAxisAngle, type RigidTransform } from "../../src/math/Pose";
+import { applyTransform, composeTransforms, invertTransform, rotationAxisAngle, type RigidTransform } from "../../src/math/Pose";
 import { emptyReprojectionBreakdown, type MapPoseOutput, type PlaneOutput } from "../../src/vision/types";
 import { poseFromCenter, TEST_K } from "../helpers/scene";
 
@@ -123,6 +123,50 @@ describe("WorldAnchor", () => {
     anchor.create(pl, mapPose(cam0));
     // Looking up (pixel far above the principal point: ray tilts toward −Y, away from the plane below).
     expect(anchor.hitTest(320, -5000, TEST_K, mapPose(cam0))).toBeNull();
+  });
+
+  it("follows a rigid map correction: world points and the camera keep their world coordinates (Phase 7 v18)", () => {
+    const anchor = new WorldAnchor({ assumedPlaneDistanceMeters: 0.5 });
+    anchor.create(pl, mapPose(cam0));
+    const w0 = anchor.frame!;
+    // A correction old map → new map: 1.5° about a skew axis plus 3 cm (map units).
+    const C: RigidTransform = { rotation: rotationAxisAngle([0.3, 1, 0.2], 0.026), translation: new Float64Array([0.03, -0.01, 0.02]) };
+    const cams = [cam0, poseFromCenter(rotationAxisAngle([0, 1, 0], 0.1), [0.2, -0.1, 0.1])];
+    const points = [[0.1, 0.8, 0.9], [-0.3, 0.9, 0.7], [0.2, 0.6, 1.1]];
+    const before = points.map((p) => Array.from(anchor.toWorld(p)!));
+    const camBefore = cams.map((cam) => anchor.cameraPose(mapPose(cam))!);
+    const hitBefore = anchor.hitTest(300, 280, TEST_K, mapPose(cams[1]))!;
+    expect(anchor.applyMapCorrection(C)).toBe(true);
+    // Scale untouched, axes still orthonormal.
+    expect(anchor.frame!.scale).toBeCloseTo(w0.scale, 12);
+    const r = anchor.frame!.rotation;
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+      const dot = r[i * 3] * r[j * 3] + r[i * 3 + 1] * r[j * 3 + 1] + r[i * 3 + 2] * r[j * 3 + 2];
+      expect(dot).toBeCloseTo(i === j ? 1 : 0, 10);
+    }
+    // A map point moved by C has the same world coordinates as before.
+    points.forEach((p, i) => {
+      const moved = applyTransform(C, p);
+      const after = anchor.toWorld(moved)!;
+      for (let a = 0; a < 3; a++) expect(after[a]).toBeCloseTo(before[i][a], 9);
+    });
+    // A camera re-expressed in the corrected map (T ∘ C⁻¹) has the same Three.js pose.
+    cams.forEach((cam, i) => {
+      const rebased = composeTransforms(cam, invertTransform(C));
+      const after = anchor.cameraPose(mapPose(rebased))!;
+      for (let a = 0; a < 3; a++) expect(after.position[a]).toBeCloseTo(camBefore[i].position[a], 9);
+      const q = after.quaternion, q0 = camBefore[i].quaternion;
+      expect(Math.abs(q[0] * q0[0] + q[1] * q0[1] + q[2] * q0[2] + q[3] * q0[3])).toBeCloseTo(1, 9);
+    });
+    // Hit tests from the rebased camera land on the same world point.
+    const hitAfter = anchor.hitTest(300, 280, TEST_K, mapPose(composeTransforms(cams[1], invertTransform(C))))!;
+    for (let a = 0; a < 3; a++) expect(hitAfter.position[a]).toBeCloseTo(hitBefore.position[a], 9);
+    // The world → map matrix stays consistent with the rotation / origin.
+    const pm = worldToMap(anchor.frame!, before[0]);
+    const movedP = applyTransform(C, points[0]);
+    for (let a = 0; a < 3; a++) expect(pm[a]).toBeCloseTo(movedP[a], 9);
+    // No world → no-op.
+    expect(new WorldAnchor({ assumedPlaneDistanceMeters: 0.5 }).applyMapCorrection(C)).toBe(false);
   });
 
   it("drops the world when the map is reset", () => {

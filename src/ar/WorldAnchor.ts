@@ -7,9 +7,12 @@ import {
   type ThreeCameraPose,
   type WorldFrame,
 } from "../math/CoordinateSystem";
-import type { RigidTransform } from "../math/Pose";
+import { applyTransform, type RigidTransform } from "../math/Pose";
 import { intersectRayPlane, pixelRay, transformRay } from "../math/Ray";
 import { transpose3 } from "../math/Decomposition";
+import { mat3Multiply } from "../math/Matrix";
+
+const ZERO3 = new Float64Array(3);
 import type { MapPoseOutput } from "../vision/types";
 
 /** What the anchor needs from a plane: n·X + d = 0 in the map frame plus a point on it. */
@@ -90,6 +93,41 @@ export class WorldAnchor {
     const scale = distMap > 1e-9 ? this.config.assumedPlaneDistanceMeters / distMap : 1;
     this.world = worldFromPlane(plane.normal, plane.center, cam, scale);
     this.mapFrameId = mapPose.mapFrameId;
+    return true;
+  }
+
+  /**
+   * Phase 7 (v18): the engine's bundle adjustment moved the map under the
+   * camera by a rigid `correction` (old map → new map, the one applied to
+   * the newest keyframe and to the canonical pose). Carry the world frame
+   * along so that objects placed in it keep their place relative to the
+   * local map — and so do not hop on screen when the map is refined. Like
+   * an ARKit / ORB-SLAM anchor attached to its keyframe. The scale is not
+   * touched (the BA keeps the map scale fixed by its gauge).
+   */
+  applyMapCorrection(correction: RigidTransform): boolean {
+    if (!this.world) return false;
+    const w = this.world;
+    const p = w.plane;
+    // Axes rotate with R_c, the origin maps as a point.
+    const rc = correction.rotation;
+    const rot = (v: Float64Array) => applyTransform({ rotation: rc, translation: ZERO3 }, v);
+    const origin = applyTransform(correction, p.origin);
+    const right = rot(p.right);
+    const up = rot(p.up);
+    const forward = rot(p.forward);
+    // X_world = R_wm (X_old − o_old) s, X_old = R_cᵀ (X_new − t_c)
+    //   = R_wm R_cᵀ (X_new − C(o_old)) s  →  R_wm' = R_wm R_cᵀ
+    const rotation = mat3Multiply(w.rotation, transpose3(rc));
+    const s = w.scale;
+    const zAxis = [-forward[0], -forward[1], -forward[2]];
+    const matrix = new Float64Array([
+      right[0] / s, right[1] / s, right[2] / s, 0,
+      up[0] / s, up[1] / s, up[2] / s, 0,
+      zAxis[0] / s, zAxis[1] / s, zAxis[2] / s, 0,
+      origin[0], origin[1], origin[2], 1,
+    ]);
+    this.world = { plane: { origin, right, up, forward, matrix }, rotation, scale: s };
     return true;
   }
 
