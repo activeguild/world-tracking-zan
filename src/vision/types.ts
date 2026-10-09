@@ -329,6 +329,35 @@ export interface ReprojectionBreakdown {
   highParallaxErrorPx: number;
   parallaxLowDeg: number;
   parallaxHighDeg: number;
+  /**
+   * Inliers by the age of the *track* that observes them (frames since FAST
+   * detected the corner, `Track.age`): below `ageYoungFrames`, between, at or
+   * above `ageOldFrames`. Tracks are followed frame to frame and never
+   * re-matched to the landmark's first view, so LK drift accumulates with
+   * track age: an error that grows with it is observation drift (fix: re-anchor
+   * observations to the landmark's reference patch).
+   */
+  youngTrackCount: number;
+  youngTrackErrorPx: number;
+  midTrackCount: number;
+  midTrackErrorPx: number;
+  oldTrackCount: number;
+  oldTrackErrorPx: number;
+  /**
+   * The same inliers by the age of the *landmark* (frames since
+   * triangulation, `Landmark.firstFrame`). A re-linked landmark has an old
+   * landmark age but a young track. An error that grows with landmark age
+   * while flat in track age is map inconsistency (landmarks created from
+   * drifted anchor poses): the domain of bundle adjustment.
+   */
+  youngLandmarkCount: number;
+  youngLandmarkErrorPx: number;
+  midLandmarkCount: number;
+  midLandmarkErrorPx: number;
+  oldLandmarkCount: number;
+  oldLandmarkErrorPx: number;
+  ageYoungFrames: number;
+  ageOldFrames: number;
 }
 
 export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
@@ -350,6 +379,20 @@ export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
     highParallaxErrorPx: 0,
     parallaxLowDeg: 2,
     parallaxHighDeg: 5,
+    youngTrackCount: 0,
+    youngTrackErrorPx: 0,
+    midTrackCount: 0,
+    midTrackErrorPx: 0,
+    oldTrackCount: 0,
+    oldTrackErrorPx: 0,
+    youngLandmarkCount: 0,
+    youngLandmarkErrorPx: 0,
+    midLandmarkCount: 0,
+    midLandmarkErrorPx: 0,
+    oldLandmarkCount: 0,
+    oldLandmarkErrorPx: 0,
+    ageYoungFrames: 30,
+    ageOldFrames: 150,
   };
 }
 

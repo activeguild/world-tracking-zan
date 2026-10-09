@@ -166,6 +166,20 @@ export interface HudStats {
       highParallaxErrorPx: number;
       parallaxLowDeg: number;
       parallaxHighDeg: number;
+      youngTrackCount: number;
+      youngTrackErrorPx: number;
+      midTrackCount: number;
+      midTrackErrorPx: number;
+      oldTrackCount: number;
+      oldTrackErrorPx: number;
+      youngLandmarkCount: number;
+      youngLandmarkErrorPx: number;
+      midLandmarkCount: number;
+      midLandmarkErrorPx: number;
+      oldLandmarkCount: number;
+      oldLandmarkErrorPx: number;
+      ageYoungFrames: number;
+      ageOldFrames: number;
     } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
@@ -444,6 +458,27 @@ export class DebugOverlay {
             "Par",
             `<${rb.parallaxLowDeg}° ${rb.lowParallaxErrorPx.toFixed(2)}px (${rb.lowParallaxCount})  ${rb.parallaxLowDeg}–${rb.parallaxHighDeg}° ${rb.midParallaxErrorPx.toFixed(2)} (${rb.midParallaxCount})  >${rb.parallaxHighDeg}° ${rb.highParallaxErrorPx.toFixed(2)} (${rb.highParallaxCount})${lowHigh ? `  ×${lowHigh.toFixed(1)}` : ""}`,
             lowHigh >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        // By track age vs landmark age: error growing with track age = LK
+        // drift of the observation; growing with landmark age only = map
+        // inconsistency (bundle adjustment).
+        const trackOldYoung = rb.youngTrackCount && rb.oldTrackCount && rb.youngTrackErrorPx > 0 ? rb.oldTrackErrorPx / rb.youngTrackErrorPx : 0;
+        const lmOldYoung = rb.youngLandmarkCount && rb.oldLandmarkCount && rb.youngLandmarkErrorPx > 0 ? rb.oldLandmarkErrorPx / rb.youngLandmarkErrorPx : 0;
+        const bins = (y: number, yc: number, m: number, mc: number, o: number, oc: number) =>
+          `<${rb.ageYoungFrames} ${y.toFixed(2)} (${yc})  ${rb.ageYoungFrames}–${rb.ageOldFrames} ${m.toFixed(2)} (${mc})  >${rb.ageOldFrames} ${o.toFixed(2)} (${oc})`;
+        rows.push(
+          row(
+            "Age",
+            `track ${bins(rb.youngTrackErrorPx, rb.youngTrackCount, rb.midTrackErrorPx, rb.midTrackCount, rb.oldTrackErrorPx, rb.oldTrackCount)}${trackOldYoung ? `  ×${trackOldYoung.toFixed(1)}` : ""}`,
+            trackOldYoung >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        rows.push(
+          row(
+            "",
+            `lm    ${bins(rb.youngLandmarkErrorPx, rb.youngLandmarkCount, rb.midLandmarkErrorPx, rb.midLandmarkCount, rb.oldLandmarkErrorPx, rb.oldLandmarkCount)}${lmOldYoung ? `  ×${lmOldYoung.toFixed(1)}` : ""}`,
+            lmOldYoung >= 1.5 ? "hud-warn" : undefined,
           ),
         );
       }

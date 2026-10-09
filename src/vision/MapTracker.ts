@@ -578,7 +578,7 @@ export class MapTracker {
         const cls = this.classify(this._pose, n, cfg.pnpInlierPx / f);
         inlierCount = cls.inlierCount;
         meanErrPx = cls.meanError * f;
-        reprojection = this.reprojectionBreakdown(this._pose, n, obsTracks, cls.inliers, k);
+        reprojection = this.reprojectionBreakdown(this._pose, n, obsTracks, cls.inliers, k, frameId);
         const maxErr = cfg.maxTriangulationErrorPx / f;
         for (let i = 0; i < n; i++) {
           const lm = this.map.get(obsTracks[i].landmarkId)!;
@@ -784,9 +784,19 @@ export class MapTracker {
    * disc vs edge ring, radius = half the half-diagonal) and by landmark kind
    * (on the detected plane vs the rest), v16 diagnostics. A device whose
    * focal length or lens distortion departs from the assumed pinhole model
-   * shows a larger error in the edge ring than in the center.
+   * shows a larger error in the edge ring than in the center. Also by the
+   * landmark's triangulation parallax (depth noise) and by the age of the
+   * observing track vs the age of the landmark (LK drift vs map
+   * inconsistency).
    */
-  private reprojectionBreakdown(pose: RigidTransform, n: number, obsTracks: Track[], inliers: Uint8Array, k: CameraIntrinsics): ReprojectionBreakdown {
+  private reprojectionBreakdown(
+    pose: RigidTransform,
+    n: number,
+    obsTracks: Track[],
+    inliers: Uint8Array,
+    k: CameraIntrinsics,
+    frameId: number,
+  ): ReprojectionBreakdown {
     const out = emptyReprojectionBreakdown();
     const r = pose.rotation;
     const t = pose.translation;
@@ -830,6 +840,29 @@ export class MapTracker {
         out.highParallaxCount++;
         out.highParallaxErrorPx += errPx;
       }
+      // By track age (frames since FAST detected this corner).
+      if (tr.age < out.ageYoungFrames) {
+        out.youngTrackCount++;
+        out.youngTrackErrorPx += errPx;
+      } else if (tr.age < out.ageOldFrames) {
+        out.midTrackCount++;
+        out.midTrackErrorPx += errPx;
+      } else {
+        out.oldTrackCount++;
+        out.oldTrackErrorPx += errPx;
+      }
+      // By landmark age (frames since triangulation).
+      const lmAge = lm ? frameId - lm.firstFrame : 0;
+      if (lmAge < out.ageYoungFrames) {
+        out.youngLandmarkCount++;
+        out.youngLandmarkErrorPx += errPx;
+      } else if (lmAge < out.ageOldFrames) {
+        out.midLandmarkCount++;
+        out.midLandmarkErrorPx += errPx;
+      } else {
+        out.oldLandmarkCount++;
+        out.oldLandmarkErrorPx += errPx;
+      }
     }
     if (out.centerCount) out.centerErrorPx /= out.centerCount;
     if (out.edgeCount) out.edgeErrorPx /= out.edgeCount;
@@ -838,6 +871,12 @@ export class MapTracker {
     if (out.lowParallaxCount) out.lowParallaxErrorPx /= out.lowParallaxCount;
     if (out.midParallaxCount) out.midParallaxErrorPx /= out.midParallaxCount;
     if (out.highParallaxCount) out.highParallaxErrorPx /= out.highParallaxCount;
+    if (out.youngTrackCount) out.youngTrackErrorPx /= out.youngTrackCount;
+    if (out.midTrackCount) out.midTrackErrorPx /= out.midTrackCount;
+    if (out.oldTrackCount) out.oldTrackErrorPx /= out.oldTrackCount;
+    if (out.youngLandmarkCount) out.youngLandmarkErrorPx /= out.youngLandmarkCount;
+    if (out.midLandmarkCount) out.midLandmarkErrorPx /= out.midLandmarkCount;
+    if (out.oldLandmarkCount) out.oldLandmarkErrorPx /= out.oldLandmarkCount;
     return out;
   }
 

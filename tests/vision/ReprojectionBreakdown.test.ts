@@ -95,6 +95,18 @@ function run(k1: number): { breakdown: ReprojectionBreakdown; meanErrPx: number;
     acc.midParallaxErrorPx += b.midParallaxErrorPx * b.midParallaxCount;
     acc.highParallaxCount += b.highParallaxCount;
     acc.highParallaxErrorPx += b.highParallaxErrorPx * b.highParallaxCount;
+    acc.youngTrackCount += b.youngTrackCount;
+    acc.youngTrackErrorPx += b.youngTrackErrorPx * b.youngTrackCount;
+    acc.midTrackCount += b.midTrackCount;
+    acc.midTrackErrorPx += b.midTrackErrorPx * b.midTrackCount;
+    acc.oldTrackCount += b.oldTrackCount;
+    acc.oldTrackErrorPx += b.oldTrackErrorPx * b.oldTrackCount;
+    acc.youngLandmarkCount += b.youngLandmarkCount;
+    acc.youngLandmarkErrorPx += b.youngLandmarkErrorPx * b.youngLandmarkCount;
+    acc.midLandmarkCount += b.midLandmarkCount;
+    acc.midLandmarkErrorPx += b.midLandmarkErrorPx * b.midLandmarkCount;
+    acc.oldLandmarkCount += b.oldLandmarkCount;
+    acc.oldLandmarkErrorPx += b.oldLandmarkErrorPx * b.oldLandmarkCount;
     acc.centerRadius = b.centerRadius;
     meanErr += mp.meanReprojectionErrorPx;
     frames++;
@@ -106,6 +118,12 @@ function run(k1: number): { breakdown: ReprojectionBreakdown; meanErrPx: number;
   acc.lowParallaxErrorPx /= Math.max(1, acc.lowParallaxCount);
   acc.midParallaxErrorPx /= Math.max(1, acc.midParallaxCount);
   acc.highParallaxErrorPx /= Math.max(1, acc.highParallaxCount);
+  acc.youngTrackErrorPx /= Math.max(1, acc.youngTrackCount);
+  acc.midTrackErrorPx /= Math.max(1, acc.midTrackCount);
+  acc.oldTrackErrorPx /= Math.max(1, acc.oldTrackCount);
+  acc.youngLandmarkErrorPx /= Math.max(1, acc.youngLandmarkCount);
+  acc.midLandmarkErrorPx /= Math.max(1, acc.midLandmarkCount);
+  acc.oldLandmarkErrorPx /= Math.max(1, acc.oldLandmarkCount);
   return { breakdown: acc, meanErrPx: meanErr / Math.max(1, frames), frames };
 }
 
@@ -134,5 +152,36 @@ describe("PnP reprojection breakdown (v16 diagnostics)", () => {
     console.log(
       `[reproj] parallax bins (pinhole): <2° ${pinhole.breakdown.lowParallaxErrorPx.toFixed(2)} (${pinhole.breakdown.lowParallaxCount})  2–5° ${pinhole.breakdown.midParallaxErrorPx.toFixed(2)} (${pinhole.breakdown.midParallaxCount})  >5° ${pinhole.breakdown.highParallaxErrorPx.toFixed(2)} (${pinhole.breakdown.highParallaxCount})`,
     );
+  });
+
+  it("splits the same inliers by track age and by landmark age (LK drift vs map inconsistency)", () => {
+    // A longer slide so that tracks and landmarks reach the old bin (≥ 150 frames).
+    const engine = new VisionEngine(W, H, resolveConfig(), createRng(9));
+    const last: ReprojectionBreakdown[] = [];
+    for (let f = 0; f < 200; f++) {
+      const input: VisionInput = { frameId: f, timestamp: f * 33.3, width: W, height: H, gray: render(Math.min(f, FRAMES - 1), 0), intrinsics: K, gravity };
+      const o = engine.process(input);
+      if (o.mapPose && o.mapPose.framesSinceTracked === 0 && f >= 190) last.push(o.mapPose.reprojection);
+    }
+    expect(last.length).toBeGreaterThan(0);
+    const b = last[last.length - 1];
+    const total = b.centerCount + b.edgeCount;
+    // Both splits cover exactly the PnP inlier set.
+    expect(b.youngTrackCount + b.midTrackCount + b.oldTrackCount).toBe(total);
+    expect(b.youngLandmarkCount + b.midLandmarkCount + b.oldLandmarkCount).toBe(total);
+    expect(b.ageYoungFrames).toBe(30);
+    expect(b.ageOldFrames).toBe(150);
+    // After 200 frames of continuous tracking the oldest tracks and landmarks populate the old bin.
+    expect(b.oldTrackCount).toBeGreaterThan(0);
+    expect(b.oldLandmarkCount).toBeGreaterThan(0);
+    // A landmark can never be older than the frame count, and a track observing it cannot be
+    // older than the landmark's own track unless re-linked: on a pinhole-consistent synthetic
+    // floor neither age carries extra error.
+    const fmt = (y: number, yc: number, m: number, mc: number, o: number, oc: number) => `<30 ${y.toFixed(2)} (${yc})  30–150 ${m.toFixed(2)} (${mc})  >150 ${o.toFixed(2)} (${oc})`;
+    console.log(
+      `[reproj] age bins: track ${fmt(b.youngTrackErrorPx, b.youngTrackCount, b.midTrackErrorPx, b.midTrackCount, b.oldTrackErrorPx, b.oldTrackCount)}\n[reproj] age bins: lm    ${fmt(b.youngLandmarkErrorPx, b.youngLandmarkCount, b.midLandmarkErrorPx, b.midLandmarkCount, b.oldLandmarkErrorPx, b.oldLandmarkCount)}`,
+    );
+    if (b.youngTrackCount && b.oldTrackCount) expect(b.oldTrackErrorPx / Math.max(1e-6, b.youngTrackErrorPx)).toBeLessThan(1.5);
+    if (b.youngLandmarkCount && b.oldLandmarkCount) expect(b.oldLandmarkErrorPx / Math.max(1e-6, b.youngLandmarkErrorPx)).toBeLessThan(1.5);
   });
 });
