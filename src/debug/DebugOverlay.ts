@@ -531,6 +531,21 @@ export class DebugOverlay {
           );
         }
       }
+      // Phase 7: what the last bundle adjustment did to the map. The error is
+      // the keyframe-observation error (not this frame's PnP); a run that does
+      // not converge or leaves > 2 px is orange. Right under the PnP
+      // breakdown: at the end of the TRACK section it was below the fold of
+      // the iPhone recordings.
+      const ba = s.bundleAdjustment;
+      if (ba && ba.runs > 0) {
+        rows.push(
+          row(
+            "BA",
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
+            (ba.rejected && ba.rejectReason === "shift") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
+          ),
+        );
+      }
       rows.push(row("Source", `${lost ? "LOST" : m.source.toUpperCase()}${m.relocalized ? " (RELOC)" : ""}  ${m.history.slice(-20)}`));
     } else {
       rows.push(row("PnP", "—"));
@@ -560,19 +575,6 @@ export class DebugOverlay {
           "Reloc",
           `${r.attempt}  kf ${r.keyframes} (${r.keyframesCreated} made, ${r.keyframesEvicted} out)  ok×${r.successes}${r.diag && r.diag.age > 0 && r.attempt === "none" ? `  (last ${r.diag.age}f ago)` : ""}`,
           r.attempt === "fail" ? "hud-warn" : undefined,
-        ),
-      );
-    }
-    // Phase 7: what the last bundle adjustment did to the map. The error is
-    // the keyframe-observation error (not this frame's PnP); a run that does
-    // not converge or leaves > 2 px is orange.
-    const ba = s.bundleAdjustment;
-    if (ba && ba.runs > 0) {
-      rows.push(
-        row(
-          "BA",
-          `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
-          (ba.rejected && ba.rejectReason === "shift") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
         ),
       );
     }
