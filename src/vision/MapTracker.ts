@@ -786,6 +786,19 @@ export class MapTracker {
   }
 
   /**
+   * Phase 7: after a bundle adjustment moved the map, triangulation anchors
+   * taken under the old poses would pair an old pose with a refined one.
+   * Clear them; landmark-less tracks re-anchor in the next tracked frame.
+   */
+  resetAnchors(tracks: readonly Track[]): void {
+    for (const t of tracks) {
+      if (t.landmarkId >= 0) continue;
+      t.anchorFrame = -1;
+      t.anchorPose = null;
+    }
+  }
+
+  /**
    * Reprojection error of the PnP inliers split by image region (center
    * disc vs edge ring, radius = half the half-diagonal) and by landmark kind
    * (on the detected plane vs the rest), v16 diagnostics. A device whose

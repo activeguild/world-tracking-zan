@@ -111,7 +111,26 @@ export interface HudStats {
   /** Camera frames skipped because the vision backend was still busy. */
   framesDropped?: number;
   /** Per-stage vision engine time of the last frame (ms, v16). */
-  engineTiming?: { pyramid: number; track: number; ransac: number; detect: number; pose: number; map: number; plane: number; reloc: number; total: number } | null;
+  engineTiming?: { pyramid: number; track: number; ransac: number; detect: number; pose: number; map: number; plane: number; reloc: number; ba: number; total: number } | null;
+  /** Phase 7: last local bundle adjustment on the current map (null before the first frame). */
+  bundleAdjustment?: {
+    runs: number;
+    lastFrameId: number;
+    keyframes: number;
+    freeKeyframes: number;
+    landmarks: number;
+    observations: number;
+    outliers: number;
+    reverted: number;
+    errorBeforePx: number;
+    errorAfterPx: number;
+    iterations: number;
+    converged: boolean;
+    ms: number;
+    maxLandmarkShift: number;
+    maxKeyframeShift: number;
+    maxKeyframeRotationDeg: number;
+  } | null;
   /** Main-thread / transport time of the last frame (ms, v16). */
   mainTiming?: {
     grabMs: number;
@@ -409,7 +428,7 @@ export class DebugOverlay {
       rows.push(
         row(
           "Vis",
-          `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)} = ${ms(et.total)}ms`,
+          `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)}${et.ba > 0 ? ` ba ${ms(et.ba)}` : ""} = ${ms(et.total)}ms`,
           et.total > 33 ? "hud-warn" : undefined,
         ),
       );
@@ -511,6 +530,19 @@ export class DebugOverlay {
           "Reloc",
           `${r.attempt}  kf ${r.keyframes} (${r.keyframesCreated} made, ${r.keyframesEvicted} out)  ok×${r.successes}${r.diag && r.diag.age > 0 && r.attempt === "none" ? `  (last ${r.diag.age}f ago)` : ""}`,
           r.attempt === "fail" ? "hud-warn" : undefined,
+        ),
+      );
+    }
+    // Phase 7: what the last bundle adjustment did to the map. The error is
+    // the keyframe-observation error (not this frame's PnP); a run that does
+    // not converge or leaves > 2 px is orange.
+    const ba = s.bundleAdjustment;
+    if (ba && ba.runs > 0) {
+      rows.push(
+        row(
+          "BA",
+          `×${ba.runs}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.reverted ? ` rev ${ba.reverted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°`,
+          !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
         ),
       );
     }

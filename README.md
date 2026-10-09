@@ -8,7 +8,30 @@ Web Worker.
 The full specification lives in [CLAUDE.md](./CLAUDE.md). Development is
 strictly phased; **Phases 1–5 (feature tracking, relative camera pose,
 landmark map + plane detection, world coordinate + Three.js placement,
-keyframes + relocalization) are implemented**, later phases are not started.
+keyframes + relocalization) and Phase 7 (local bundle adjustment) are
+implemented**; Phase 6 (IMU) and Phase 8 (WASM / SIMD) are not started.
+
+## Phase 7 — local bundle adjustment
+
+```
+new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 2 of them)
+  first keyframe fixed (map origin), other poses + landmark positions free
+  Levenberg–Marquardt, Huber 2 px, gross outliers (> 10 px) left out,
+  landmarks eliminated with the Schur complement (dense ≤ 8×6 pose block)
+  scale re-normalized to the median depth of the first keyframe's landmarks
+  → landmark positions and keyframe poses updated in place (next PnP,
+    relocalization priors and plane fit see the refined map)
+  → track anchors reset (new triangulations use refined poses only)
+```
+
+Why: on Android the PnP error grew from 1 px (fresh map) to 2.5–3 px while
+staying uniform over image position, parallax, track age and landmark age,
+and the same landmarks at the same view went 1.5 → 2.3 px once later
+landmarks joined the PnP (CLAUDE.md, recordings 14–19). Landmarks were
+frozen at their creation pose, so groups created at different times
+disagreed; BA makes them one map. A wrong focal length was ruled out with a
+synthetic floor-plus-wall scene (`tests/vision/FocalEstimate.test.ts`).
+`?ba=0` disables it for A/B; the HUD `BA` row reports each run.
 
 ## Phase 5 — keyframes and relocalization
 
@@ -143,6 +166,7 @@ Query parameters:
 | `?smooth=1` | enable pose smoothing (off by default while the raw pose is validated) |
 | `?refine=1` | re-enable landmark depth refinement (A/B against the fixed map) |
 | `?freeze=1` | no new landmarks once the world is established (A/B: map inconsistency vs camera model; tracking is lost when the camera leaves the first view) |
+| `?ba=0` | disable the local bundle adjustment that runs on every new keyframe (Phase 7 A/B) |
 | `?walk=1`   | the placed object walks back and forth on the plane (object-motion test) |
 | `?planetrack=1` | experimental plane-relative pose instead of landmark PnP |
 
@@ -422,7 +446,8 @@ src/
              RelocalizationSchedule (prepare / attempt / retry / timeline), VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
-             HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)
+             HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber),
+             BundleAdjustment (LM + Schur complement over keyframes and landmarks),
              CoordinateSystem (map ↔ world ↔ Three.js, projection), Ray, OneEuroFilter
   ar/        WorldAnchor (world frame from the first plane, hit test)
   rendering/ ARCamera, ARWorld, ARObject (world-space motion API), ARRenderer, FramePresenter (pose-synchronized frame)

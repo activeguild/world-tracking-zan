@@ -5,6 +5,7 @@ import { FeatureTracker, TrackStatus, allocResult, type TrackResult } from "./Fe
 import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker } from "./MapTracker";
+import type { LandmarkMap } from "./LandmarkMap";
 import { PlaneDetector } from "./PlaneDetector";
 import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
@@ -24,6 +25,8 @@ import { isJumpRejection, poseDelta } from "./PoseValidation";
 import { computeTrackingConfidence, emptyQuality, type TrackingQuality } from "./TrackingQuality";
 import {
   LANDMARK_STRIDE,
+  type BundleAdjustmentOutput,
+  emptyBundleAdjustment,
   packTracks,
   type MapPoseOutput,
   type MotionDiagnostics,
@@ -39,6 +42,8 @@ import {
   type VisionOutput,
 } from "./types";
 import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
+import { type BAObservation, bundleAdjust } from "../math/BundleAdjustment";
+import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { transpose3 } from "../math/Decomposition";
 import { rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
 
@@ -169,8 +174,12 @@ export class VisionEngine {
   /** Frames since the map PnP last located the camera, as of the previous frame (episode start detection). */
   private prevFramesSinceTracked = 0;
 
+  /** Last local bundle adjustment on the current map (Phase 7). */
+  private lastBundleAdjustment: BundleAdjustmentOutput = emptyBundleAdjustment();
+  private lastFrameId = -1;
+
   /** Timing breakdown of the last frame (ms). */
-  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, reloc: 0, total: 0 };
+  readonly timing = { pyramid: 0, track: 0, ransac: 0, detect: 0, pose: 0, map: 0, plane: 0, reloc: 0, ba: 0, total: 0 };
 
   constructor(
     width: number,
@@ -233,6 +242,11 @@ export class VisionEngine {
     return this.mapTracker.map.size;
   }
 
+  /** The landmark map itself (tests / diagnostics; positions are live). */
+  get landmarkMap(): LandmarkMap {
+    return this.mapTracker.map;
+  }
+
   get state(): TrackingState {
     return this.stateMachine.state;
   }
@@ -288,6 +302,130 @@ export class VisionEngine {
     this.relocPreparedFrame = -1;
     this.prevFramesSinceTracked = 0;
     this.worldEstablished = false;
+    this.lastBundleAdjustment = emptyBundleAdjustment();
+  }
+
+  /** Last local bundle adjustment report (Phase 7). */
+  get bundleAdjustment(): BundleAdjustmentOutput {
+    return this.lastBundleAdjustment;
+  }
+
+  /**
+   * Phase 7: local bundle adjustment over the stored keyframes. The first
+   * keyframe (the map origin) stays fixed; the other keyframe poses and every
+   * landmark observed by at least `minLandmarkObservations` keyframes are
+   * refined jointly against the keyframe observations (Huber kernel, gross
+   * outliers left out). Landmark positions and keyframe poses are updated in
+   * place, so the next PnP, the relocalization priors and the plane fit all
+   * see the refined map. Track anchors are reset so that new landmarks are
+   * triangulated from poses of the refined map only. Returns false when
+   * there is not enough to solve. Also callable from tests.
+   */
+  runBundleAdjustment(k: CameraIntrinsics, frameId = this.lastFrameId): boolean {
+    const cfg = this.config.bundleAdjustment;
+    const kfs = this.relocalizer.keyframes;
+    const map = this.mapTracker.map;
+    if (kfs.length < Math.max(2, cfg.minKeyframes)) return false;
+    const t0 = now();
+    const f = (k.fx + k.fy) / 2;
+    // Landmarks observed by enough keyframes.
+    const counts = new Map<number, number>();
+    for (const kf of kfs) for (const o of kf.observations) if (map.get(o.landmarkId)) counts.set(o.landmarkId, (counts.get(o.landmarkId) ?? 0) + 1);
+    const index = new Map<number, number>();
+    const ids: number[] = [];
+    for (const [id, c] of counts) {
+      if (c < Math.max(1, cfg.minLandmarkObservations)) continue;
+      index.set(id, ids.length);
+      ids.push(id);
+    }
+    if (ids.length === 0) return false;
+    const positions = new Float64Array(ids.length * 3);
+    for (let i = 0; i < ids.length; i++) positions.set(map.get(ids[i])!.position, i * 3);
+    // Observations in normalized coordinates, gross outliers against the current state left out.
+    const maxErr = cfg.maxObservationErrorPx / f;
+    const observations: BAObservation[] = [];
+    let outliers = 0;
+    const kfIndex = new Map<number, number>();
+    kfs.forEach((kf, i) => kfIndex.set(kf.id, i));
+    for (let ki = 0; ki < kfs.length; ki++) {
+      const kf = kfs[ki];
+      const r = kf.pose.rotation, t = kf.pose.translation;
+      for (const o of kf.observations) {
+        const li = index.get(o.landmarkId);
+        if (li === undefined) continue;
+        const X = positions[li * 3], Y = positions[li * 3 + 1], Z = positions[li * 3 + 2];
+        const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
+        if (z <= 1e-6) {
+          outliers++;
+          continue;
+        }
+        const x = (o.x - k.cx) / k.fx, y = (o.y - k.cy) / k.fy;
+        const u = (r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z;
+        const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
+        if (Math.hypot(u - x, v - y) > maxErr) {
+          outliers++;
+          continue;
+        }
+        observations.push({ keyframe: ki, landmark: li, x, y });
+      }
+    }
+    if (observations.length < 12) return false;
+    // Scale gauge: the median depth, in the fixed first keyframe, of the
+    // landmarks that keyframe observes (a stable set across runs).
+    const gaugeLandmarks: number[] = [];
+    for (const o of observations) if (o.keyframe === 0) gaugeLandmarks.push(o.landmark);
+    const problem = {
+      keyframes: kfs.map((kf, i) => ({ pose: kf.pose, fixed: i === 0 })),
+      landmarks: positions,
+      landmarkCount: ids.length,
+      observations,
+      gaugeLandmarks,
+    };
+    const res = bundleAdjust(problem, { huber: cfg.huberPx / f, maxIterations: cfg.maxIterations, epsilon: 1e-7 });
+    // Write the refined landmarks back (keyframe poses were refined in place).
+    // A landmark that slid far along its rays is poorly constrained: keep it.
+    const r0 = kfs[0].pose.rotation, t0k = kfs[0].pose.translation;
+    let reverted = 0;
+    let maxShift = 0;
+    for (let i = 0; i < ids.length; i++) {
+      const lm = map.get(ids[i])!;
+      const p = lm.position;
+      const nx = positions[i * 3], ny = positions[i * 3 + 1], nz = positions[i * 3 + 2];
+      const shift = Math.hypot(nx - p[0], ny - p[1], nz - p[2]);
+      const depth = Math.abs(r0[6] * p[0] + r0[7] * p[1] + r0[8] * p[2] + t0k[2]);
+      if (shift > cfg.maxLandmarkShiftRatio * Math.max(depth, 1e-6)) {
+        reverted++;
+        continue;
+      }
+      maxShift = Math.max(maxShift, shift);
+      p[0] = nx;
+      p[1] = ny;
+      p[2] = nz;
+    }
+    this.mapTracker.resetAnchors(this.tracks);
+    const ms = now() - t0;
+    this.timing.ba += ms;
+    const prev = this.lastBundleAdjustment;
+    this.lastBundleAdjustment = {
+      runs: prev.runs + 1,
+      lastFrameId: frameId,
+      ranThisFrame: true,
+      keyframes: kfs.length,
+      freeKeyframes: res.freeKeyframes,
+      landmarks: ids.length,
+      observations: observations.length,
+      outliers,
+      reverted,
+      errorBeforePx: res.errorBefore * f,
+      errorAfterPx: res.errorAfter * f,
+      iterations: res.iterations,
+      converged: res.converged,
+      ms,
+      maxLandmarkShift: maxShift,
+      maxKeyframeShift: res.maxPoseShift,
+      maxKeyframeRotationDeg: res.maxPoseRotationDeg,
+    };
+    return true;
   }
 
   /** World tracking established for the current map (v10). */
@@ -316,6 +454,7 @@ export class VisionEngine {
 
   process(input: VisionInput): VisionOutput {
     const t0 = now();
+    this.lastFrameId = input.frameId;
     if (input.width !== this.width || input.height !== this.height) {
       throw new Error(
         `VisionEngine: frame size ${input.width}x${input.height} does not match engine ${this.width}x${this.height}`,
@@ -452,7 +591,7 @@ export class VisionEngine {
     this.timing.ransac = t3 - t2;
     this.timing.detect = t4 - t3;
     this.timing.pose = t4b - t4;
-    this.timing.map = t4c - t4b - this.timing.reloc;
+    this.timing.map = t4c - t4b - this.timing.reloc - this.timing.ba;
     this.timing.plane = t4d - t4c;
     this.timing.total = t5 - t0;
 
@@ -471,6 +610,7 @@ export class VisionEngine {
       planePose: this.lastPlanePose,
       relocalization: this.relocStatus,
       motion: this.lastMotion,
+      bundleAdjustment: this.lastBundleAdjustment,
       worldEstablished: this.worldEstablished,
       planeRecovery: this.lastPlaneRecovery,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
@@ -499,6 +639,8 @@ export class VisionEngine {
     }
 
     this.timing.reloc = 0;
+    this.timing.ba = 0;
+    this.lastBundleAdjustment.ranThisFrame = false;
     this.relocStatus = {
       ...emptyReloc(),
       keyframes: this.relocalizer.count,
@@ -529,6 +671,7 @@ export class VisionEngine {
           this.planeTracker.reset(this.tracks);
           this.lastPlaneAnchor = null;
           this.relocalizer.reset();
+          this.lastBundleAdjustment = emptyBundleAdjustment();
           this.worldEstablished = false;
           this.relocTimeline = null;
           this.relocPreparedFrame = -1;
@@ -789,6 +932,9 @@ export class VisionEngine {
         if (this.relocalizer.shouldCreate(tracker.pose, frameId, res.inlierCount, par, tracker.sceneDepth)) {
           this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, tracker.map, tracker.sceneDepth);
           this.relocStatus.keyframes = this.relocalizer.count;
+          // Phase 7: a new view joined the keyframe set — make the keyframe
+          // poses and the landmarks they observe one consistent map.
+          if (this.config.bundleAdjustment.enabled) this.runBundleAdjustment(k, frameId);
         }
       } else if (
         this.worldEstablished
@@ -807,6 +953,7 @@ export class VisionEngine {
         this.planeTracker.reset(this.tracks);
         this.lastPlaneAnchor = null;
         this.relocalizer.reset();
+        this.lastBundleAdjustment = emptyBundleAdjustment();
         this.relocAttemptsSinceLost = 0;
         this.pendingReloc = null;
         this.relocMonitor = null;

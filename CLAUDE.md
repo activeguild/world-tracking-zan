@@ -238,7 +238,7 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 - **A/B `?freeze=1`（同日、承認済み）**: `landmarks.freezeAfterWorld`（既定 false）。World 確立後は `MapTracker.freezeTriangulation` で新規三角測量を止め、World を固定した時点の Map だけで追跡する（PnP / 分類 / 再関連付け / 枝刈りは不変。初期視野を外れると失探する）。HUD `Proc … FREEZE`。テスト 235 件（+1）: 合成の床で World 確立まで両者同一、以後 frozen は 282 のまま（`triangulation.added` 0、追跡は継続）、既定は 282 → 336
 - **実機結果（`6e4abcd`、19 本目 26.2 s、Android 8 本目、`?freeze=1`）**: freeze は動作（17 s 以降 `lm <30` 0、Keyframe 保護分のみ残る）し、凍結後は pitch −39° / +31° に傾けても戻しても **2.6–3.0 px で一定**（時間では育たない）。ただし凍結時点（14 s、PLANE_FOUND）で既に 2.40 px: 誤差は **World 確立前のスキャン 6 秒**（8 s 0.98 px TRUSTED → 11 s 1.60 → 14 s 2.40、視差 40–78 px の横移動で Map が成長）で育っていた。freeze を World 確立後にした設計の不備で初期 Map の 1 px は保存できていない。**決め手**: 11 s と 17 s は同じ視点（yaw −1〜−4 / pitch +5）・同じ Landmark 群（位置は凍結で不変）なのに誤差 1.49 → 2.34 px。差は 11 s 以降に追加された 75 点が PnP に加わったことだけ → **古い群と新しい群で最適姿勢が食い違い、PnP が妥協点を返す**（Map の群間不整合の直接証拠）。新規 Landmark は作られた直後から古い群より悪い（11 s `<30` 2.06 vs `30–150` 1.49）= 不整合は作成時に焼き込まれる。失探 1 回（FAST 23 px）→ 再局所化 `ok×1`、Cube 同位置、Vision 25–39 ms
 - **焦点距離の除外（同日、`tests/vision/FocalEstimate.test.ts`）**: 群間不整合の原因が (a) Landmark 位置 + アンカー姿勢の偏りか (b) 焦点距離の誤りかを合成で切り分け。床 + 奥の壁（非平面）を 66° で描画し、エンジンは 60 / 66 / 72° を仮定。横スライド 90 フレーム → ±25° のピッチ往復 120 フレーム。**結果: 10% の焦点距離誤りはスライド中の PnP 誤差を変えない**（0.27 / 0.30 / 0.41 px。Map が誤りを吸収する）**。傾けたときだけ +0.5 px**（1.31 / 0.81 / 1.41 px）。実機の 0.98 → 2.40 px はスライド中の成長なので (b) では説明できず、凍結 Map の傾き依存（+0.1〜0.4 px）も 10% 未満の誤りに相当 → **(a) Map の不整合**。あわせて「PnP + 焦点距離」の 7 自由度再解法を HUD 行として試作したが、仮定した f で作った Map に対しては 10% 誤っていても f_est / f ≈ 1.00（Map が整合してしまう）で検出不能と判明し、**採用せず**（パイプラインは不変、テストのみ追加）。テスト 236 件（+1）
-- **次の段階（要承認）**: Phase 7 = Keyframe 姿勢（最初の 1 枚は固定）+ 2 枚以上で観測された Landmark 位置を同時最適化する Local BA（TS 実装、Keyframe 追加時に Worker 内で実行、WorldAnchor は Map 座標のまま）。到達目標は新規 Map の 1.0–1.4 px（この端末の観測ノイズ）
+- **次の段階**: Phase 7 = Keyframe 姿勢（最初の 1 枚は固定）+ 2 枚以上で観測された Landmark 位置を同時最適化する Local BA（承認済み → 下の「Phase 7」節）。到達目標は新規 Map の 1.0–1.4 px（この端末の観測ノイズ）
 - **実機結果（`03d192d`、9 本目 35.7 s）**: 平面検出 1.5 s（`extent` は 0.5 s で誘導文は不要）、12〜36 s 失探ゼロ（`Source MMMM…`、PnP 36〜189i、MED 15〜18 px / FAST 10 px のパンでも継続）、Cube は同じ位置。Vision 15〜28 ms（45 ms が 1 回）。Keyframe 14 made / 6 out
 
 ### v15 — Keyframe の視点カバレッジ + LK 発散の分類（2026-10-08、実機確認待ち）
@@ -458,6 +458,16 @@ v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Reloca
 - **Cube の流れ対策**: 焦点距離を長辺画角 66° から算出（`processing.longSideFovDeg`、`?fov=`。従来の fx ≈ 長辺は約 53° 相当で長すぎた）。表示をポーズに同期（処理したフレームをポーズ到着時に描画、`processing.syncVideoToPose`、`?sync=0`）。One Euro を軽く（minCutoff 1.5 → 4）
 - **失探の頻発（同期表示導入後）**: 同期表示を `createImageBitmap(video)` から同期的なキャンバスのリングバッファ（`FramePresenter`、4 枚、表示解像度・長辺 1440 px 上限）に変更。iOS Safari では `createImageBitmap` が全解像度の読み戻しで数十 ms かかり、非同期コピーが溜まってメインスレッドを塞ぎ、キャプチャがフレーム落ち → LK が追えず失探していた。あわせて PnP 失敗 1 フレームで `RELOCALIZING` に落ちていた状態機械に猶予 3 フレーム（`state.mapLostFrameTolerance`。再局所化の試行自体は従来どおり 1 フレーム後から）。HUD の Vision FPS 行に `drop N`（バックエンド処理中に捨てたカメラフレーム数）
 
+### Phase 7 — Local Bundle Adjustment（2026-10-09、承認済み、実機確認待ち）
+
+19 本目までの結論（Map の群間不整合、焦点距離は除外）を受けて着手。**PnP / LK / RANSAC / 三角測量のゲート / Plane / WorldAnchor / Relocalization の検証は変更していない**。BA は Map と Keyframe 姿勢を「整える」だけで、どの Pose を採用するかの判断には関与しない。
+
+- `src/math/BundleAdjustment.ts`: `bundleAdjust(problem, opts)` — Keyframe 姿勢（固定 / 自由）と Landmark 位置を観測（正規化座標）に対して LM + Huber で同時最適化。姿勢ブロックは密（≤ 8 枚 × 6）、Landmark は Schur 補元（3×3 ブロック）で消去するので 1 反復は観測数に線形。ゲージ: 最初の固定 Keyframe（Map 原点）、スケールは正規方程式では自由（LM の減衰が零方向を抑える）とし、解いた後に「固定 Keyframe から見たゲージ Landmark 群の中央奥行き」が不変になるよう再正規化（`gaugeLandmarks` = 最初の Keyframe が観測する Landmark。走るたびに最適化対象が変わってもゲージが動かない）。`BAResult { iterations, converged, errorBefore/After, maxLandmarkShift, maxPoseShift, maxPoseRotationDeg, freeKeyframes }`
+- **エンジン統合（`VisionEngine.runBundleAdjustment`）**: Keyframe を**作成したフレーム**に同期実行（`config.bundleAdjustment.enabled`、`minKeyframes` 2）。対象 = 保存中の全 Keyframe（最初の 1 枚は固定）と、`minLandmarkObservations`（2）枚以上の Keyframe が観測する Landmark。観測は Keyframe 作成時の追跡点位置（`Keyframe.observations`）で、現状態で `maxObservationErrorPx`（10 px）を超えるものは粗大外れ値として除外。Huber `huberPx` 2、`maxIterations` 10。解いた後、Landmark 位置は Map に**その場で書き戻し**（次フレームの PnP・再局所化の事前値・平面当てはめが精錬後の Map を見る）、Keyframe 姿勢も in place。奥行きの `maxLandmarkShiftRatio`（0.2）倍を超えて動いた Landmark は拘束不足（光線に沿って滑った）として旧位置を保持（`reverted`）。`MapTracker.resetAnchors()` で Landmark 未付与の追跡点のアンカーを捨て、新規三角測量が「旧姿勢 × 新姿勢」の組にならないようにする。Map リセット / 再初期化で記録もリセット
+- **出力 / HUD**: `VisionOutput.bundleAdjustment: BundleAdjustmentOutput { runs, lastFrameId, ranThisFrame, keyframes, freeKeyframes, landmarks, observations, outliers, reverted, errorBeforePx, errorAfterPx, iterations, converged, ms, maxLandmarkShift, maxKeyframeShift, maxKeyframeRotationDeg }`（Worker プロトコル経由、`ARStats.bundleAdjustment`）。HUD TRACK 節の `Reloc` 直下に `BA ×5  kf 6+1/7 lm 412 obs 1580 (+12 out) rev 3  2.61 → 1.32px  it 7  14ms  Δlm 0.012 kf 0.004u/0.3°`（未収束または 2 px 超で橙）。`Vis` 行に `ba N`（走ったフレームのみ）。`EngineTiming.ba`。ログ `BA #n at frame …`（debug 時）。`?ba=0` で無効（HUD `Proc … noBA`）
+- テスト 242 件（+6）: `tests/math/BundleAdjustment.test.ts`（床 + 壁の 300 点 / 5 カメラ: 姿勢 1° / 2 cm・点 2% の摂動から 10.9 → 0.0000 px、自由姿勢は真値へ 1 cm / 0.2° 以内、固定 Keyframe 不動 / 1 px ノイズ + 5% の粗大外れ値で清浄観測 0.39 px / 整合済みの問題では動かない）、`tests/vision/BundleAdjustmentEngine.test.ts`（床 + 壁の合成 `tests/helpers/twoPlaneScene.ts`: Keyframe 作成ごとに実行され 6 回とも収束・失探 0・Map id 不変 / **Landmark 全点を奥行きの ±1.5% で壊すと PnP 0.51 → 2.49 px、`runBundleAdjustment` 1 回で 0.64 px に回復**（BA 内 6.06 → 0.09 px、外れ値 129 除外）/ 配置点の再投影ドリフトは BA あり中央値 0.85 / 最大 2.9 px、なし 0.67 / 3.7 px で同等）。既存 236 件（FocalEstimate は BA OFF で実行）とブラウザ 3 件合格。Node での 1 回のコスト: 7 枚 / 328 点 / 1594 観測で 16 ms
+- **実機で読むべきもの**: `BA` 行の `errorBefore → errorAfter`（実機では 2.5–3 → 1–1.5 px を期待。`errorAfter` が 2 px 超のままなら観測側の問題）、`rev` が多すぎないか（拘束不足の Landmark が多い = 視差不足）、`ms`（Android で 30–60 ms を想定。Keyframe 作成フレームだけなので 1 フレーム落ち相当）、そして本来の目的: **Cube を置いて傾けて戻したときの `PnP … px` が BA 後に下がり、Cube が傾けている間もずれないこと**。`?ba=0` との A/B で比較
+
 ### Phase 5 — 実装済み（承認待ち）
 
 - `src/vision/Keyframe.ts`: Keyframe（姿勢、画像ピラミッドのコピー、粗画像、Landmark 観測）
@@ -523,6 +533,6 @@ v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Reloca
 - iPhone Safari（Vercel プレビュー）: 床で `PLANE_FOUND` → タップで Cube 配置 → `AR_ACTIVE` を確認。Vision 30 fps / 18 ms、特徴点 263、Landmark 134 / PnP inlier 127。ユーザー確認済み: 平面検出までの挙動と Cube の大きさに違和感なし（2026-10-03）
 - 未確認: 端末を動かしたときの Cube の固定度（ドリフト / ジッタ）、Lost からの復帰の体感、Android Chrome
 
-### 未実装（Phase 6 以降）
+### 未実装（Phase 6 / 8）
 
-IMU 融合（Madgwick 等）/ Local BA / WASM SIMD 最適化。大きな視点変化からの再局所化（記述子マッチング）は対象外（§2）。
+IMU 融合（Madgwick 等）/ WASM SIMD 最適化（LK が最初の対象）。Local BA は Phase 7 として TS で実装済み（Ceres / WASM 化は性能が足りなければ）。大きな視点変化からの再局所化（記述子マッチング）は対象外（§2）。

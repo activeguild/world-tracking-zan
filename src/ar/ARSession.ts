@@ -24,6 +24,7 @@ import type {
   PoseOutput,
   RelocalizationOutput,
   MotionDiagnostics,
+  BundleAdjustmentOutput,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
 import { wallNow, type EngineTiming } from "../worker/protocol";
@@ -116,6 +117,8 @@ export interface ARStats {
   relocalization: RelocalizationOutput | null;
   /** Frame-to-frame motion level and LK diagnostics (v7). */
   motion: MotionDiagnostics | null;
+  /** Last local bundle adjustment on the current map (Phase 7); null before the first frame. */
+  bundleAdjustment: BundleAdjustmentOutput | null;
   /** World tracking established for the current map (v10): RELOCALIZING is reachable only when true. */
   worldEstablished: boolean;
   planeSearch: PlaneSearchOutput | null;
@@ -250,6 +253,7 @@ export class ARSession {
   private landmarkCount = 0;
   private relocalization: RelocalizationOutput | null = null;
   private motion: MotionDiagnostics | null = null;
+  private bundleAdjustment: BundleAdjustmentOutput | null = null;
   private worldEstablished = false;
   /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
   private debugVisualization = true;
@@ -517,6 +521,7 @@ export class ARSession {
       placedObjects: this.world.placedCount,
       relocalization: this.relocalization,
       motion: this.motion,
+      bundleAdjustment: this.bundleAdjustment,
       worldEstablished: this.worldEstablished,
       planeSearch: this.planeSearch,
       planeSearchStageMs: this.planeSearch ? performance.now() - this.planeSearchStageSinceMs : 0,
@@ -768,6 +773,15 @@ export class ARSession {
     this.landmarkCount = r.landmarkCount;
     this.relocalization = r.relocalization;
     this.motion = r.motion;
+    this.bundleAdjustment = r.bundleAdjustment;
+    if (r.bundleAdjustment.ranThisFrame && this.config.debug.log) {
+      const b = r.bundleAdjustment;
+      this.logger.info(
+        `BA #${b.runs} at frame ${b.lastFrameId}: kf ${b.keyframes} (${b.freeKeyframes} free) lm ${b.landmarks} obs ${b.observations} (+${b.outliers} out, ${b.reverted} reverted) ` +
+          `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
+          `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}°`,
+      );
+    }
     this.worldEstablished = r.worldEstablished;
     // v16 guidance: how long the plane search has been stuck at one stage
     // (e.g. `extent` for 7 s on device while the user held the phone still).

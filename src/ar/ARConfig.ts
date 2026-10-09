@@ -655,6 +655,32 @@ export interface PlaneTrackingConfig {
   liftCooldownFrames: number;
 }
 
+/**
+ * Local bundle adjustment (Phase 7, spec §37). Each time a keyframe is
+ * created, the stored keyframes' poses (the first one fixed) and the
+ * landmarks they observe in at least `minLandmarkObservations` of them are
+ * refined jointly against the keyframe observations. On device the map
+ * built from fixed per-creation poses drifted into groups that disagreed by
+ * 2–3 px (recordings 18–19); BA is the step that makes them one map.
+ */
+export interface BundleAdjustmentConfig {
+  enabled: boolean;
+  /** Run only once this many keyframes exist (the first is fixed, so 2 = one free pose). */
+  minKeyframes: number;
+  /** A landmark is refined when at least this many keyframes observe it. */
+  minLandmarkObservations: number;
+  /** Observations whose error before the solve exceeds this (px) are left out as gross outliers. */
+  maxObservationErrorPx: number;
+  /** Huber threshold on the reprojection error (px). */
+  huberPx: number;
+  maxIterations: number;
+  /**
+   * A landmark the solve moved by more than this fraction of its depth is
+   * poorly constrained (it slid along its rays); its old position is kept.
+   */
+  maxLandmarkShiftRatio: number;
+}
+
 export interface ARConfig {
   processing: ProcessingConfig;
   features: FeatureConfig;
@@ -665,6 +691,7 @@ export interface ARConfig {
   plane: PlaneConfig;
   planeTracking: PlaneTrackingConfig;
   relocalization: RelocalizationConfig;
+  bundleAdjustment: BundleAdjustmentConfig;
   world: WorldConfig;
   state: StateConfig;
   debug: DebugConfig;
@@ -913,6 +940,15 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxLiftDistanceRatio: 4,
     liftCooldownFrames: 10,
   },
+  bundleAdjustment: {
+    enabled: true,
+    minKeyframes: 2,
+    minLandmarkObservations: 2,
+    maxObservationErrorPx: 10,
+    huberPx: 2,
+    maxIterations: 10,
+    maxLandmarkShiftRatio: 0.2,
+  },
   state: {
     minTrackedForTracking: 40,
     lostBelow: 20,
@@ -946,6 +982,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     plane: { ...base.plane, ...overrides.plane },
     planeTracking: { ...base.planeTracking, ...overrides.planeTracking },
     relocalization: { ...base.relocalization, ...overrides.relocalization },
+    bundleAdjustment: { ...base.bundleAdjustment, ...overrides.bundleAdjustment },
     world: {
       ...base.world,
       ...overrides.world,
@@ -969,6 +1006,7 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     plane: { ...c.plane },
     planeTracking: { ...c.planeTracking },
     relocalization: { ...c.relocalization },
+    bundleAdjustment: { ...c.bundleAdjustment },
     world: { ...c.world, positionSmoothing: { ...c.world.positionSmoothing }, rotationSmoothing: { ...c.world.rotationSmoothing } },
     state: { ...c.state },
     debug: { ...c.debug },

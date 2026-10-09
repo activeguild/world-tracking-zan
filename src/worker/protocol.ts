@@ -10,6 +10,7 @@ import type {
   PlaneRecoveryDiagnostics,
   PlaneSearchOutput,
   PoseOutput,
+  BundleAdjustmentOutput,
   MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
@@ -66,6 +67,8 @@ export interface EngineTiming {
   map: number;
   plane: number;
   reloc: number;
+  /** Local bundle adjustment (Phase 7); 0 on frames without a run. */
+  ba: number;
   total: number;
 }
 
@@ -83,6 +86,7 @@ export interface ResultResponse {
   planePose: PlanePoseOutput | null;
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
+  bundleAdjustment: BundleAdjustmentOutput;
   worldEstablished: boolean;
   planeRecovery: PlaneRecoveryDiagnostics;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */

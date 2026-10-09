@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../../src/ar/ARConfig";
 import { approximateIntrinsics } from "../../src/camera/CameraIntrinsics";
-import type { Mat3 } from "../../src/math/Matrix";
-import { rotationAxisAngle } from "../../src/math/Pose";
 import { createRng } from "../../src/vision/OutlierRejection";
 import type { VisionInput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
-import { makeTexture, sampleBilinear } from "../helpers/synthetic";
+import { TP_FOV, TP_H, TP_W, tpGravity, tpPose, tpRender } from "../helpers/twoPlaneScene";
 
 /**
  * v16: what a wrong focal length does to the PnP error on a scene with depth
@@ -27,74 +25,9 @@ import { makeTexture, sampleBilinear } from "../helpers/synthetic";
  *    consistent reconstruction for it. Such a HUD row would be misleading,
  *    so it was not added.
  */
-const W = 640;
-const H = 480;
-const TRUE_FOV = 66;
-const K = approximateIntrinsics(W, H, TRUE_FOV);
-
-const nFloor = [0, Math.SQRT1_2, Math.SQRT1_2];
-const dFloor = 1;
-const gravity = [0, Math.SQRT1_2, Math.SQRT1_2];
-const uAxis = [1, 0, 0];
-const vAxis = [0, -Math.SQRT1_2, Math.SQRT1_2]; // floor forward direction (n × u)
-// Back wall: perpendicular to the floor, facing the camera, 1.6 m ahead of the optical-axis hit.
-const nWall = [0, Math.SQRT1_2, -Math.SQRT1_2]; // points towards the camera
-const PPM = 640;
-const TEX = 3200;
-const floorTex = makeTexture(TEX, TEX, createRng(9090), [20, 48, 120, 280]);
-const wallTex = makeTexture(TEX, TEX, createRng(4242), [16, 40, 100, 240]);
-const floorCenter = [nFloor[0] * dFloor, nFloor[1] * dFloor, nFloor[2] * dFloor];
-const wallPoint = [floorCenter[0] + 1.6 * vAxis[0], floorCenter[1] + 1.6 * vAxis[1], floorCenter[2] + 1.6 * vAxis[2]];
-const cWall = nWall[0] * wallPoint[0] + nWall[1] * wallPoint[1] + nWall[2] * wallPoint[2];
-
-interface Pose {
-  R: Mat3;
-  C: number[];
-}
-
-function hit(nn: number[], d: number, C: number[], w: number[]): number {
-  const denom = nn[0] * w[0] + nn[1] * w[1] + nn[2] * w[2];
-  if (Math.abs(denom) <= 1e-6) return -1;
-  const s = (d - (nn[0] * C[0] + nn[1] * C[1] + nn[2] * C[2])) / denom;
-  return s > 0 ? s : -1;
-}
-
-function render(p: Pose): Uint8Array {
-  const out = new Uint8Array(W * H);
-  const { R, C } = p;
-  const w = [0, 0, 0];
-  for (let y = 0; y < H; y++) {
-    const dy = (y - K.cy) / K.fy;
-    for (let x = 0; x < W; x++) {
-      const dx = (x - K.cx) / K.fx;
-      w[0] = R[0] * dx + R[3] * dy + R[6];
-      w[1] = R[1] * dx + R[4] * dy + R[7];
-      w[2] = R[2] * dx + R[5] * dy + R[8];
-      const sF = hit(nFloor, dFloor, C, w);
-      const sW = hit(nWall, cWall, C, w);
-      let value = 128;
-      if (sF > 0 && (sW <= 0 || sF <= sW)) {
-        const px = C[0] + sF * w[0] - floorCenter[0];
-        const py = C[1] + sF * w[1] - floorCenter[1];
-        const pz = C[2] + sF * w[2] - floorCenter[2];
-        const a = px * uAxis[0] + py * uAxis[1] + pz * uAxis[2];
-        const b = px * vAxis[0] + py * vAxis[1] + pz * vAxis[2];
-        value = sampleBilinear(floorTex, TEX, TEX, a * PPM + TEX / 2, b * PPM + TEX / 2, 128);
-      } else if (sW > 0) {
-        const px = C[0] + sW * w[0] - wallPoint[0];
-        const py = C[1] + sW * w[1] - wallPoint[1];
-        const pz = C[2] + sW * w[2] - wallPoint[2];
-        const a = px * uAxis[0] + py * uAxis[1] + pz * uAxis[2];
-        const b = px * nFloor[0] + py * nFloor[1] + pz * nFloor[2]; // height on the wall
-        value = sampleBilinear(wallTex, TEX, TEX, a * PPM + TEX / 2, b * PPM + TEX / 2, 128);
-      }
-      out[y * W + x] = Math.round(value);
-    }
-  }
-  return out;
-}
-
-const I: Mat3 = new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+const W = TP_W;
+const H = TP_H;
+const TRUE_FOV = TP_FOV;
 const SLIDE = 90;
 const FRAMES = 210;
 /**
@@ -103,20 +36,14 @@ const FRAMES = 210;
  * ±25° about the camera x axis from a fixed position, back to level at the
  * end.
  */
-function poseAt(f: number): Pose {
+function poseAt(f: number) {
   const s = Math.min(f, SLIDE);
   const yaw = 0.0015 * s;
   const pitch = f > SLIDE ? ((25 * Math.PI) / 180) * Math.sin(((f - SLIDE) / (FRAMES - SLIDE)) * 2 * Math.PI) : 0;
-  const ry = rotationAxisAngle([0, 1, 0], yaw);
-  const rx = rotationAxisAngle([1, 0, 0], pitch);
-  // World-from-camera = Ry · Rx; the camera matrix is its transpose.
-  const rot = new Float64Array(9);
-  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) rot[i * 3 + j] = ry[i * 3] * rx[j] + ry[i * 3 + 1] * rx[3 + j] + ry[i * 3 + 2] * rx[6 + j];
-  const R: Mat3 = new Float64Array([rot[0], rot[3], rot[6], rot[1], rot[4], rot[7], rot[2], rot[5], rot[8]]);
-  return { R: f === 0 ? I : R, C: [0.005 * s, 0.001 * s, 0.002 * s] };
+  return tpPose([0.005 * s, 0.001 * s, 0.002 * s], yaw, pitch);
 }
 const sequence: Uint8Array[] = [];
-for (let f = 0; f < FRAMES; f++) sequence.push(render(poseAt(f)));
+for (let f = 0; f < FRAMES; f++) sequence.push(tpRender(poseAt(f)));
 
 interface Run {
   fov: number;
@@ -128,11 +55,12 @@ interface Run {
 
 function run(assumedFov: number): Run {
   const k = approximateIntrinsics(W, H, assumedFov);
-  const engine = new VisionEngine(W, H, resolveConfig(), createRng(11));
+  // Bundle adjustment off: this test is about the raw map's response to the camera model.
+  const engine = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(11));
   let tracked = 0;
   let slideErr = 0, slideN = 0, tiltErr = 0, tiltN = 0;
   for (let f = 0; f < FRAMES; f++) {
-    const input: VisionInput = { frameId: f, timestamp: f * 33.3, width: W, height: H, gray: sequence[f], intrinsics: k, gravity };
+    const input: VisionInput = { frameId: f, timestamp: f * 33.3, width: W, height: H, gray: sequence[f], intrinsics: k, gravity: tpGravity };
     const mp = engine.process(input).mapPose;
     if (mp?.framesSinceTracked !== 0) continue;
     tracked++;

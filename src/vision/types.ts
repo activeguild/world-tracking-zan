@@ -360,6 +360,59 @@ export interface ReprojectionBreakdown {
   ageOldFrames: number;
 }
 
+/**
+ * Local bundle adjustment report (Phase 7): what the last run over the
+ * stored keyframes did to the map. Errors are mean keyframe-observation
+ * reprojection errors (processing pixels); shifts are map units.
+ */
+export interface BundleAdjustmentOutput {
+  /** Runs on the current map. */
+  runs: number;
+  /** Frame of the last run (-1 = none yet). */
+  lastFrameId: number;
+  /** Whether the engine ran BA in this frame. */
+  ranThisFrame: boolean;
+  keyframes: number;
+  freeKeyframes: number;
+  /** Landmarks refined (observed by ≥ minLandmarkObservations keyframes). */
+  landmarks: number;
+  observations: number;
+  /** Observations left out as gross outliers before the solve. */
+  outliers: number;
+  /** Landmarks whose refined position was discarded as poorly constrained (moved > maxLandmarkShiftRatio × depth). */
+  reverted: number;
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  ms: number;
+  maxLandmarkShift: number;
+  maxKeyframeShift: number;
+  maxKeyframeRotationDeg: number;
+}
+
+export function emptyBundleAdjustment(): BundleAdjustmentOutput {
+  return {
+    runs: 0,
+    lastFrameId: -1,
+    ranThisFrame: false,
+    keyframes: 0,
+    freeKeyframes: 0,
+    landmarks: 0,
+    observations: 0,
+    outliers: 0,
+    reverted: 0,
+    errorBeforePx: 0,
+    errorAfterPx: 0,
+    iterations: 0,
+    converged: false,
+    ms: 0,
+    maxLandmarkShift: 0,
+    maxKeyframeShift: 0,
+    maxKeyframeRotationDeg: 0,
+  };
+}
+
 export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
   return {
     centerCount: 0,
@@ -597,6 +650,8 @@ export interface VisionOutput {
   relocalization: RelocalizationOutput;
   /** Frame-to-frame motion level and LK diagnostics (v7). */
   motion: MotionDiagnostics;
+  /** Last local bundle adjustment (Phase 7); `runs` 0 before the first. */
+  bundleAdjustment: BundleAdjustmentOutput;
   /**
    * World tracking established for the current map (v10 §5–§7): a plane was
    * found and the world anchored to it. Only then does a lost map lead to
