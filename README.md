@@ -142,6 +142,7 @@ Query parameters:
 | `?hud=1` / `?hud=0` | force the initial HUD state independently of `?debug` |
 | `?smooth=1` | enable pose smoothing (off by default while the raw pose is validated) |
 | `?refine=1` | re-enable landmark depth refinement (A/B against the fixed map) |
+| `?freeze=1` | no new landmarks once the world is established (A/B: map inconsistency vs camera model; tracking is lost when the camera leaves the first view) |
 | `?walk=1`   | the placed object walks back and forth on the plane (object-motion test) |
 | `?planetrack=1` | experimental plane-relative pose instead of landmark PnP |
 

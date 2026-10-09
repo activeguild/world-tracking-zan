@@ -30,6 +30,7 @@ import "./style.css";
  *   ?dist=0.5         assumed camera→plane distance in meters (scale)
  *   ?walk=1           the placed object walks back and forth on the plane (object motion test)
  *   ?refine=1         re-enable landmark depth refinement (A/B against the fixed map, v2 §26)
+ *   ?freeze=1         no new landmarks once the world is established (A/B: map inconsistency vs camera model, v16)
  *   ?planetrack=1     experimental plane-relative pose instead of landmark PnP
  */
 const params = new URLSearchParams(location.search);
@@ -52,6 +53,7 @@ const assumedDist = Number(params.get("dist") ?? "") || undefined;
 const walk = params.get("walk") === "1";
 const planeTracking = params.get("planetrack") === "1";
 const refineLandmarks = params.get("refine") === "1";
+const freezeMap = params.get("freeze") === "1";
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -88,7 +90,7 @@ const session = new ARSession({
       ...(grabParam ? { grabber: grabParam } : {}),
     },
     planeTracking: { enabled: planeTracking },
-    landmarks: { enableLandmarkDepthRefinement: refineLandmarks },
+    landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
       ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
@@ -363,7 +365,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {

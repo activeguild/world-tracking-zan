@@ -698,6 +698,8 @@ export class VisionEngine {
 
       // v15: landmarks a stored keyframe observes survive the age prune.
       tracker.protectedLandmarkIds = this.relocalizer.count > 0 ? this.relocalizer.referencedLandmarkIds() : null;
+      // v16 A/B: keep the map the world was anchored to (no new landmarks).
+      tracker.freezeTriangulation = this.config.landmarks.freezeAfterWorld && this.worldEstablished;
       const res = tracker.update(this.tracks, frameId, k, rotationPrior, external, this.lastImageMotion);
       const sel = tracker.selection;
       this.lastPoseSource = res.tracked ? sel.source : "propagated";

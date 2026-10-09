@@ -228,6 +228,19 @@ export interface LandmarkConfig {
    */
   enableLandmarkDepthRefinement: boolean;
   /**
+   * Diagnostic A/B (v16): stop triangulating new landmarks once the world is
+   * established, so the map stays the one the world was anchored to. On
+   * Android the PnP error grew from 1.4 px (fresh map) to 2.5–3 px while
+   * staying uniform over image position, parallax, track age and landmark
+   * age: the signature of later landmarks being created from slightly
+   * drifted poses. With the map frozen, returning to the first view must
+   * give the fresh-map error if that is the cause (then bundle adjustment
+   * is the fix); if it does not, the camera model is wrong instead. The
+   * frozen map only covers the first view, so tracking is lost when the
+   * camera leaves it. `?freeze=1` in the demo; off by default.
+   */
+  freezeAfterWorld: boolean;
+  /**
    * Temporal jump gate (修正指示書 v2 §8, v4 §2–§5). Every pose candidate (map
    * PnP and plane PnP alike) is rejected (frame counted as lost, pose
    * propagated) when its camera center is more than
@@ -755,6 +768,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     lostResetFrames: 300,
     refineParallaxGrowth: 1.3,
     enableLandmarkDepthRefinement: false,
+    freezeAfterWorld: false,
     jumpRejectDepthRatio: 0.08,
     jumpRejectSpeedFactor: 3,
     jumpRejectRotationDeg: 20,

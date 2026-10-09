@@ -130,6 +130,12 @@ export class MapTracker {
   readonly map = new LandmarkMap();
   /** Landmarks exempt from the age prune (those a stored keyframe observes, v15); set by the engine each frame. */
   protectedLandmarkIds: ReadonlySet<number> | null = null;
+  /**
+   * No new landmarks this frame (the `freezeAfterWorld` A/B, set by the
+   * engine once the world exists). PnP, classification, re-association and
+   * pruning are unchanged; only the triangulation block is skipped.
+   */
+  freezeTriangulation = false;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -684,7 +690,7 @@ export class MapTracker {
     // ---- Triangulate new landmarks ----
     let created = 0;
     const tri = emptyTriangulationStats();
-    if (tracked) {
+    if (tracked && !this.freezeTriangulation) {
       const maxErr = cfg.maxTriangulationErrorPx / f;
       const minAngle = (cfg.minTriangulationAngleDeg * Math.PI) / 180;
       const minPar = cfg.triangulateMinParallaxPx;
