@@ -379,8 +379,10 @@ export interface BundleAdjustmentOutput {
   observations: number;
   /** Observations left out as gross outliers before the solve. */
   outliers: number;
-  /** Landmarks whose refined position was discarded as poorly constrained (moved > maxLandmarkShiftRatio × depth). */
-  reverted: number;
+  /** Landmarks the solve moved by more than maxLandmarkShiftRatio × depth. */
+  shifted: number;
+  /** The whole run was discarded (too many shifted landmarks); map and keyframe poses untouched. */
+  rejected: boolean;
   errorBeforePx: number;
   errorAfterPx: number;
   iterations: number;
@@ -401,7 +403,8 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     landmarks: 0,
     observations: 0,
     outliers: 0,
-    reverted: 0,
+    shifted: 0,
+    rejected: false,
     errorBeforePx: 0,
     errorAfterPx: 0,
     iterations: 0,

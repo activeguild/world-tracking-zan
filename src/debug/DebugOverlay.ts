@@ -121,7 +121,8 @@ export interface HudStats {
     landmarks: number;
     observations: number;
     outliers: number;
-    reverted: number;
+    shifted: number;
+    rejected: boolean;
     errorBeforePx: number;
     errorAfterPx: number;
     iterations: number;
@@ -541,8 +542,8 @@ export class DebugOverlay {
       rows.push(
         row(
           "BA",
-          `×${ba.runs}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.reverted ? ` rev ${ba.reverted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°`,
-          !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
+          `×${ba.runs}${ba.rejected ? " REJECTED" : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°`,
+          ba.rejected || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
         ),
       );
     }

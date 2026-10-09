@@ -48,14 +48,44 @@ export interface BAProblem {
    * changes from run to run.
    */
   gaugeLandmarks?: ArrayLike<number>;
+  /**
+   * Weak priors that anchor the poorly constrained directions (keyframes
+   * related by little translation leave a landmark's depth almost free, and
+   * the solve would otherwise slide it along its rays and drag the poses
+   * with it). A landmark that moves `landmarkPriorSigma[i]` map units from
+   * its start, or a free pose that moves `posePriorTranslationSigma` /
+   * rotates `posePriorRotationSigma` radians, costs as much as one
+   * observation off by `opts.huber`. 0 / undefined = no prior.
+   */
+  landmarkPriorSigma?: Float64Array;
+  posePriorTranslationSigma?: number;
+  posePriorRotationSigma?: number;
 }
 
 export interface BAOptions {
-  /** Huber threshold (normalized coordinates). */
+  /** Huber threshold (normalized coordinates); also the unit the priors are scaled to. */
   huber: number;
   maxIterations: number;
   /** Stop when the parameter update norm is below this. */
   epsilon: number;
+}
+
+/** Rotation vector of R · R0ᵀ (small-angle log map; exact axis, exact angle). */
+function rotationVectorBetween(r: Mat3, r0: Mat3, out: Float64Array): void {
+  // d = R R0ᵀ
+  const d = new Float64Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) d[i * 3 + j] = r[i * 3] * r0[j * 3] + r[i * 3 + 1] * r0[j * 3 + 1] + r[i * 3 + 2] * r0[j * 3 + 2];
+  const tr = d[0] + d[4] + d[8];
+  const angle = Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2)));
+  const ax = d[7] - d[5], ay = d[2] - d[6], az = d[3] - d[1];
+  const n = Math.hypot(ax, ay, az);
+  if (angle < 1e-9 || n < 1e-12) {
+    out[0] = out[1] = out[2] = 0;
+    return;
+  }
+  out[0] = (ax / n) * angle;
+  out[1] = (ay / n) * angle;
+  out[2] = (az / n) * angle;
 }
 
 export interface BAResult {
@@ -99,6 +129,55 @@ export function bundleError(problem: BAProblem, poses: RigidTransform[] = proble
     n++;
   }
   return n ? sum / n : 0;
+}
+
+/** Prior weights in units of (observation σ = huber)², see `BAProblem`. */
+function priorWeights(problem: BAProblem, huber: number): { lm: Float64Array | null; wt: number; ww: number } {
+  const lm = problem.landmarkPriorSigma ? new Float64Array(problem.landmarkCount) : null;
+  if (lm && problem.landmarkPriorSigma) {
+    for (let i = 0; i < problem.landmarkCount; i++) {
+      const s = problem.landmarkPriorSigma[i];
+      lm[i] = s > 0 ? (huber / s) ** 2 : 0;
+    }
+  }
+  const st = problem.posePriorTranslationSigma ?? 0;
+  const sw = problem.posePriorRotationSigma ?? 0;
+  return { lm, wt: st > 0 ? (huber / st) ** 2 : 0, ww: sw > 0 ? (huber / sw) ** 2 : 0 };
+}
+
+function priorCost(
+  problem: BAProblem,
+  poses: RigidTransform[],
+  landmarks: Float64Array,
+  startPoses: RigidTransform[],
+  startLandmarks: Float64Array,
+  w: { lm: Float64Array | null; wt: number; ww: number },
+  rv: Float64Array,
+): number {
+  let cost = 0;
+  if (w.lm) {
+    for (let i = 0; i < problem.landmarkCount; i++) {
+      if (w.lm[i] <= 0) continue;
+      const dx = landmarks[i * 3] - startLandmarks[i * 3];
+      const dy = landmarks[i * 3 + 1] - startLandmarks[i * 3 + 1];
+      const dz = landmarks[i * 3 + 2] - startLandmarks[i * 3 + 2];
+      cost += w.lm[i] * (dx * dx + dy * dy + dz * dz);
+    }
+  }
+  if (w.wt > 0 || w.ww > 0) {
+    for (let k = 0; k < poses.length; k++) {
+      if (problem.keyframes[k].fixed) continue;
+      if (w.wt > 0) {
+        const t = poses[k].translation, t0 = startPoses[k].translation;
+        cost += w.wt * ((t[0] - t0[0]) ** 2 + (t[1] - t0[1]) ** 2 + (t[2] - t0[2]) ** 2);
+      }
+      if (w.ww > 0) {
+        rotationVectorBetween(poses[k].rotation, startPoses[k].rotation, rv);
+        cost += w.ww * (rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
+      }
+    }
+  }
+  return cost;
 }
 
 function totalCost(problem: BAProblem, poses: RigidTransform[], landmarks: Float64Array, huber: number): number {
@@ -166,8 +245,12 @@ export function bundleAdjust(problem: BAProblem, opts: BAOptions): BAResult {
   const ju = new Float64Array(9); // [δω(3), δt(3), δX(3)]
   const jv = new Float64Array(9);
 
+  const prior = priorWeights(problem, opts.huber);
+  const rv = new Float64Array(3);
+  const costOf = (p: RigidTransform[], l: Float64Array): number =>
+    totalCost(problem, p, l, opts.huber) + priorCost(problem, p, l, startPoses, startLandmarks, prior, rv);
   let lambda = 1e-3;
-  let cost = totalCost(problem, poses, landmarks, opts.huber);
+  let cost = costOf(poses, landmarks);
   const h2 = opts.huber * opts.huber;
   let iter = 0;
   for (; iter < opts.maxIterations; iter++) {
@@ -176,6 +259,36 @@ export function bundleAdjust(problem: BAProblem, opts: BAOptions): BAResult {
     Hll.fill(0);
     bl.fill(0);
     Hpl.fill(0);
+    // ---- Priors (Gauss–Newton terms of the quadratic penalties) ----
+    if (prior.lm) {
+      for (let i = 0; i < nL; i++) {
+        const w = prior.lm[i];
+        if (w <= 0) continue;
+        for (let a = 0; a < 3; a++) {
+          Hll[i * 9 + a * 3 + a] += w;
+          bl[i * 3 + a] += w * (landmarks[i * 3 + a] - startLandmarks[i * 3 + a]);
+        }
+      }
+    }
+    if (prior.wt > 0 || prior.ww > 0) {
+      for (let k = 0; k < kfs.length; k++) {
+        const po = poseOffset[k];
+        if (po < 0) continue;
+        if (prior.ww > 0) {
+          rotationVectorBetween(poses[k].rotation, startPoses[k].rotation, rv);
+          for (let a = 0; a < 3; a++) {
+            Hpp[(po + a) * P + po + a] += prior.ww;
+            bp[po + a] += prior.ww * rv[a];
+          }
+        }
+        if (prior.wt > 0) {
+          for (let a = 0; a < 3; a++) {
+            Hpp[(po + 3 + a) * P + po + 3 + a] += prior.wt;
+            bp[po + 3 + a] += prior.wt * (poses[k].translation[a] - startPoses[k].translation[a]);
+          }
+        }
+      }
+    }
     // ---- Build the normal equations ----
     for (let oi = 0; oi < obs.length; oi++) {
       const o = obs[oi];
@@ -301,7 +414,7 @@ export function bundleAdjust(problem: BAProblem, opts: BAOptions): BAResult {
     });
     const newLandmarks = Float64Array.from(landmarks);
     for (let i = 0; i < nL * 3; i++) newLandmarks[i] += dl[i];
-    const newCost = totalCost(problem, newPoses, newLandmarks, opts.huber);
+    const newCost = costOf(newPoses, newLandmarks);
     if (newCost < cost) {
       let upd = 0;
       for (let a = 0; a < P; a++) upd += dp[a] * dp[a];

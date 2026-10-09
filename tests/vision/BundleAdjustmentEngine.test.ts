@@ -121,6 +121,62 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(new Set(outs.filter((o) => o.mapPose).map((o) => o.mapPose!.mapFrameId)).size).toBe(1);
   });
 
+  it("rotation-dominant keyframes (recording 20): the priors keep the solve from sliding landmarks along their rays", () => {
+    // A hand-held yaw sweep with a 5 cm lever arm: keyframes every ~10° of
+    // rotation with almost no baseline between them, like the Android session
+    // where 25–60% of the landmarks moved > 20% of their depth per run.
+    const frames = 160;
+    const seq: Uint8Array[] = [];
+    const forward = [0, -Math.SQRT1_2, Math.SQRT1_2];
+    for (let f = 0; f < frames; f++) {
+      const yaw = ((35 * Math.PI) / 180) * Math.sin((f / frames) * 2 * Math.PI);
+      const arm = 0.05;
+      const C = [arm * Math.sin(yaw) * forward[2], 0, arm * (1 - Math.cos(yaw)) * 0.5 + 0.001 * f];
+      seq.push(tpRender(tpPose(C, yaw, 0)));
+    }
+    const run = (priors: boolean) => {
+      const engine = new VisionEngine(
+        W,
+        H,
+        resolveConfig(
+          priors
+            ? {}
+            : { bundleAdjustment: { landmarkPriorDepthRatio: 0, posePriorTranslationDepthRatio: 0, posePriorRotationDeg: 0, maxShiftedFraction: 1 } },
+        ),
+        createRng(5),
+      );
+      let runs = 0, shifted = 0, landmarks = 0, rejected = 0, maxKfShift = 0;
+      let errSum = 0, errN = 0;
+      for (let f = 0; f < frames; f++) {
+        const o = engine.process({ frameId: f, timestamp: f * 33.3, width: W, height: H, gray: seq[f], intrinsics: TP_K, gravity: tpGravity });
+        const ba = o.bundleAdjustment;
+        if (ba.ranThisFrame) {
+          runs++;
+          shifted += ba.shifted;
+          landmarks += ba.landmarks;
+          if (ba.rejected) rejected++;
+          maxKfShift = Math.max(maxKfShift, ba.maxKeyframeShift);
+        }
+        if (f > frames / 2 && o.mapPose?.framesSinceTracked === 0) {
+          errSum += o.mapPose.meanReprojectionErrorPx;
+          errN++;
+        }
+      }
+      return { runs, shiftedFraction: landmarks ? shifted / landmarks : 0, rejected, maxKfShift, pnpErr: errSum / Math.max(1, errN) };
+    };
+    const withPriors = run(true);
+    const without = run(false);
+    console.log(
+      `[ba-engine] rotation sweep: with priors runs ${withPriors.runs} shifted ${(withPriors.shiftedFraction * 100).toFixed(1)}% rejected ${withPriors.rejected} kf shift max ${withPriors.maxKfShift.toFixed(3)} u PnP ${withPriors.pnpErr.toFixed(2)} px | without priors shifted ${(without.shiftedFraction * 100).toFixed(1)}% kf shift max ${without.maxKfShift.toFixed(3)} u PnP ${without.pnpErr.toFixed(2)} px`,
+    );
+    expect(withPriors.runs).toBeGreaterThanOrEqual(2);
+    expect(withPriors.shiftedFraction).toBeLessThan(0.05);
+    expect(withPriors.rejected).toBe(0);
+    expect(withPriors.pnpErr).toBeLessThan(1.0);
+    // The unregularized solve lets more landmarks slide on this motion.
+    expect(without.shiftedFraction).toBeGreaterThanOrEqual(withPriors.shiftedFraction);
+  });
+
   it("a placed world point stays on its true floor pixel through the motion, with BA at least as well as without", () => {
     const drift = (enabled: boolean): { median: number; max: number } => {
       const engine = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled } }), createRng(5));

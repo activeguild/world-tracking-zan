@@ -18,9 +18,14 @@ new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 2 of them)
   first keyframe fixed (map origin), other poses + landmark positions free
   Levenberg–Marquardt, Huber 2 px, gross outliers (> 10 px) left out,
   landmarks eliminated with the Schur complement (dense ≤ 8×6 pose block)
+  weak priors: a landmark moving 10% of its depth / a keyframe moving 5% of
+    the median depth or 3° costs like one observation off by 2 px
+    (keyframes made by rotation alone leave depths nearly free otherwise)
   scale re-normalized to the median depth of the first keyframe's landmarks
-  → landmark positions and keyframe poses updated in place (next PnP,
-    relocalization priors and plane fit see the refined map)
+  → the whole run is rejected when > 10% of the landmarks moved > 20% of
+    their depth (never a partial write-back: that splits the map in two)
+  → otherwise landmark positions and keyframe poses updated in place (next
+    PnP, relocalization priors and plane fit see the refined map)
   → track anchors reset (new triangulations use refined poses only)
 ```
 

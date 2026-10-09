@@ -374,35 +374,46 @@ export class VisionEngine {
     // landmarks that keyframe observes (a stable set across runs).
     const gaugeLandmarks: number[] = [];
     for (const o of observations) if (o.keyframe === 0) gaugeLandmarks.push(o.landmark);
+    // Depth of every landmark in the first keyframe: the priors and the shift
+    // check are relative to it.
+    const r0 = kfs[0].pose.rotation, t0k = kfs[0].pose.translation;
+    const depths = new Float64Array(ids.length);
+    for (let i = 0; i < ids.length; i++) depths[i] = Math.abs(r0[6] * positions[i * 3] + r0[7] * positions[i * 3 + 1] + r0[8] * positions[i * 3 + 2] + t0k[2]);
+    const sortedDepths = Float64Array.from(depths).sort();
+    const medianDepth = sortedDepths.length ? sortedDepths[sortedDepths.length >> 1] : 0;
+    const landmarkPriorSigma = cfg.landmarkPriorDepthRatio > 0 ? depths.map((d) => cfg.landmarkPriorDepthRatio * Math.max(d, 1e-6)) : undefined;
     const problem = {
       keyframes: kfs.map((kf, i) => ({ pose: kf.pose, fixed: i === 0 })),
       landmarks: positions,
       landmarkCount: ids.length,
       observations,
       gaugeLandmarks,
+      landmarkPriorSigma,
+      posePriorTranslationSigma: cfg.posePriorTranslationDepthRatio > 0 ? cfg.posePriorTranslationDepthRatio * medianDepth : 0,
+      posePriorRotationSigma: cfg.posePriorRotationDeg > 0 ? (cfg.posePriorRotationDeg * Math.PI) / 180 : 0,
     };
+    // Keyframe poses are refined in place; keep a copy to restore on rejection.
+    const savedPoses = kfs.map((kf) => ({ rotation: Float64Array.from(kf.pose.rotation), translation: Float64Array.from(kf.pose.translation) }));
     const res = bundleAdjust(problem, { huber: cfg.huberPx / f, maxIterations: cfg.maxIterations, epsilon: 1e-7 });
-    // Write the refined landmarks back (keyframe poses were refined in place).
-    // A landmark that slid far along its rays is poorly constrained: keep it.
-    const r0 = kfs[0].pose.rotation, t0k = kfs[0].pose.translation;
-    let reverted = 0;
+    // Whole-run sanity check: landmarks that slid far along their rays.
+    let shifted = 0;
     let maxShift = 0;
     for (let i = 0; i < ids.length; i++) {
-      const lm = map.get(ids[i])!;
-      const p = lm.position;
-      const nx = positions[i * 3], ny = positions[i * 3 + 1], nz = positions[i * 3 + 2];
-      const shift = Math.hypot(nx - p[0], ny - p[1], nz - p[2]);
-      const depth = Math.abs(r0[6] * p[0] + r0[7] * p[1] + r0[8] * p[2] + t0k[2]);
-      if (shift > cfg.maxLandmarkShiftRatio * Math.max(depth, 1e-6)) {
-        reverted++;
-        continue;
-      }
+      const p = map.get(ids[i])!.position;
+      const shift = Math.hypot(positions[i * 3] - p[0], positions[i * 3 + 1] - p[1], positions[i * 3 + 2] - p[2]);
       maxShift = Math.max(maxShift, shift);
-      p[0] = nx;
-      p[1] = ny;
-      p[2] = nz;
+      if (shift > cfg.maxLandmarkShiftRatio * Math.max(depths[i], 1e-6)) shifted++;
     }
-    this.mapTracker.resetAnchors(this.tracks);
+    const rejected = shifted > cfg.maxShiftedFraction * ids.length;
+    if (rejected) {
+      for (let i = 0; i < kfs.length; i++) {
+        kfs[i].pose.rotation.set(savedPoses[i].rotation);
+        kfs[i].pose.translation.set(savedPoses[i].translation);
+      }
+    } else {
+      for (let i = 0; i < ids.length; i++) map.get(ids[i])!.position.set(positions.subarray(i * 3, i * 3 + 3));
+      this.mapTracker.resetAnchors(this.tracks);
+    }
     const ms = now() - t0;
     this.timing.ba += ms;
     const prev = this.lastBundleAdjustment;
@@ -415,7 +426,8 @@ export class VisionEngine {
       landmarks: ids.length,
       observations: observations.length,
       outliers,
-      reverted,
+      shifted,
+      rejected,
       errorBeforePx: res.errorBefore * f,
       errorAfterPx: res.errorAfter * f,
       iterations: res.iterations,

@@ -675,10 +675,26 @@ export interface BundleAdjustmentConfig {
   huberPx: number;
   maxIterations: number;
   /**
-   * A landmark the solve moved by more than this fraction of its depth is
-   * poorly constrained (it slid along its rays); its old position is kept.
+   * Weak priors (v17, recording 20): keyframes made mostly by rotation leave
+   * landmark depths nearly free, and the solve slid 25–60% of the landmarks
+   * by more than 20% of their depth and dragged the poses along. A landmark
+   * moving this fraction of its depth from its start costs as much as one
+   * observation off by `huberPx`; likewise a free keyframe moving
+   * `posePriorTranslationDepthRatio` × median depth or rotating
+   * `posePriorRotationDeg`. 0 disables the prior.
+   */
+  landmarkPriorDepthRatio: number;
+  posePriorTranslationDepthRatio: number;
+  posePriorRotationDeg: number;
+  /**
+   * Sanity check on the whole solve: a landmark moved by more than this
+   * fraction of its depth counts as "shifted"; when more than
+   * `maxShiftedFraction` of the landmarks shifted, the run is rejected and
+   * the map and keyframe poses are left untouched (a partial write-back
+   * would split the map into two inconsistent groups).
    */
   maxLandmarkShiftRatio: number;
+  maxShiftedFraction: number;
 }
 
 export interface ARConfig {
@@ -946,8 +962,12 @@ export const DEFAULT_CONFIG: ARConfig = {
     minLandmarkObservations: 2,
     maxObservationErrorPx: 10,
     huberPx: 2,
-    maxIterations: 10,
+    maxIterations: 15,
+    landmarkPriorDepthRatio: 0.1,
+    posePriorTranslationDepthRatio: 0.05,
+    posePriorRotationDeg: 3,
     maxLandmarkShiftRatio: 0.2,
+    maxShiftedFraction: 0.1,
   },
   state: {
     minTrackedForTracking: 40,
