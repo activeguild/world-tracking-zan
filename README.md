@@ -17,6 +17,10 @@ implemented**; Phase 6 (IMU) and Phase 8 (WASM / SIMD) are not started.
 new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 1 of them)
   first keyframe fixed (map origin), other poses + landmark positions free
   Levenberg–Marquardt, Huber 2 px, gross outliers (> 10 px) left out,
+  Jacobian from `src/math/Reprojection.ts` (shared with the PnP; the
+  derivative of the update actually applied, R ← exp(δω) R, t ← t + δt,
+  so ∂X_cam/∂δω = −[R X]×; checked against finite differences in
+  `tests/math/ReprojectionJacobian.test.ts`),
   landmarks eliminated with the Schur complement (dense ≤ 8×6 pose block)
   weak priors: a landmark moving 10% of its depth / a keyframe moving 5% of
     the median depth or 3° costs like one observation off by 2 px

@@ -1,5 +1,6 @@
 import { mat3Invert, mat3Multiply, solveLinearSystem, type Mat3 } from "./Matrix";
 import { rotationAxisAngle, rotationDistance, type RigidTransform } from "./Pose";
+import { reprojectionJacobian } from "./Reprojection";
 
 /**
  * Local bundle adjustment (Phase 7, spec §37): jointly refine keyframe poses
@@ -305,15 +306,9 @@ export function bundleAdjust(problem: BAProblem, opts: BAOptions): BAResult {
       const ex = u - o.x, ey = v - o.y;
       const e2 = ex * ex + ey * ey;
       const w = e2 > h2 ? opts.huber / Math.sqrt(e2) : 1;
-      // ∂π/∂Xc = [[iz, 0, -u·iz], [0, iz, -v·iz]]; ∂Xc/∂δω = -[Xc]×; ∂Xc/∂δt = I; ∂Xc/∂X = R.
-      // Pose part (as in refinePosePnP):
-      ju[0] = -u * iz * yc; ju[1] = iz * zc + u * iz * xc; ju[2] = -iz * yc;
-      ju[3] = iz; ju[4] = 0; ju[5] = -u * iz;
-      jv[0] = -iz * zc - v * iz * yc; jv[1] = v * iz * xc; jv[2] = iz * xc;
-      jv[3] = 0; jv[4] = iz; jv[5] = -v * iz;
-      // Landmark part: [iz, 0, -u iz] · R and [0, iz, -v iz] · R.
-      ju[6] = iz * r[0] - u * iz * r[6]; ju[7] = iz * r[1] - u * iz * r[7]; ju[8] = iz * r[2] - u * iz * r[8];
-      jv[6] = iz * r[3] - v * iz * r[6]; jv[7] = iz * r[4] - v * iz * r[7]; jv[8] = iz * r[5] - v * iz * r[8];
+      // Jacobian for the update applied below (R ← exp(δω) R, t ← t + δt,
+      // X ← X + δX): the rotation acts on R X, not on t (Reprojection.ts).
+      reprojectionJacobian(r, t, X, Y, Z, ju, jv);
       const po = poseOffset[o.keyframe];
       // Landmark block.
       for (let a = 0; a < 3; a++) {
