@@ -709,6 +709,17 @@ export interface BundleAdjustmentConfig {
    * and the placed cube hopped on screen at every keyframe. 0 disables.
    */
   minGainFraction: number;
+  /**
+   * v19 (Android recording 24): a run in which any free keyframe moved by
+   * more than this multiple of its prior σ (rotation `posePriorRotationDeg`
+   * or translation `posePriorTranslationDepthRatio` × median depth) is
+   * rejected as `pose_jump` — a diverged solve (a keyframe rotating 11°
+   * against a 3° prior) must not be written back. A keyframe that causes
+   * this `maxPoseJumpStrikes` runs in a row is left out of later solves
+   * (its observations disagree with the map). 0 disables the guard.
+   */
+  maxPoseJumpPriorRatio: number;
+  maxPoseJumpStrikes: number;
 }
 
 export interface ARConfig {
@@ -983,6 +994,8 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxLandmarkShiftRatio: 0.2,
     maxShiftedFraction: 0.1,
     minGainFraction: 0.15,
+    maxPoseJumpPriorRatio: 2,
+    maxPoseJumpStrikes: 2,
   },
   state: {
     minTrackedForTracking: 40,

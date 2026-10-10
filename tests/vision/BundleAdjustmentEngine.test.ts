@@ -320,6 +320,66 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(after).toBeLessThan(baseline + 0.4);
   });
 
+  it("v19: a solve that moves a keyframe beyond its prior is rejected as pose_jump, and a repeat offender is struck out", () => {
+    // Tight guard so that a 0.8° correction counts as a jump (prior σ 3° × 0.1 = 0.3°).
+    const engine = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled: false, maxPoseJumpPriorRatio: 0.1, maxPoseJumpStrikes: 2 } }), createRng(5));
+    const outs: VisionOutput[] = [];
+    let f = 0;
+    for (; f < 80; f++) outs.push(engine.process(input(f)));
+    const kfs = engine.keyframes;
+    expect(kfs.length).toBeGreaterThanOrEqual(3);
+    const L = kfs[kfs.length - 1];
+    // L and the landmarks that reference it are off by 0.8° / 0.4% depth, as in the
+    // propagation test: the other keyframes' observations pull L back by more than 0.3°.
+    const depth = Math.hypot(L.pose.translation[0], L.pose.translation[1], L.pose.translation[2]) + 1;
+    const dT: RigidTransform = { rotation: rotationAxisAngle([0.2, 1, 0.1], 0.014), translation: new Float64Array([0.004 * depth, -0.002 * depth, 0.002 * depth]) };
+    const tOld: RigidTransform = { rotation: Float64Array.from(L.pose.rotation), translation: Float64Array.from(L.pose.translation) };
+    const tPert = composeTransforms(dT, tOld);
+    const Cpert = composeTransforms(invertTransform(tOld), composeTransforms(invertTransform(dT), tOld));
+    for (const lm of engine.landmarkMap.values()) if (lm.refKeyframeId === L.id) lm.position.set(applyTransform(Cpert, lm.position));
+    L.pose.rotation.set(tPert.rotation);
+    L.pose.translation.set(tPert.translation);
+    const before = new Map<number, Float64Array>();
+    for (const lm of engine.landmarkMap.values()) before.set(lm.id, Float64Array.from(lm.position));
+    // Run 1: rejected, blamed on L, nothing written back.
+    expect(engine.runBundleAdjustment(TP_K)).toBe(true);
+    let ba = engine.bundleAdjustment;
+    expect(ba.rejected).toBe(true);
+    expect(ba.rejectReason).toBe("pose_jump");
+    expect(ba.jumpKeyframeId).toBe(L.id);
+    expect(ba.jumpRotationDeg).toBeGreaterThan(0.3);
+    expect(ba.excludedKeyframes).toBe(0);
+    expect((rotationDistance(L.pose.rotation, tPert.rotation) * 180) / Math.PI).toBeLessThan(1e-4);
+    for (const lm of engine.landmarkMap.values()) {
+      const p0 = before.get(lm.id)!;
+      expect(Math.hypot(lm.position[0] - p0[0], lm.position[1] - p0[1], lm.position[2] - p0[2])).toBeLessThan(1e-12);
+    }
+    expect(engine.bundleAdjustmentExcludedKeyframes.size).toBe(0);
+    // Run 2: second strike → L is struck out of later solves.
+    expect(engine.runBundleAdjustment(TP_K)).toBe(true);
+    ba = engine.bundleAdjustment;
+    expect(ba.rejectReason).toBe("pose_jump");
+    expect(ba.jumpKeyframeId).toBe(L.id);
+    expect(engine.bundleAdjustmentExcludedKeyframes.has(L.id)).toBe(true);
+    // Run 3: solved without L — accepted or dropped for no gain, but no pose jump; L's pose untouched.
+    expect(engine.runBundleAdjustment(TP_K)).toBe(true);
+    ba = engine.bundleAdjustment;
+    expect(ba.rejectReason).not.toBe("pose_jump");
+    expect(ba.keyframes).toBe(kfs.length - 1);
+    expect(ba.excludedKeyframes).toBe(1);
+    expect((rotationDistance(L.pose.rotation, tPert.rotation) * 180) / Math.PI).toBeLessThan(1e-4);
+    console.log(`[ba-engine] v19 pose jump: KF${ba.jumpKeyframeId === -1 ? L.id : ba.jumpKeyframeId} struck out after 2 strikes; run 3 ${ba.rejected ? `rejected (${ba.rejectReason})` : "accepted"} over ${ba.keyframes} keyframes`);
+    // With the default ratio (2 × prior) the same perturbation is not a jump.
+    const relaxed = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(5));
+    for (let g = 0; g < 80; g++) relaxed.process(input(g));
+    const L2 = relaxed.keyframes[relaxed.keyframes.length - 1];
+    const t2 = composeTransforms(dT, { rotation: Float64Array.from(L2.pose.rotation), translation: Float64Array.from(L2.pose.translation) });
+    L2.pose.rotation.set(t2.rotation);
+    L2.pose.translation.set(t2.translation);
+    expect(relaxed.runBundleAdjustment(TP_K)).toBe(true);
+    expect(relaxed.bundleAdjustment.rejectReason).not.toBe("pose_jump");
+  });
+
   it("v18: the world anchor follows the BA correction, so a placed point does not hop on screen when the map moves", () => {
     const engine = new VisionEngine(W, H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(5));
     const outs: VisionOutput[] = [];

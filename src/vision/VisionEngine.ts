@@ -47,7 +47,7 @@ import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../ma
 import { type BAObservation, bundleAdjust } from "../math/BundleAdjustment";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { transpose3 } from "../math/Decomposition";
-import { applyTransform, composeTransforms, invertTransform, rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
+import { applyTransform, cameraCenterOf, composeTransforms, invertTransform, rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
 
 /**
  * Phase 1 vision pipeline (spec §55):
@@ -178,6 +178,20 @@ export class VisionEngine {
 
   /** Last local bundle adjustment on the current map (Phase 7). */
   private lastBundleAdjustment: BundleAdjustmentOutput = emptyBundleAdjustment();
+  /** v19: consecutive pose-jump rejections blamed on a keyframe, and the keyframes struck out of the solve. */
+  private readonly baStrikes = new Map<number, number>();
+  private readonly baExcludedKeyframes = new Set<number>();
+
+  private resetBundleAdjustmentState(): void {
+    this.lastBundleAdjustment = emptyBundleAdjustment();
+    this.baStrikes.clear();
+    this.baExcludedKeyframes.clear();
+  }
+
+  /** Keyframe ids currently left out of the bundle adjustment (tests / diagnostics). */
+  get bundleAdjustmentExcludedKeyframes(): ReadonlySet<number> {
+    return this.baExcludedKeyframes;
+  }
   private lastFrameId = -1;
 
   /** Timing breakdown of the last frame (ms). */
@@ -233,6 +247,11 @@ export class VisionEngine {
   /** The stored keyframes themselves (tests / diagnostics; poses are live, Phase 7). */
   get keyframes(): readonly Keyframe[] {
     return this.relocalizer.keyframes;
+  }
+
+  /** The live tracks (tests / diagnostics). */
+  tracksForTests(): readonly Track[] {
+    return this.tracks;
   }
 
   /** The canonical map-frame pose as the tracker holds it now (tests; after a manual BA it is already rebased). */
@@ -323,7 +342,7 @@ export class VisionEngine {
     this.relocPreparedFrame = -1;
     this.prevFramesSinceTracked = 0;
     this.worldEstablished = false;
-    this.lastBundleAdjustment = emptyBundleAdjustment();
+    this.resetBundleAdjustmentState();
   }
 
   /** Last local bundle adjustment report (Phase 7). */
@@ -344,7 +363,12 @@ export class VisionEngine {
    */
   runBundleAdjustment(k: CameraIntrinsics, frameId = this.lastFrameId): boolean {
     const cfg = this.config.bundleAdjustment;
-    const kfs = this.relocalizer.keyframes;
+    // Keyframes struck out after repeated pose jumps (v19) stay stored for
+    // relocalization but do not take part in the solve; the first keyframe
+    // (the gauge) is never excluded.
+    const stored = this.relocalizer.keyframes;
+    const kfs = stored.filter((kf, i) => i === 0 || !this.baExcludedKeyframes.has(kf.id));
+    const excludedKeyframes = stored.length - kfs.length;
     const map = this.mapTracker.map;
     if (kfs.length < Math.max(2, cfg.minKeyframes)) return false;
     const t0 = now();
@@ -425,10 +449,41 @@ export class VisionEngine {
       maxShift = Math.max(maxShift, shift);
       if (shift > cfg.maxLandmarkShiftRatio * Math.max(depths[i], 1e-6)) shifted++;
     }
+    // v19: the keyframe that moved the most, measured against its prior.
+    let jumpKeyframeId = -1, jumpRotationDeg = 0, jumpShift = 0, jumpRatio = 0;
+    const sigmaRot = (cfg.posePriorRotationDeg * Math.PI) / 180;
+    const sigmaTrans = cfg.posePriorTranslationDepthRatio * medianDepth;
+    for (let i = 1; i < kfs.length; i++) {
+      const rot = rotationDistance(savedPoses[i].rotation, kfs[i].pose.rotation);
+      const c0 = cameraCenterOf(savedPoses[i]), c1 = cameraCenterOf(kfs[i].pose);
+      const shift = Math.hypot(c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]);
+      const ratio = Math.max(sigmaRot > 0 ? rot / sigmaRot : 0, sigmaTrans > 0 ? shift / sigmaTrans : 0);
+      if (ratio > jumpRatio) {
+        jumpRatio = ratio;
+        jumpKeyframeId = kfs[i].id;
+        jumpRotationDeg = (rot * 180) / Math.PI;
+        jumpShift = shift;
+      }
+    }
     let rejectReason: BundleAdjustmentRejectReason = "none";
     if (shifted > cfg.maxShiftedFraction * ids.length) rejectReason = "shift";
+    else if (cfg.maxPoseJumpPriorRatio > 0 && jumpRatio > cfg.maxPoseJumpPriorRatio) rejectReason = "pose_jump";
     else if (cfg.minGainFraction > 0 && res.errorAfter > res.errorBefore * (1 - cfg.minGainFraction)) rejectReason = "no_gain";
     const rejected = rejectReason !== "none";
+    // Strikes: a keyframe that keeps throwing the solve is left out next time.
+    if (rejectReason === "pose_jump" && jumpKeyframeId >= 0) {
+      const n = (this.baStrikes.get(jumpKeyframeId) ?? 0) + 1;
+      this.baStrikes.clear();
+      this.baStrikes.set(jumpKeyframeId, n);
+      if (cfg.maxPoseJumpStrikes > 0 && n >= cfg.maxPoseJumpStrikes) this.baExcludedKeyframes.add(jumpKeyframeId);
+    } else {
+      this.baStrikes.clear();
+    }
+    if (rejectReason !== "pose_jump") {
+      jumpKeyframeId = -1;
+      jumpRotationDeg = 0;
+      jumpShift = 0;
+    }
     let propagated = 0;
     let untouched = 0;
     const correction: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
@@ -497,6 +552,10 @@ export class VisionEngine {
       shifted,
       rejected,
       rejectReason,
+      jumpKeyframeId,
+      jumpRotationDeg,
+      jumpShift,
+      excludedKeyframes: rejectReason === "pose_jump" ? stored.filter((kf, i) => i > 0 && this.baExcludedKeyframes.has(kf.id)).length : excludedKeyframes,
       propagated,
       untouched,
       correctionRotation: correction.rotation,
@@ -756,7 +815,7 @@ export class VisionEngine {
           this.planeTracker.reset(this.tracks);
           this.lastPlaneAnchor = null;
           this.relocalizer.reset();
-          this.lastBundleAdjustment = emptyBundleAdjustment();
+          this.resetBundleAdjustmentState();
           this.worldEstablished = false;
           this.relocTimeline = null;
           this.relocPreparedFrame = -1;
@@ -1042,7 +1101,7 @@ export class VisionEngine {
         this.planeTracker.reset(this.tracks);
         this.lastPlaneAnchor = null;
         this.relocalizer.reset();
-        this.lastBundleAdjustment = emptyBundleAdjustment();
+        this.resetBundleAdjustmentState();
         this.relocAttemptsSinceLost = 0;
         this.pendingReloc = null;
         this.relocMonitor = null;
@@ -1139,6 +1198,7 @@ export class VisionEngine {
         near.x = o.x;
         near.y = o.y;
         near.landmarkId = o.landmarkId;
+        near.linkSource = "reloc";
         near.anchorFrame = frameId;
         near.anchorX = o.x;
         near.anchorY = o.y;
@@ -1161,6 +1221,7 @@ export class VisionEngine {
         refY: o.y,
         refFrame: -1,
         landmarkId: o.landmarkId,
+        linkSource: "reloc",
         anchorFrame: frameId,
         anchorX: o.x,
         anchorY: o.y,

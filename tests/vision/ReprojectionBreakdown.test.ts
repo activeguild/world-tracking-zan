@@ -184,4 +184,51 @@ describe("PnP reprojection breakdown (v16 diagnostics)", () => {
     if (b.youngTrackCount && b.oldTrackCount) expect(b.oldTrackErrorPx / Math.max(1e-6, b.youngTrackErrorPx)).toBeLessThan(1.5);
     if (b.youngLandmarkCount && b.oldLandmarkCount) expect(b.oldLandmarkErrorPx / Math.max(1e-6, b.youngLandmarkErrorPx)).toBeLessThan(1.5);
   });
+
+  it("v19: splits the same inliers by how the track got its landmark (native / relink / reloc)", () => {
+    const engine = new VisionEngine(W, H, resolveConfig(), createRng(9));
+    let relinkSeen = 0;
+    let last: ReprojectionBreakdown | null = null;
+    let cut = 0;
+    for (let f = 0; f < 200; f++) {
+      const input: VisionInput = { frameId: f, timestamp: f * 33.3, width: W, height: H, gray: render(Math.min(f, FRAMES - 1), 0), intrinsics: K, gravity };
+      const o = engine.process(input);
+      if (f === 100) {
+        // Tracks never die on the synthetic floor, so cut every other landmark link: the
+        // re-association of the next frames re-links the same corners (within 4 px).
+        for (const t of engine.tracksForTests()) {
+          if (t.landmarkId < 0 || cut % 2 === 1) {
+            if (t.landmarkId >= 0) cut++;
+            continue;
+          }
+          const lm = engine.landmarkMap.get(t.landmarkId)!;
+          lm.trackId = -1;
+          t.landmarkId = -1;
+          // Like a re-detected corner: no anchor, so the track cannot triangulate a duplicate.
+          t.anchorFrame = -1;
+          t.anchorPose = null;
+          cut++;
+        }
+      }
+      if (!o.mapPose || o.mapPose.framesSinceTracked !== 0) continue;
+      const b = o.mapPose.reprojection;
+      // The split covers exactly the PnP inlier set, every frame.
+      expect(b.nativeCount + b.relinkCount + b.relocCount).toBe(b.centerCount + b.edgeCount);
+      if (b.relinkCount) relinkSeen++;
+      if (f < 100) expect(b.relinkCount).toBe(0);
+      last = b;
+    }
+    expect(last).not.toBeNull();
+    expect(cut).toBeGreaterThan(40);
+    // Every landmark-linked track carries its link source.
+    for (const t of engine.tracksForTests()) if (t.landmarkId >= 0) expect(t.linkSource === "native" || t.linkSource === "relink" || t.linkSource === "reloc").toBe(true);
+    // The cut links come back as relinks; on a consistent synthetic floor the re-linked
+    // group (same corners) is not worse than the native one.
+    expect(relinkSeen).toBeGreaterThan(50);
+    expect(last!.relinkCount).toBeGreaterThan(10);
+    const b = last!;
+    console.log(`[reproj] link source: native ${b.nativeErrorPx.toFixed(2)} (${b.nativeCount})  relink ${b.relinkErrorPx.toFixed(2)} (${b.relinkCount})  reloc ${b.relocErrorPx.toFixed(2)} (${b.relocCount}); frames with relinks ${relinkSeen}`);
+    if (b.nativeCount && b.relinkCount) expect(b.relinkErrorPx / Math.max(1e-6, b.nativeErrorPx)).toBeLessThan(1.5);
+    expect(b.relocCount).toBe(0);
+  });
 });

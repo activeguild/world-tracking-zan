@@ -17,6 +17,8 @@ export interface Corner {
  *
  * Positions are in level-0 processing-image pixels.
  */
+export type TrackLinkSource = "native" | "relink" | "reloc";
+
 export interface Track {
   id: number;
   /** Position in the current frame. */
@@ -44,6 +46,16 @@ export interface Track {
   refFrame: number;
   /** Landmark observed by this track (Phase 3), -1 when none. */
   landmarkId: number;
+  /**
+   * How the track came to observe its landmark (v19 diagnostics): `native`
+   * = the landmark was triangulated from this very track, `relink` =
+   * re-association of a re-detected corner to an existing landmark (within
+   * `reassociateRadiusPx`), `reloc` = a keyframe observation matched by the
+   * relocalizer. Undefined counts as native. A re-linked track that sits on
+   * a neighbouring corner carries a systematic error for as long as it
+   * lives; this splits that from map error.
+   */
+  linkSource?: TrackLinkSource;
   /**
    * Anchor observation for triangulation: the map-frame camera pose and the
    * pixel position at the frame where the track started being watched by
@@ -371,10 +383,24 @@ export interface ReprojectionBreakdown {
   propagatedErrorPx: number;
   untouchedCount: number;
   untouchedErrorPx: number;
+  /**
+   * The same inliers by how their track got its landmark (v19,
+   * `Track.linkSource`): triangulated from the track itself (`native`),
+   * re-associated after a re-detection (`relink`), or injected by the
+   * relocalizer (`reloc`). On Android the error stepped up for good after
+   * a fast move with many re-detections and relinks; a relink group
+   * clearly worse than the native one is association error, not map error.
+   */
+  nativeCount: number;
+  nativeErrorPx: number;
+  relinkCount: number;
+  relinkErrorPx: number;
+  relocCount: number;
+  relocErrorPx: number;
 }
 
-/** Why a bundle adjustment run was discarded (v18). */
-export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain";
+/** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
+export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain" | "pose_jump";
 
 /**
  * Local bundle adjustment report (Phase 7): what the last run over the
@@ -399,8 +425,18 @@ export interface BundleAdjustmentOutput {
   shifted: number;
   /** The whole run was discarded (`rejectReason`); map and keyframe poses untouched. */
   rejected: boolean;
-  /** `shift` = too many shifted landmarks, `no_gain` = the error did not drop by `minGainFraction` (v18). */
+  /**
+   * `shift` = too many shifted landmarks, `no_gain` = the error did not drop
+   * by `minGainFraction` (v18), `pose_jump` = a keyframe moved beyond
+   * `maxPoseJumpPriorRatio` × its prior (v19).
+   */
   rejectReason: BundleAdjustmentRejectReason;
+  /** v19: the keyframe that moved the most in a `pose_jump` rejection (-1 otherwise) and how far. */
+  jumpKeyframeId: number;
+  jumpRotationDeg: number;
+  jumpShift: number;
+  /** v19: keyframes left out of the solve after repeated pose jumps (count among the stored ones). */
+  excludedKeyframes: number;
   /**
    * v18: landmarks outside the solve that were moved with their reference
    * keyframe's correction, and landmarks left where they were (reference
@@ -440,6 +476,10 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     shifted: 0,
     rejected: false,
     rejectReason: "none",
+    jumpKeyframeId: -1,
+    jumpRotationDeg: 0,
+    jumpShift: 0,
+    excludedKeyframes: 0,
     propagated: 0,
     untouched: 0,
     correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
@@ -494,6 +534,12 @@ export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
     propagatedErrorPx: 0,
     untouchedCount: 0,
     untouchedErrorPx: 0,
+    nativeCount: 0,
+    nativeErrorPx: 0,
+    relinkCount: 0,
+    relinkErrorPx: 0,
+    relocCount: 0,
+    relocErrorPx: 0,
   };
 }
 

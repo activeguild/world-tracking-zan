@@ -124,6 +124,10 @@ export interface HudStats {
     shifted: number;
     rejected: boolean;
     rejectReason: string;
+    jumpKeyframeId: number;
+    jumpRotationDeg: number;
+    jumpShift: number;
+    excludedKeyframes: number;
     propagated: number;
     untouched: number;
     correctionTranslation: ArrayLike<number>;
@@ -210,6 +214,12 @@ export interface HudStats {
       propagatedErrorPx: number;
       untouchedCount: number;
       untouchedErrorPx: number;
+      nativeCount: number;
+      nativeErrorPx: number;
+      relinkCount: number;
+      relinkErrorPx: number;
+      relocCount: number;
+      relocErrorPx: number;
     } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
@@ -516,6 +526,19 @@ export class DebugOverlay {
             lmOldYoung >= 1.5 ? "hud-warn" : undefined,
           ),
         );
+        // v19: by how the track got its landmark. A relink group clearly
+        // worse than the native one is association error (a re-detected
+        // corner linked to the wrong landmark), not map error.
+        if (rb.relinkCount || rb.relocCount) {
+          const ratio = rb.nativeCount && rb.relinkCount && rb.nativeErrorPx > 0 ? rb.relinkErrorPx / rb.nativeErrorPx : 0;
+          rows.push(
+            row(
+              "Link",
+              `native ${rb.nativeErrorPx.toFixed(2)}px (${rb.nativeCount})  relink ${rb.relinkErrorPx.toFixed(2)} (${rb.relinkCount})  reloc ${rb.relocErrorPx.toFixed(2)} (${rb.relocCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
+              ratio >= 1.5 ? "hud-warn" : undefined,
+            ),
+          );
+        }
         // v18: by how the last BA treated the landmark. Once a BA ran, a gap
         // between the solved group and the rest is the map split in two.
         if (rb.adjustedCount || rb.propagatedCount) {
@@ -541,8 +564,8 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
-            (ba.rejected && ba.rejectReason === "shift") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
+            (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );
       }

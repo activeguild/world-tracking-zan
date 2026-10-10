@@ -786,7 +786,7 @@ export class ARSession {
         const t = b.correctionTranslation;
         const corr = Math.hypot(t[0], t[1], t[2]);
         this.logger.info(
-          `BA #${b.runs}${b.rejected ? ` REJECTED (${b.rejectReason})` : ""} at frame ${b.lastFrameId}: kf ${b.keyframes} (${b.freeKeyframes} free) lm ${b.landmarks} obs ${b.observations} (+${b.outliers} out, ${b.shifted} shifted) ` +
+          `BA #${b.runs}${b.rejected ? ` REJECTED (${b.rejectReason}${b.rejectReason === "pose_jump" ? `: KF${b.jumpKeyframeId} ${b.jumpRotationDeg.toFixed(1)}° / ${b.jumpShift.toFixed(3)} u` : ""})` : ""} at frame ${b.lastFrameId}: kf ${b.keyframes} (${b.freeKeyframes} free${b.excludedKeyframes ? `, ${b.excludedKeyframes} excluded` : ""}) lm ${b.landmarks} obs ${b.observations} (+${b.outliers} out, ${b.shifted} shifted) ` +
             `propagated ${b.propagated} untouched ${b.untouched} ` +
             `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
             `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}° ` +

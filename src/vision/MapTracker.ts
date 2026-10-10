@@ -305,6 +305,7 @@ export class MapTracker {
       lm.anchorY = track.refY;
       lm.parallax = this.tri.parallax; // last computed; refined below
       track.landmarkId = lm.id;
+      track.linkSource = "native";
     }
     // Record each landmark's own parallax (the loop above reused the scratch).
     for (const { track, p } of created) {
@@ -755,6 +756,7 @@ export class MapTracker {
         lm.parallax = this.tri.parallax;
         lm.refKeyframeId = this.referenceKeyframeId;
         t.landmarkId = lm.id;
+        t.linkSource = "native";
         created++;
       }
     }
@@ -918,7 +920,22 @@ export class MapTracker {
         out.untouchedCount++;
         out.untouchedErrorPx += errPx;
       }
+      // By how the track got its landmark (v19): association vs map error.
+      const src = tr.linkSource ?? "native";
+      if (src === "relink") {
+        out.relinkCount++;
+        out.relinkErrorPx += errPx;
+      } else if (src === "reloc") {
+        out.relocCount++;
+        out.relocErrorPx += errPx;
+      } else {
+        out.nativeCount++;
+        out.nativeErrorPx += errPx;
+      }
     }
+    if (out.nativeCount) out.nativeErrorPx /= out.nativeCount;
+    if (out.relinkCount) out.relinkErrorPx /= out.relinkCount;
+    if (out.relocCount) out.relocErrorPx /= out.relocCount;
     if (out.adjustedCount) out.adjustedErrorPx /= out.adjustedCount;
     if (out.propagatedCount) out.propagatedErrorPx /= out.propagatedCount;
     if (out.untouchedCount) out.untouchedErrorPx /= out.untouchedCount;
@@ -1034,6 +1051,7 @@ export class MapTracker {
       }
       if (best) {
         best.landmarkId = lm.id;
+        best.linkSource = "relink";
         best.anchorFrame = -1;
         best.anchorPose = null;
         lm.trackId = best.id;

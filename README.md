@@ -47,7 +47,14 @@ synthetic floor-plus-wall scene (`tests/vision/FocalEstimate.test.ts`).
 `?ba=0` disables it for A/B; the HUD `BA` row reports each run (`REJECTED no
 gain | shift`, `lm N +P prop +U none`, `corr` = the correction applied to
 the pose and the world anchor) and the `BAlm` row splits the PnP error by
-how the last run treated each landmark (solved / carried / untouched).
+how the last run treated each landmark (solved / carried / untouched). A
+run that moves a keyframe beyond twice its prior is rejected as a pose
+jump; a keyframe that does this twice in a row is left out of later solves
+(`REJECTED pose jump KF12 8.3°/0.21u`, `kf 6+1/8 (−1 out)`). The `Link`
+row splits the PnP error by how each track got its landmark (triangulated
+from the track itself / re-associated after a re-detection / injected by
+the relocalizer): a re-linked group clearly worse than the native one is
+association error, not map error.
 
 ## Phase 5 — keyframes and relocalization
 
