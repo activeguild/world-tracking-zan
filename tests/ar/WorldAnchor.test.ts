@@ -21,6 +21,7 @@ function mapPose(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     translationPredicted: false,
     jumpRejected: false,
     reassociated: 0,
+    relink: { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0 },
     mapInlierCount: 100,
     planeInlierCount: 0,
     rejectReason: null,

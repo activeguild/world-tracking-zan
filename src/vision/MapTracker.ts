@@ -15,7 +15,41 @@ import {
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
-import { emptyReprojectionBreakdown, type PoseCandidateReport, type ReprojectionBreakdown, type Track, type TriangulationStats } from "./types";
+import {
+  emptyRelinkStats,
+  emptyReprojectionBreakdown,
+  type PoseCandidateReport,
+  type RelinkStats,
+  type ReprojectionBreakdown,
+  type Track,
+  type TriangulationStats,
+} from "./types";
+
+/** A re-association candidate handed to the keyframe check (v20). */
+export interface RelinkCandidate {
+  landmarkId: number;
+  /** Position of the unlinked track that fell inside the radius (the LK initial guess). */
+  x: number;
+  y: number;
+}
+
+export interface RelinkVerdict {
+  /** `verified` = a keyframe observation of the landmark tracks into the current frame within the radius of the track; `rejected` = it does not; `unverified` = no stored keyframe observes the landmark. */
+  status: "verified" | "rejected" | "unverified";
+  /** Keyframe-consistent position in the current frame (valid when verified). */
+  x: number;
+  y: number;
+}
+
+/**
+ * Checks re-association candidates against stored keyframe observations
+ * (implemented by the relocalizer, which owns the keyframes and their image
+ * pyramids). `radiusPx` is the largest distance the keyframe-LK position may
+ * have from the candidate track.
+ */
+export interface RelinkVerifier {
+  verify(candidates: RelinkCandidate[], pose: RigidTransform, radiusPx: number): RelinkVerdict[];
+}
 
 /**
  * SLAM-lite front end (spec §19–§20, Phase 3):
@@ -49,6 +83,8 @@ export interface MapTrackingResult {
   jumpRejected: boolean;
   /** Unlinked landmarks re-associated to tracks this frame (v3 §15). */
   reassociated: number;
+  /** What the keyframe check made of this frame's re-association candidates (v20). */
+  relink: RelinkStats;
   /** Why landmark-less tracks did / did not become landmarks this frame (v11 diagnostics). */
   triangulation: TriangulationStats;
   /** PnP inlier error by image region / landmark kind (v16 diagnostics). */
@@ -122,6 +158,7 @@ const EMPTY_RESULT: MapTrackingResult = {
   translationPredicted: false,
   jumpRejected: false,
   reassociated: 0,
+  relink: emptyRelinkStats(),
   triangulation: emptyTriangulationStats(),
   reprojection: emptyReprojectionBreakdown(),
 };
@@ -142,6 +179,18 @@ export class MapTracker {
    * reference keyframe (Phase 7 v18). -1 before the first keyframe.
    */
   referenceKeyframeId = -1;
+  /**
+   * Keyframe check of re-associations (v20, Android recording 28): a
+   * re-detected corner within `reassociateRadiusPx` of a landmark's
+   * projection is linked only after a keyframe observation of that landmark
+   * tracks into the current frame next to it, and the track is snapped to
+   * that keyframe-consistent position. Null = link by distance alone (the
+   * pre-v20 behaviour; relinks then count as `relinkRaw`).
+   */
+  relinkVerifier: RelinkVerifier | null = null;
+  /** Re-association candidates of the current frame (reset in update). */
+  private relinkStats: RelinkStats = emptyRelinkStats();
+  private relinkSnapSum = 0;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -367,6 +416,8 @@ export class MapTracker {
     const f = (k.fx + k.fy) / 2;
     const prevCenter = this.cameraCenter();
     const prevRotation: Mat3 = Float64Array.from(this._pose.rotation);
+    this.relinkStats = emptyRelinkStats();
+    this.relinkSnapSum = 0;
 
     // Drop landmark links of tracks that died (track list only has survivors)
     // and carry every landmark's image position forward: linked ones from
@@ -778,9 +829,11 @@ export class MapTracker {
     // Landmarks a stored keyframe observes are exempt from the age rule (v15).
     if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks, this.protectedLandmarkIds);
     const center = this.cameraCenter();
+    if (this.relinkStats.verified) this.relinkStats.meanSnapPx = this.relinkSnapSum / this.relinkStats.verified;
     this.lastResult = {
       tracked,
       reassociated,
+      relink: this.relinkStats,
       inlierCount,
       meanReprojectionErrorPx: meanErrPx,
       newLandmarks: created,
@@ -925,6 +978,9 @@ export class MapTracker {
       if (src === "relink") {
         out.relinkCount++;
         out.relinkErrorPx += errPx;
+      } else if (src === "relinkRaw") {
+        out.relinkRawCount++;
+        out.relinkRawErrorPx += errPx;
       } else if (src === "reloc") {
         out.relocCount++;
         out.relocErrorPx += errPx;
@@ -935,6 +991,7 @@ export class MapTracker {
     }
     if (out.nativeCount) out.nativeErrorPx /= out.nativeCount;
     if (out.relinkCount) out.relinkErrorPx /= out.relinkCount;
+    if (out.relinkRawCount) out.relinkRawErrorPx /= out.relinkRawCount;
     if (out.relocCount) out.relocErrorPx /= out.relocCount;
     if (out.adjustedCount) out.adjustedErrorPx /= out.adjustedCount;
     if (out.propagatedCount) out.propagatedErrorPx /= out.propagatedCount;
@@ -1012,7 +1069,9 @@ export class MapTracker {
     }
     if (unlinked === 0) return 0;
     const r2 = radiusPx * radiusPx;
-    let linked = 0;
+    // Phase 1: nearest unlinked track inside the radius, each track at most once.
+    const pairs: { lm: Landmark; track: Track }[] = [];
+    const taken = new Set<Track>();
     for (const lm of this.map.values()) {
       if (lm.trackId >= 0 || lm.observations < cfg.minObservationsForPose) continue;
       let u: number;
@@ -1040,7 +1099,7 @@ export class MapTracker {
           const bucket = grid.get(key(cx + dx, cy + dy));
           if (!bucket) continue;
           for (const t of bucket) {
-            if (t.landmarkId >= 0) continue;
+            if (t.landmarkId >= 0 || taken.has(t)) continue;
             const d = (t.x - u) ** 2 + (t.y - v) ** 2;
             if (d < bestD) {
               bestD = d;
@@ -1050,17 +1109,51 @@ export class MapTracker {
         }
       }
       if (best) {
-        best.landmarkId = lm.id;
-        best.linkSource = "relink";
-        best.anchorFrame = -1;
-        best.anchorPose = null;
-        lm.trackId = best.id;
-        lm.outlierCount = 0;
-        lm.lastX = best.x;
-        lm.lastY = best.y;
-        lm.imageAge = 0;
-        linked++;
+        taken.add(best);
+        pairs.push({ lm, track: best });
       }
+    }
+    if (pairs.length === 0) return 0;
+    this.relinkStats.candidates += pairs.length;
+
+    // Phase 2 (v20): a keyframe observation of the landmark must track into
+    // the current frame next to the candidate; the track then takes that
+    // keyframe-consistent position. Without a verifier every pair is linked
+    // by distance alone, as before v20.
+    const verdicts = this.relinkVerifier
+      ? this.relinkVerifier.verify(
+          pairs.map((p) => ({ landmarkId: p.lm.id, x: p.track.x, y: p.track.y })),
+          pose ?? this._pose,
+          radiusPx,
+        )
+      : null;
+    let linked = 0;
+    for (let i = 0; i < pairs.length; i++) {
+      const { lm, track } = pairs[i];
+      const v = verdicts ? verdicts[i] : null;
+      if (v && v.status === "rejected") {
+        this.relinkStats.rejected++;
+        continue;
+      }
+      if (v && v.status === "verified") {
+        this.relinkStats.verified++;
+        this.relinkSnapSum += Math.hypot(v.x - track.x, v.y - track.y);
+        track.x = v.x;
+        track.y = v.y;
+        track.linkSource = "relink";
+      } else {
+        this.relinkStats.unverified++;
+        track.linkSource = verdicts ? "relinkRaw" : "relink";
+      }
+      track.landmarkId = lm.id;
+      track.anchorFrame = -1;
+      track.anchorPose = null;
+      lm.trackId = track.id;
+      lm.outlierCount = 0;
+      lm.lastX = track.x;
+      lm.lastY = track.y;
+      lm.imageAge = 0;
+      linked++;
     }
     return linked;
   }

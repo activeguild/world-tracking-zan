@@ -292,6 +292,20 @@ export interface LandmarkConfig {
    * of leaving PnP without observations.
    */
   reassociateRadiusPx: number;
+  /**
+   * v20 (Android recording 28): confirm every re-association against a
+   * stored keyframe observation of the landmark — the keyframe patch is
+   * tracked by LK (forward-backward checked, the relocalization tracker)
+   * into the current frame starting at the candidate track, the link is
+   * made only when it lands within the radius, and the track is snapped to
+   * that keyframe-consistent position. A re-detected corner 1–2 px beside
+   * the landmark's true projection otherwise carries that offset for as
+   * long as the track lives (relinked tracks showed 0.5–1.5 px more PnP
+   * error than native ones and were the majority after 20 s). Landmarks no
+   * keyframe observes are linked by distance alone (`relinkRaw`).
+   * `?relinkverify=0` in the demo turns the check off for A/B.
+   */
+  relinkVerify: boolean;
   /** Also re-associate with the propagated pose while lost for at most this many frames. */
   reassociateMaxLostFrames: number;
   /**
@@ -720,6 +734,15 @@ export interface BundleAdjustmentConfig {
    */
   maxPoseJumpPriorRatio: number;
   maxPoseJumpStrikes: number;
+  /**
+   * v20: the solve stops once an accepted iteration lowers the cost by less
+   * than this fraction (0.01 = 1 % of the robust cost ≈ 0.5 % of the RMS
+   * error). The earlier criteria (update norm < 1e-7 map units, relative
+   * gain < 1e-6) are never met on real observations, so every on-device run
+   * hit the iteration cap (`it 15!`) while the last ten iterations changed
+   * the error by thousandths of a pixel. 0 keeps the strict criteria only.
+   */
+  minIterationGain: number;
 }
 
 export interface ARConfig {
@@ -854,6 +877,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     // FAST re-detects a corner within ~1 px; a tight radius keeps chance
     // matches on unrelated texture rare.
     reassociateRadiusPx: 2.5,
+    relinkVerify: true,
     reassociateMaxLostFrames: 90,
     minRecoveryInliers: 24,
     recoverySeedInliers: 4,
@@ -996,6 +1020,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     minGainFraction: 0.15,
     maxPoseJumpPriorRatio: 2,
     maxPoseJumpStrikes: 2,
+    minIterationGain: 0.01,
   },
   state: {
     minTrackedForTracking: 40,

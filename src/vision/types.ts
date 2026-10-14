@@ -17,7 +17,7 @@ export interface Corner {
  *
  * Positions are in level-0 processing-image pixels.
  */
-export type TrackLinkSource = "native" | "relink" | "reloc";
+export type TrackLinkSource = "native" | "relink" | "relinkRaw" | "reloc";
 
 export interface Track {
   id: number;
@@ -50,10 +50,13 @@ export interface Track {
    * How the track came to observe its landmark (v19 diagnostics): `native`
    * = the landmark was triangulated from this very track, `relink` =
    * re-association of a re-detected corner to an existing landmark (within
-   * `reassociateRadiusPx`), `reloc` = a keyframe observation matched by the
-   * relocalizer. Undefined counts as native. A re-linked track that sits on
-   * a neighbouring corner carries a systematic error for as long as it
-   * lives; this splits that from map error.
+   * `reassociateRadiusPx`) that a keyframe observation of the landmark
+   * confirmed by LK (v20), `relinkRaw` = the same re-association without a
+   * keyframe to check against (no stored keyframe observes the landmark),
+   * `reloc` = a keyframe observation matched by the relocalizer. Undefined
+   * counts as native. A re-linked track that sits on a neighbouring corner
+   * carries a systematic error for as long as it lives; this splits that
+   * from map error.
    */
   linkSource?: TrackLinkSource;
   /**
@@ -149,6 +152,8 @@ export interface MapPoseOutput {
   jumpRejected: boolean;
   /** Unlinked landmarks re-linked to tracks this frame (v3 §15). */
   reassociated: number;
+  /** What the keyframe check made of this frame's re-association candidates (v20). */
+  relink: RelinkStats;
   /** Inliers of the landmark-PnP candidate / the plane candidate this frame (0 when absent). */
   mapInlierCount: number;
   planeInlierCount: number;
@@ -395,8 +400,32 @@ export interface ReprojectionBreakdown {
   nativeErrorPx: number;
   relinkCount: number;
   relinkErrorPx: number;
+  /** Re-associations no keyframe could verify (v20, `Track.linkSource` = relinkRaw). */
+  relinkRawCount: number;
+  relinkRawErrorPx: number;
   relocCount: number;
   relocErrorPx: number;
+}
+
+/**
+ * Re-association bookkeeping of one frame (v20): how many unlinked landmarks
+ * found an unlinked track within the radius, and what the keyframe check
+ * (LK from the keyframe observation of the landmark into the current frame)
+ * made of them. `verified` links were snapped to the keyframe-consistent
+ * position, `rejected` candidates were not linked, `unverified` were linked
+ * without a check because no stored keyframe observes the landmark.
+ */
+export interface RelinkStats {
+  candidates: number;
+  verified: number;
+  rejected: number;
+  unverified: number;
+  /** Mean distance (px) between the track and the keyframe-LK position over the verified links. */
+  meanSnapPx: number;
+}
+
+export function emptyRelinkStats(): RelinkStats {
+  return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0 };
 }
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
@@ -538,6 +567,8 @@ export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
     nativeErrorPx: 0,
     relinkCount: 0,
     relinkErrorPx: 0,
+    relinkRawCount: 0,
+    relinkRawErrorPx: 0,
     relocCount: 0,
     relocErrorPx: 0,
   };

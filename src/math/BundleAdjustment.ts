@@ -69,6 +69,13 @@ export interface BAOptions {
   maxIterations: number;
   /** Stop when the parameter update norm is below this. */
   epsilon: number;
+  /**
+   * Also stop when an accepted iteration lowers the cost by less than this
+   * fraction of it (v20; default 0 = only the strict criteria). With noisy
+   * observations the strict criteria are never met and the solve runs to
+   * the iteration cap for thousandths of a pixel.
+   */
+  minRelativeGain?: number;
 }
 
 /** Rotation vector of R · R0ᵀ (small-angle log map; exact axis, exact angle). */
@@ -419,7 +426,7 @@ export function bundleAdjust(problem: BAProblem, opts: BAOptions): BAResult {
       landmarks = newLandmarks;
       cost = newCost;
       lambda = Math.max(1e-9, lambda / 3);
-      if (Math.sqrt(upd) < opts.epsilon || rel < 1e-6) {
+      if (Math.sqrt(upd) < opts.epsilon || rel < Math.max(1e-6, opts.minRelativeGain ?? 0)) {
         result.converged = true;
         iter++;
         break;

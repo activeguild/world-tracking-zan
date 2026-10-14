@@ -58,7 +58,15 @@ jump; a keyframe that does this twice in a row is left out of later solves
 row splits the PnP error by how each track got its landmark (triangulated
 from the track itself / re-associated after a re-detection / injected by
 the relocalizer): a re-linked group clearly worse than the native one is
-association error, not map error.
+association error, not map error. On Android it was (×1.2–1.9, recording
+28), so a re-association is now confirmed against a stored keyframe: the
+landmark's keyframe observation is tracked by LK into the current frame
+starting at the candidate track, the link is made only when it lands within
+the radius, and the track is snapped onto that keyframe-consistent position
+(`relink 3/5 ✗2 raw 1 snap 0.8px` on the PnP row; `raw` = linked without a
+keyframe to check against). `?relinkverify=0` turns the check off for A/B.
+The BA stops once an iteration gains less than 1 % of the cost, so `it`
+reads as a real iteration count instead of the cap.
 
 ## Phase 5 — keyframes and relocalization
 

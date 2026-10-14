@@ -130,6 +130,27 @@ describe("bundle adjustment (Phase 7)", () => {
     expect(n).toBeGreaterThan(problem.observations.length * 0.9);
   });
 
+  it("v20: with noisy observations the relative-gain stopping rule ends the solve early at the same error", () => {
+    // The strict criteria (update < 1e-9, gain < 1e-6) are never met on noisy
+    // data: the solve runs to the cap for thousandths of a pixel (the
+    // on-device `it 15!`). With `minRelativeGain` 1 % it stops once an
+    // iteration stops paying, at an error within 1 % of the full solve.
+    const strict = build(4, 1.0);
+    const early = build(4, 1.0);
+    const resStrict = bundleAdjust(strict.problem, { huber: 2 / F, maxIterations: 15, epsilon: 1e-9 });
+    const resEarly = bundleAdjust(early.problem, { huber: 2 / F, maxIterations: 15, epsilon: 1e-9, minRelativeGain: 0.01 });
+    const errStrict = resStrict.errorAfter * F;
+    const errEarly = resEarly.errorAfter * F;
+    console.log(`[ba] stopping rule: strict ${errStrict.toFixed(4)} px in ${resStrict.iterations} it (converged ${resStrict.converged}); gain ≥ 1 % ${errEarly.toFixed(4)} px in ${resEarly.iterations} it (converged ${resEarly.converged})`);
+    expect(resEarly.converged).toBe(true);
+    expect(resEarly.iterations).toBeLessThan(resStrict.iterations);
+    expect(Math.abs(errEarly - errStrict) / errStrict).toBeLessThan(0.01);
+    // Exact observations still converge to the floor: the rule never stops a solve that is still gaining.
+    const exact = build(4, 0);
+    const resExact = bundleAdjust(exact.problem, { huber: 2 / F, maxIterations: 30, epsilon: 1e-9, minRelativeGain: 0.01 });
+    expect(resExact.errorAfter * F).toBeLessThan(0.05);
+  });
+
   it("does nothing harmful on an already consistent problem", () => {
     const { problem } = build(3, 0);
     // Replace the perturbed start with the truth: re-build with zero perturbation by solving once, then run again.

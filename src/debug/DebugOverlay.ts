@@ -218,6 +218,8 @@ export interface HudStats {
       nativeErrorPx: number;
       relinkCount: number;
       relinkErrorPx: number;
+      relinkRawCount: number;
+      relinkRawErrorPx: number;
       relocCount: number;
       relocErrorPx: number;
     } | null;
@@ -246,6 +248,8 @@ export interface HudStats {
     history: string;
     /** Landmarks re-linked to tracks this frame. */
     relinked: number;
+    /** Keyframe check of this frame's re-association candidates (v20). */
+    relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number };
     /** Pose re-seeded by a relocalization (this frame or its monitoring window). */
     relocalized: boolean;
     /** Map PnP recovery status (v6 §10). */
@@ -480,7 +484,14 @@ export class DebugOverlay {
     rows.push(section("TRACK"));
     rows.push(row("Feat", `${s.featureCount} / ${s.trackedCount} / ${s.inlierCount}`));
     if (m) {
-      const flags = `${m.relinked ? `  relink ${m.relinked}` : ""}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
+      // v20: `relink 3/5 ✗2 raw 1 snap 0.8px` = 3 of 5 candidates linked, 2
+      // rejected by the keyframe check, 1 linked without a keyframe, and the
+      // mean distance the verified tracks were snapped by.
+      const rl = m.relink;
+      const relinkText = rl && rl.candidates
+        ? `  relink ${m.relinked}/${rl.candidates}${rl.rejected ? ` ✗${rl.rejected}` : ""}${rl.unverified ? ` raw ${rl.unverified}` : ""}${rl.verified ? ` snap ${rl.meanSnapPx.toFixed(1)}px` : ""}`
+        : m.relinked ? `  relink ${m.relinked}` : "";
+      const flags = `${relinkText}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));
       // v16: where the error sits. Edge ≫ center → focal length / lens
       // distortion (objects shift while tilting and come back); plane ≠
@@ -529,13 +540,14 @@ export class DebugOverlay {
         // v19: by how the track got its landmark. A relink group clearly
         // worse than the native one is association error (a re-detected
         // corner linked to the wrong landmark), not map error.
-        if (rb.relinkCount || rb.relocCount) {
+        if (rb.relinkCount || rb.relinkRawCount || rb.relocCount) {
           const ratio = rb.nativeCount && rb.relinkCount && rb.nativeErrorPx > 0 ? rb.relinkErrorPx / rb.nativeErrorPx : 0;
+          const rawRatio = rb.nativeCount && rb.relinkRawCount && rb.nativeErrorPx > 0 ? rb.relinkRawErrorPx / rb.nativeErrorPx : 0;
           rows.push(
             row(
               "Link",
-              `native ${rb.nativeErrorPx.toFixed(2)}px (${rb.nativeCount})  relink ${rb.relinkErrorPx.toFixed(2)} (${rb.relinkCount})  reloc ${rb.relocErrorPx.toFixed(2)} (${rb.relocCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
-              ratio >= 1.5 ? "hud-warn" : undefined,
+              `native ${rb.nativeErrorPx.toFixed(2)}px (${rb.nativeCount})  relink ${rb.relinkErrorPx.toFixed(2)} (${rb.relinkCount})${ratio ? ` ×${ratio.toFixed(1)}` : ""}${rb.relinkRawCount ? `  raw ${rb.relinkRawErrorPx.toFixed(2)} (${rb.relinkRawCount})${rawRatio ? ` ×${rawRatio.toFixed(1)}` : ""}` : ""}  reloc ${rb.relocErrorPx.toFixed(2)} (${rb.relocCount})`,
+              ratio >= 1.5 || rawRatio >= 1.5 ? "hud-warn" : undefined,
             ),
           );
         }

@@ -56,6 +56,8 @@ const planeTracking = params.get("planetrack") === "1";
 const refineLandmarks = params.get("refine") === "1";
 const freezeMap = params.get("freeze") === "1";
 const bundleAdjustmentParam = params.get("ba");
+// v20: keyframe check of re-associations, off with ?relinkverify=0 for A/B.
+const relinkVerify = params.get("relinkverify") !== "0";
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -92,7 +94,7 @@ const session = new ARSession({
       ...(grabParam ? { grabber: grabParam } : {}),
     },
     planeTracking: { enabled: planeTracking },
-    landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap },
+    landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap, relinkVerify },
     ...(bundleAdjustmentParam !== null ? { bundleAdjustment: { enabled: bundleAdjustmentParam !== "0" } } : {}),
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
@@ -369,7 +371,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}`,
     backend: s.backend,
     motion: s.motion
       ? {
@@ -420,6 +422,7 @@ function refreshHud(): void {
           sourceDeltaDeg: s.mapPose.sourceDeltaRotationDeg,
           history: s.mapPose.sourceHistory,
           relinked: s.mapPose.reassociated,
+          relink: s.mapPose.relink,
           relocalized: s.mapPose.relocalized,
           observations: s.mapPose.observations,
           requiredInliers: s.mapPose.requiredInliers,

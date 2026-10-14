@@ -228,6 +228,14 @@ export class VisionEngine {
     this.planeDetector = new PlaneDetector(config.plane, rng);
     this.planeTracker = new PlaneTracker(config.planeTracking);
     this.relocalizer = new Relocalizer(config.relocalization, config.tracker);
+    // v20: re-associations are confirmed against the keyframes' image
+    // pyramids. `curPyramid` is the frame being processed while the map
+    // tracker runs (the swap happens at the end of process()).
+    if (config.landmarks.relinkVerify) {
+      this.mapTracker.relinkVerifier = {
+        verify: (candidates, pose, radiusPx) => this.relocalizer.verifyRelinks(candidates, this.curPyramid, pose, radiusPx),
+      };
+    }
   }
 
   /** The fixed plane the world is anchored to (null until a plane was found). */
@@ -439,7 +447,7 @@ export class VisionEngine {
     };
     // Keyframe poses are refined in place; keep a copy to restore on rejection.
     const savedPoses = kfs.map((kf) => ({ rotation: Float64Array.from(kf.pose.rotation), translation: Float64Array.from(kf.pose.translation) }));
-    const res = bundleAdjust(problem, { huber: cfg.huberPx / f, maxIterations: cfg.maxIterations, epsilon: 1e-7 });
+    const res = bundleAdjust(problem, { huber: cfg.huberPx / f, maxIterations: cfg.maxIterations, epsilon: 1e-7, minRelativeGain: cfg.minIterationGain });
     // Whole-run sanity check: landmarks that slid far along their rays.
     let shifted = 0;
     let maxShift = 0;
@@ -1135,6 +1143,7 @@ export class VisionEngine {
         translationPredicted: r.translationPredicted,
         jumpRejected: r.jumpRejected,
         reassociated: r.reassociated,
+        relink: r.relink,
         mapInlierCount: tracker.selection.mapInlierCount,
         planeInlierCount: tracker.selection.planeInlierCount,
         rejectReason: tracker.selection.planeReject ?? tracker.selection.mapReject,
