@@ -45,7 +45,7 @@ import {
 } from "./types";
 import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
 import { type BAObservation, bundleAdjust } from "../math/BundleAdjustment";
-import { rigidFit } from "../math/RigidFit";
+import { translationFit } from "../math/RigidFit";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { transpose3 } from "../math/Decomposition";
 import { applyTransform, cameraCenterOf, composeTransforms, invertTransform, rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
@@ -513,7 +513,7 @@ export class VisionEngine {
         if (i === 0) continue;
         corrections.set(kfs[i].id, composeTransforms(invertTransform(kfs[i].pose), savedPoses[i]));
       }
-      // Phase 2: the rigid motion of the adjusted landmarks around the anchor
+      // Phase 2: the motion of the adjusted landmarks around the anchor
       // points (world origin, placed objects) is what the world anchor should
       // follow: it keeps the objects attached to the floor landmarks next to
       // them whether the run restored a drifted map or refined it. Gaussian
@@ -521,9 +521,11 @@ export class VisionEngine {
       // `anchorFitDepthRatio` × median depth; the fit is robust (reweighted).
       const oldPositions = new Float64Array(ids.length * 3);
       for (let i = 0; i < ids.length; i++) oldPositions.set(map.get(ids[i])!.position, i * 3);
-      let fit: ReturnType<typeof rigidFit> = null;
+      let fit: ReturnType<typeof translationFit> = null;
       const ap = this.anchorPoints;
-      if (cfg.anchorCorrection === "local" && ap && ap.length >= 3 && cfg.anchorFitDepthRatio > 0) {
+      const newestKf = kfs[kfs.length - 1];
+      const newestCorrection = newestKf.frameId === frameId ? corrections.get(newestKf.id) : undefined;
+      if (cfg.anchorCorrection === "local" && newestCorrection && ap && ap.length >= 3 && cfg.anchorFitDepthRatio > 0) {
         const radius = cfg.anchorFitDepthRatio * Math.max(medianDepth, 1e-6);
         const inv2r2 = 1 / (2 * radius * radius);
         const weights = new Float64Array(ids.length);
@@ -537,8 +539,11 @@ export class VisionEngine {
           weights[i] = Math.exp(-best * inv2r2);
           if (weights[i] > 0.3) weighted++;
         }
+        // Rotation from the keyframe correction (well constrained), only
+        // the translation from the landmarks next to the objects (recording
+        // 29: a full rigid fit on 11–13 clustered landmarks gave 2–7°).
         if (weighted >= cfg.anchorFitMinLandmarks) {
-          fit = rigidFit(oldPositions, positions, ids.length, 3, weights);
+          fit = translationFit(oldPositions, positions, ids.length, newestCorrection.rotation, weights);
           if (fit) localFitLandmarks = weighted;
         }
       }

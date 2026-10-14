@@ -828,17 +828,28 @@ export class Relocalizer {
         guesses[j * 2] = candidates[list[j].index].x;
         guesses[j * 2 + 1] = candidates[list[j].index].y;
       }
-      // The displacement gate is measured from the guess (the candidate
-      // track), so TOO_FAR doubles as "lands outside the radius".
-      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, radiusPx);
+      // The tracker's displacement gate (from the guess = the candidate
+      // track) is left wide so that a patch landing beyond the radius still
+      // reports where it landed; the radius itself is applied here.
+      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, radiusPx * 4);
       for (let j = 0; j < n; j++) {
         const v = verdicts[list[j].index];
-        if (res.status[j] === TrackStatus.OK) {
-          v.status = "verified";
-          v.x = res.positions[j * 2];
-          v.y = res.positions[j * 2 + 1];
+        const st = res.status[j];
+        if (st === TrackStatus.OK || st === TrackStatus.TOO_FAR) {
+          const lx = res.positions[j * 2], ly = res.positions[j * 2 + 1];
+          const d = Math.hypot(lx - guesses[j * 2], ly - guesses[j * 2 + 1]);
+          if (st === TrackStatus.OK && d <= radiusPx) {
+            v.status = "verified";
+            v.x = lx;
+            v.y = ly;
+          } else {
+            v.status = "rejected";
+            v.reason = "too_far";
+            v.landedPx = d;
+          }
         } else {
           v.status = "rejected";
+          v.reason = "lk_failed";
         }
       }
     }

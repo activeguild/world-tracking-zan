@@ -422,10 +422,14 @@ export interface RelinkStats {
   unverified: number;
   /** Mean distance (px) between the track and the keyframe-LK position over the verified links. */
   meanSnapPx: number;
+  /** Rejections split: the keyframe patch tracked but landed beyond the radius (`rejectedTooFar`, mean distance `meanFarPx`) vs LK failed (`rejectedLk`). */
+  rejectedTooFar: number;
+  rejectedLk: number;
+  meanFarPx: number;
 }
 
 export function emptyRelinkStats(): RelinkStats {
-  return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0 };
+  return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0, rejectedTooFar: 0, rejectedLk: 0, meanFarPx: 0 };
 }
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */

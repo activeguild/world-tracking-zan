@@ -39,6 +39,9 @@ export interface RelinkVerdict {
   /** Keyframe-consistent position in the current frame (valid when verified). */
   x: number;
   y: number;
+  /** Why a candidate was rejected: the keyframe patch landed beyond the radius (`too_far`, with `landedPx` = its distance from the candidate) or LK failed outright (`lk_failed`). */
+  reason?: "too_far" | "lk_failed";
+  landedPx?: number;
 }
 
 /**
@@ -191,6 +194,7 @@ export class MapTracker {
   /** Re-association candidates of the current frame (reset in update). */
   private relinkStats: RelinkStats = emptyRelinkStats();
   private relinkSnapSum = 0;
+  private relinkFarSum = 0;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -418,6 +422,7 @@ export class MapTracker {
     const prevRotation: Mat3 = Float64Array.from(this._pose.rotation);
     this.relinkStats = emptyRelinkStats();
     this.relinkSnapSum = 0;
+    this.relinkFarSum = 0;
 
     // Drop landmark links of tracks that died (track list only has survivors)
     // and carry every landmark's image position forward: linked ones from
@@ -830,6 +835,7 @@ export class MapTracker {
     if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks, this.protectedLandmarkIds);
     const center = this.cameraCenter();
     if (this.relinkStats.verified) this.relinkStats.meanSnapPx = this.relinkSnapSum / this.relinkStats.verified;
+    if (this.relinkStats.rejectedTooFar) this.relinkStats.meanFarPx = this.relinkFarSum / this.relinkStats.rejectedTooFar;
     this.lastResult = {
       tracked,
       reassociated,
@@ -1133,6 +1139,12 @@ export class MapTracker {
       const v = verdicts ? verdicts[i] : null;
       if (v && v.status === "rejected") {
         this.relinkStats.rejected++;
+        if (v.reason === "too_far") {
+          this.relinkStats.rejectedTooFar++;
+          this.relinkFarSum += v.landedPx ?? 0;
+        } else {
+          this.relinkStats.rejectedLk++;
+        }
         continue;
       }
       if (v && v.status === "verified") {

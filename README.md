@@ -67,13 +67,15 @@ the radius, and the track is snapped onto that keyframe-consistent position
 keyframe to check against). `?relinkverify=0` turns the check off for A/B.
 The BA stops once an iteration gains less than 1 % of the cost, so `it`
 reads as a real iteration count instead of the cap. After an accepted run
-the world anchor follows a robust rigid fit of the adjusted landmarks
-around the world origin and the placed objects (`VisionInput.anchorPoints`,
-sent by the session each frame), not the newest keyframe's own pose
-correction: the keyframe correction also carries that frame's tracking
-error, which the object then kept (a growing 2.4 px in the synthetic
-session vs 1.4 px for the local fit; `?anchor=kf|none` for A/B, HUD `corr …
-(kf … local … nN)`).
+the world anchor follows the landmarks next to the placed objects
+(`VisionInput.anchorPoints`, sent by the session each frame): the rotation
+of the newest keyframe's correction plus a robust mean of the nearby
+landmarks' displacement as translation, not the keyframe's own pose
+correction, which also carries that frame's tracking error that the object
+then kept (a growing 2.4 px in the synthetic session vs 0.9 px; a full
+rigid fit on a dozen clustered landmarks gave 2–7° rotations on device, so
+only the translation is local). `?anchor=kf|none` for A/B, HUD `corr …
+(kf … local … nN)`.
 
 ## Phase 5 — keyframes and relocalization
 

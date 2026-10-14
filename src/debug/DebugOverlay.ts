@@ -254,7 +254,7 @@ export interface HudStats {
     /** Landmarks re-linked to tracks this frame. */
     relinked: number;
     /** Keyframe check of this frame's re-association candidates (v20). */
-    relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number };
+    relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number; rejectedTooFar: number; rejectedLk: number; meanFarPx: number };
     /** Pose re-seeded by a relocalization (this frame or its monitoring window). */
     relocalized: boolean;
     /** Map PnP recovery status (v6 §10). */
@@ -494,7 +494,7 @@ export class DebugOverlay {
       // mean distance the verified tracks were snapped by.
       const rl = m.relink;
       const relinkText = rl && rl.candidates
-        ? `  relink ${m.relinked}/${rl.candidates}${rl.rejected ? ` ✗${rl.rejected}` : ""}${rl.unverified ? ` raw ${rl.unverified}` : ""}${rl.verified ? ` snap ${rl.meanSnapPx.toFixed(1)}px` : ""}`
+        ? `  relink ${m.relinked}/${rl.candidates}${rl.rejected ? ` ✗${rl.rejected} (far ${rl.rejectedTooFar}${rl.rejectedTooFar ? `@${rl.meanFarPx.toFixed(1)}px` : ""} lk ${rl.rejectedLk})` : ""}${rl.unverified ? ` raw ${rl.unverified}` : ""}${rl.verified ? ` snap ${rl.meanSnapPx.toFixed(1)}px` : ""}`
         : m.relinked ? `  relink ${m.relinked}` : "";
       const flags = `${relinkText}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));

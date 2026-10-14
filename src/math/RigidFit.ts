@@ -19,6 +19,78 @@ export interface RigidFitResult {
   rms: number;
 }
 
+/**
+ * Translation-only fit with a given rotation: after_i ≈ R before_i + t,
+ * t = robust weighted mean of (after_i − R before_i). Used for the local
+ * anchor correction (改善指示書 Phase 2, Android recording 29): with only a
+ * dozen landmarks in a compact cluster around the placed objects a full
+ * rigid fit has no leverage on the rotation (2–7° solutions for a 0.5° map
+ * motion); the rotation is taken from the newest keyframe's correction,
+ * which hundreds of observations constrain, and only the translation is
+ * read off the nearby landmarks.
+ */
+export function translationFit(
+  before: ArrayLike<number>,
+  after: ArrayLike<number>,
+  n: number,
+  rotation: ArrayLike<number>,
+  prior: ArrayLike<number> | null = null,
+  passes = 3,
+): RigidFitResult | null {
+  if (n < 1) return null;
+  const r = rotation;
+  const d = new Float64Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const bx = before[i * 3], by = before[i * 3 + 1], bz = before[i * 3 + 2];
+    d[i * 3] = after[i * 3] - (r[0] * bx + r[1] * by + r[2] * bz);
+    d[i * 3 + 1] = after[i * 3 + 1] - (r[3] * bx + r[4] * by + r[5] * bz);
+    d[i * 3 + 2] = after[i * 3 + 2] - (r[6] * bx + r[7] * by + r[8] * bz);
+  }
+  const base = new Float64Array(n).fill(1);
+  if (prior) for (let i = 0; i < n; i++) base[i] = Math.max(0, prior[i]);
+  const w = Float64Array.from(base);
+  const t = new Float64Array(3);
+  const resid = new Float64Array(n);
+  let inliers = 0;
+  let rms = 0;
+  for (let pass = 0; pass < passes; pass++) {
+    let sw = 0;
+    t.fill(0);
+    for (let i = 0; i < n; i++) {
+      sw += w[i];
+      for (let a = 0; a < 3; a++) t[a] += w[i] * d[i * 3 + a];
+    }
+    if (sw <= 1e-12) return null;
+    for (let a = 0; a < 3; a++) t[a] /= sw;
+    for (let i = 0; i < n; i++) resid[i] = Math.hypot(d[i * 3] - t[0], d[i * 3 + 1] - t[1], d[i * 3 + 2] - t[2]);
+    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => resid[a] - resid[b]);
+    let acc = 0, total = 0;
+    for (let i = 0; i < n; i++) total += base[i];
+    let med = resid[order[n - 1]];
+    for (const i of order) {
+      acc += base[i];
+      if (acc >= total / 2) {
+        med = resid[i];
+        break;
+      }
+    }
+    const sigma = Math.max(1.5 * med, 1e-9);
+    inliers = 0;
+    let ss = 0, sw2 = 0;
+    for (let i = 0; i < n; i++) {
+      const robust = resid[i] <= sigma ? 1 : sigma / resid[i];
+      w[i] = base[i] * robust;
+      if (robust >= 0.5 && base[i] > 0) {
+        inliers++;
+        ss += base[i] * resid[i] * resid[i];
+        sw2 += base[i];
+      }
+    }
+    rms = sw2 > 0 ? Math.sqrt(ss / sw2) : 0;
+  }
+  return { transform: { rotation: Float64Array.from(r), translation: t }, inliers, rms };
+}
+
 export function rigidFit(
   before: ArrayLike<number>,
   after: ArrayLike<number>,

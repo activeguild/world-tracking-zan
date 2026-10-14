@@ -5,7 +5,7 @@ import { WorldAnchor } from "../../src/ar/WorldAnchor";
 import { worldToMap } from "../../src/math/CoordinateSystem";
 import { applyTransform, composeTransforms, invertTransform, rotationAxisAngle, type RigidTransform } from "../../src/math/Pose";
 import { createRng } from "../../src/vision/OutlierRejection";
-import { emptyReprojectionBreakdown, type MapPoseOutput, type PlaneOutput, type VisionInput, type VisionOutput } from "../../src/vision/types";
+import { emptyRelinkStats, emptyReprojectionBreakdown, type MapPoseOutput, type PlaneOutput, type VisionInput, type VisionOutput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
 import { poseFromCenter } from "../helpers/scene";
 import { TP_H, TP_K, TP_W, tpFloorPoint, tpGravity, tpPose, tpProject, tpRender } from "../helpers/twoPlaneScene";
@@ -36,7 +36,7 @@ function mapPoseOf(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     translationPredicted: false,
     jumpRejected: false,
     reassociated: 0,
-    relink: { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0 },
+    relink: emptyRelinkStats(),
     mapInlierCount: 100,
     planeInlierCount: 0,
     rejectReason: null,
@@ -295,11 +295,13 @@ describe("accumulated BA corrections through a session (改善指示書 Phase 2)
     expect(Math.max(...r.afterDrift.map((b) => b.corr))).toBeGreaterThan(0.005);
     // Every accepted run after the world existed fitted locally (anchor points were known).
     for (const b of r.baFrames) expect(b.n).toBeGreaterThanOrEqual(10);
-    // Measured: local median 1.38 / max 1.77 px (keyframe mode 2.38 / 2.60,
-    // none 13.8 / 29.5 once the drifted map is pulled back); the hops at the
-    // BA frames stay well under a pixel.
-    expect(r.once.median).toBeLessThan(1.6);
-    expect(r.once.max).toBeLessThan(2.5);
+    // Measured: local (keyframe rotation + translation from the landmarks
+    // next to the objects) median 0.87 / max 1.45 px; a full local rigid fit
+    // gave 1.38 / 1.77, the keyframe mode 2.38 / 2.60, none 13.8 / 29.5 once
+    // the drifted map is pulled back. The hops at the BA frames stay well
+    // under a pixel.
+    expect(r.once.median).toBeLessThan(1.2);
+    expect(r.once.max).toBeLessThan(2.0);
     for (const h of r.hops) expect(h).toBeLessThan(1.0);
     expect(r.twice.max).toBeGreaterThan(5);
     expect(r.twice.max).toBeGreaterThan(r.once.max * 3);
@@ -310,7 +312,7 @@ describe("accumulated BA corrections through a session (改善指示書 Phase 2)
     const none = runSession("none");
     for (const h of kf.hops) expect(h).toBeLessThan(0.3);
     expect(kf.once.max).toBeLessThan(4.0);
-    // The keyframe mode carries each run's pose error into the object (2.4 px here vs 1.4 px local).
+    // The keyframe mode carries each run's pose error into the object (2.4 px here vs 0.9 px local).
     expect(kf.once.median).toBeGreaterThan(2.0);
     expect(none.once.max).toBeGreaterThan(5);
   });
