@@ -604,10 +604,14 @@ export class VisionEngine {
         correction.translation.set(fit.transform.translation);
       }
     }
-    // v21: drop the landmarks the keyframes contradict, accepted run or not
-    // (the test is against the state before the solve). Their tracks
+    // v21: drop the landmarks the keyframes contradict (the test is against
+    // the state before the solve, so a no-gain or shift rejection does not
+    // matter). Not on a pose-jump rejection: the keyframe that wants to move
+    // is the suspect there, and its observations would purge good landmarks
+    // (Android recording 32: 31 landmarks went with a keyframe made during
+    // fast motion that was struck out two runs later). Their tracks
     // re-anchor and the corners are triangulated again from current poses.
-    const purged = this.config.landmarks.purgeInconsistent ? this.mapTracker.purgeLandmarks(inconsistent, this.tracks) : 0;
+    const purged = this.config.landmarks.purgeInconsistent && rejectReason !== "pose_jump" ? this.mapTracker.purgeLandmarks(inconsistent, this.tracks) : 0;
     const ms = now() - t0;
     this.timing.ba += ms;
     const prev = this.lastBundleAdjustment;

@@ -341,7 +341,18 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     L.pose.translation.set(tPert.translation);
     const before = new Map<number, Float64Array>();
     for (const lm of engine.landmarkMap.values()) before.set(lm.id, Float64Array.from(lm.position));
-    // Run 1: rejected, blamed on L, nothing written back.
+    // v21: L also contradicts 10 landmarks by 15 px (a keyframe made during
+    // fast motion, recording 32). On a pose-jump rejection the keyframe is
+    // the suspect, so these must not be purged.
+    const contradicted: number[] = [];
+    for (const o of L.observations) {
+      if (!engine.landmarkMap.get(o.landmarkId)) continue;
+      o.x += 15;
+      contradicted.push(o.landmarkId);
+      if (contradicted.length === 10) break;
+    }
+    expect(contradicted.length).toBe(10);
+    // Run 1: rejected, blamed on L, nothing written back, nothing purged.
     expect(engine.runBundleAdjustment(TP_K)).toBe(true);
     let ba = engine.bundleAdjustment;
     expect(ba.rejected).toBe(true);
@@ -349,6 +360,9 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(ba.jumpKeyframeId).toBe(L.id);
     expect(ba.jumpRotationDeg).toBeGreaterThan(0.3);
     expect(ba.excludedKeyframes).toBe(0);
+    expect(ba.outliers).toBeGreaterThanOrEqual(10);
+    expect(ba.purged).toBe(0);
+    for (const id of contradicted) expect(engine.landmarkMap.get(id)).toBeDefined();
     expect((rotationDistance(L.pose.rotation, tPert.rotation) * 180) / Math.PI).toBeLessThan(1e-4);
     for (const lm of engine.landmarkMap.values()) {
       const p0 = before.get(lm.id)!;
@@ -367,6 +381,9 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(ba.rejectReason).not.toBe("pose_jump");
     expect(ba.keyframes).toBe(kfs.length - 1);
     expect(ba.excludedKeyframes).toBe(1);
+    // L is out of the solve, so its contradictions are not tested either.
+    expect(ba.purged).toBe(0);
+    for (const id of contradicted) expect(engine.landmarkMap.get(id)).toBeDefined();
     expect((rotationDistance(L.pose.rotation, tPert.rotation) * 180) / Math.PI).toBeLessThan(1e-4);
     console.log(`[ba-engine] v19 pose jump: KF${ba.jumpKeyframeId === -1 ? L.id : ba.jumpKeyframeId} struck out after 2 strikes; run 3 ${ba.rejected ? `rejected (${ba.rejectReason})` : "accepted"} over ${ba.keyframes} keyframes`);
     // With the default ratio (2 × prior) the same perturbation is not a jump.
