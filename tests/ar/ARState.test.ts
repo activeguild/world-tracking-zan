@@ -97,11 +97,18 @@ describe("TrackingStateMachine", () => {
     sm2.update({ inlierCount: 200, featureCount: 300, mapInitialized: true, planeFound: true, worldEstablished: false });
     sm2.update({ inlierCount: 200, featureCount: 300, mapInitialized: true, mapLost: true, planeFound: true, worldEstablished: true });
     expect(sm2.state).toBe(TrackingState.RELOCALIZING);
-    // Relocalized: camera located again → PLANE_FOUND.
-    sm2.update({ inlierCount: 200, featureCount: 300, mapInitialized: true, mapLost: false, planeFound: true, worldEstablished: true });
-    expect(sm2.state).toBe(TrackingState.TRACKING);
+    // Relocalized: camera located again → PLANE_FOUND at once (v14 §60 WORLD_TRACKING),
+    // no detour through TRACKING / PLANE_DETECTING — the world is the fixed plane.
     sm2.update({ inlierCount: 200, featureCount: 300, mapInitialized: true, mapLost: false, planeFound: true, worldEstablished: true });
     expect(sm2.state).toBe(TrackingState.PLANE_FOUND);
+    sm2.update({ inlierCount: 200, featureCount: 300, mapInitialized: true, mapLost: false, planeFound: true, worldEstablished: true });
+    expect(sm2.state).toBe(TrackingState.PLANE_FOUND);
+    // Without a world the same recovery is just tracking.
+    const sm3 = toPlaneDetecting();
+    for (let i = 0; i < 3; i++) sm3.update({ inlierCount: 0, featureCount: 0, mapInitialized: true, mapLost: true, worldEstablished: false });
+    sm3.update({ inlierCount: 0, featureCount: 50, mapInitialized: true, mapLost: true, worldEstablished: false });
+    sm3.update({ inlierCount: 200, featureCount: 300, mapInitialized: true, mapLost: false, planeFound: true, worldEstablished: false });
+    expect(sm3.state).toBe(TrackingState.TRACKING);
   });
 
   it("reset() returns to INITIALIZING", () => {

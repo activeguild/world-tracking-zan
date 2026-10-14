@@ -1,5 +1,6 @@
 import { solveLinearSystem, type Mat3, mat3Multiply } from "./Matrix";
 import { rotationAxisAngle, type RigidTransform } from "./Pose";
+import { reprojectionJacobian } from "./Reprojection";
 
 /**
  * Motion-only pose refinement (PnP from a prior) in normalized camera
@@ -36,6 +37,8 @@ export interface PnPResult {
 const JTJ = new Float64Array(36);
 const JTr = new Float64Array(6);
 const step = new Float64Array(6);
+const ju = new Float64Array(9);
+const jv = new Float64Array(9);
 
 /**
  * @param points3 map-frame 3D points (x,y,z interleaved)
@@ -92,23 +95,10 @@ export function refinePosePnP(
       }
       used++;
 
-      // Jacobian of (u, v) w.r.t. [δω (3), δt (3)] with R ← exp(δω) R:
-      //   ∂π/∂Xc = [[iz, 0, -u·iz], [0, iz, -v·iz]]
-      //   ∂Xc/∂δω = -[Xc]×,  ∂Xc/∂δt = I
-      const x = xc[0], y = xc[1];
-      // ∂Xc/∂δω = -[Xc]× = [[0, z, -y], [-z, 0, x], [y, -x, 0]]
-      // row u:
-      const ju0 = iz * 0 + 0 * -z + -u * iz * y;      // d u / d ω_x
-      const ju1 = iz * z + 0 * 0 + -u * iz * -x;      // d u / d ω_y
-      const ju2 = iz * -y + 0 * x + -u * iz * 0;      // d u / d ω_z
-      const ju3 = iz, ju4 = 0, ju5 = -u * iz;
-      // row v:
-      const jv0 = 0 * 0 + iz * -z + -v * iz * y;
-      const jv1 = 0 * z + iz * 0 + -v * iz * -x;
-      const jv2 = 0 * -y + iz * x + -v * iz * 0;
-      const jv3 = 0, jv4 = iz, jv5 = -v * iz;
-      const ju = [ju0, ju1, ju2, ju3, ju4, ju5];
-      const jv = [jv0, jv1, jv2, jv3, jv4, jv5];
+      // Jacobian of (u, v) w.r.t. [δω (3), δt (3)] for the update that is
+      // applied below (R ← exp(δω) R, t ← t + δt): see Reprojection.ts.
+      // The rotation acts on R X = Xc − t, so ∂Xc/∂δω = −[R X]×.
+      reprojectionJacobian(r, t, X, Y, Z, ju, jv);
       for (let a = 0; a < 6; a++) {
         JTr[a] += w * (ju[a] * ex + jv[a] * ey);
         for (let b = 0; b < 6; b++) JTJ[a * 6 + b] += w * (ju[a] * ju[b] + jv[a] * jv[b]);

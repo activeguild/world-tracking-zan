@@ -8,7 +8,57 @@ Web Worker.
 The full specification lives in [CLAUDE.md](./CLAUDE.md). Development is
 strictly phased; **Phases 1–5 (feature tracking, relative camera pose,
 landmark map + plane detection, world coordinate + Three.js placement,
-keyframes + relocalization) are implemented**, later phases are not started.
+keyframes + relocalization) and Phase 7 (local bundle adjustment) are
+implemented**; Phase 6 (IMU) and Phase 8 (WASM / SIMD) are not started.
+
+## Phase 7 — local bundle adjustment
+
+```
+new keyframe → bundleAdjust(stored keyframes, landmarks seen by ≥ 1 of them)
+  first keyframe fixed (map origin), other poses + landmark positions free
+  Levenberg–Marquardt, Huber 2 px, gross outliers (> 10 px) left out,
+  Jacobian from `src/math/Reprojection.ts` (shared with the PnP; the
+  derivative of the update actually applied, R ← exp(δω) R, t ← t + δt,
+  so ∂X_cam/∂δω = −[R X]×; checked against finite differences in
+  `tests/math/ReprojectionJacobian.test.ts`),
+  landmarks eliminated with the Schur complement (dense ≤ 8×6 pose block)
+  weak priors: a landmark moving 10% of its depth / a keyframe moving 5% of
+    the median depth or 3° costs like one observation off by 2 px
+    (keyframes made by rotation alone leave depths nearly free otherwise)
+  scale re-normalized to the median depth of the first keyframe's landmarks
+  → the whole run is rejected when > 10% of the landmarks moved > 20% of
+    their depth (never a partial write-back: that splits the map in two),
+    or when the error did not drop by 15% (a consistent map gains nothing
+    and would only be nudged along weakly constrained directions)
+  → otherwise landmark positions and keyframe poses updated in place (next
+    PnP, relocalization priors and plane fit see the refined map)
+  → landmarks no keyframe observes are carried with their reference
+    keyframe (the newest keyframe when they were triangulated): the whole
+    map stays one frame, not a solved part and a stale part
+  → the newest keyframe's correction (old map → new map) is applied to
+    the canonical pose and, in the session, to the world anchor: placed
+    objects stay put relative to the local map and do not hop on screen
+  → track anchors reset (new triangulations use refined poses only)
+```
+
+Why: on Android the PnP error grew from 1 px (fresh map) to 2.5–3 px while
+staying uniform over image position, parallax, track age and landmark age,
+and the same landmarks at the same view went 1.5 → 2.3 px once later
+landmarks joined the PnP (CLAUDE.md, recordings 14–19). Landmarks were
+frozen at their creation pose, so groups created at different times
+disagreed; BA makes them one map. A wrong focal length was ruled out with a
+synthetic floor-plus-wall scene (`tests/vision/FocalEstimate.test.ts`).
+`?ba=0` disables it for A/B; the HUD `BA` row reports each run (`REJECTED no
+gain | shift`, `lm N +P prop +U none`, `corr` = the correction applied to
+the pose and the world anchor) and the `BAlm` row splits the PnP error by
+how the last run treated each landmark (solved / carried / untouched). A
+run that moves a keyframe beyond twice its prior is rejected as a pose
+jump; a keyframe that does this twice in a row is left out of later solves
+(`REJECTED pose jump KF12 8.3°/0.21u`, `kf 6+1/8 (−1 out)`). The `Link`
+row splits the PnP error by how each track got its landmark (triangulated
+from the track itself / re-associated after a re-detection / injected by
+the relocalizer): a re-linked group clearly worse than the native one is
+association error, not map error.
 
 ## Phase 5 — keyframes and relocalization
 
@@ -137,10 +187,13 @@ Query parameters:
 | `?fov=66`   | camera field of view along the long side (degrees) |
 | `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
 | `?sync=0`   | show the live video instead of the pose-synchronized frame |
+| `?grab=2d` / `?grab=gl` / `?grab=auto` | frame grabber: 2D canvas readback, WebGL shader, or measure-then-pick (default) |
 | `?debug=1` | debug mode: HUD + debug drawing on at start, `[AR]` console logs (the ☰ button toggles the HUD at any time; off by default) |
 | `?hud=1` / `?hud=0` | force the initial HUD state independently of `?debug` |
 | `?smooth=1` | enable pose smoothing (off by default while the raw pose is validated) |
 | `?refine=1` | re-enable landmark depth refinement (A/B against the fixed map) |
+| `?freeze=1` | no new landmarks once the world is established (A/B: map inconsistency vs camera model; tracking is lost when the camera leaves the first view) |
+| `?ba=0` | disable the local bundle adjustment that runs on every new keyframe (Phase 7 A/B) |
 | `?walk=1`   | the placed object walks back and forth on the plane (object-motion test) |
 | `?planetrack=1` | experimental plane-relative pose instead of landmark PnP |
 
@@ -292,6 +345,91 @@ relaxed bound the error itself is the reason. Validated strong candidates
 rank above acceptable ones. The HUD shows `Error 2.44/1.50px strict NG` /
 `2.44/3.00px relaxed OK` / `Level ACCEPTABLE`.
 
+Object visibility (v13): placed objects follow the trust in the *current*
+camera pose, never the last pose. `src/ar/ObjectVisibility.ts` decides
+`visible` + `reason` (`TRACKING_ACTIVE | TRACKING_LOST | RELOCALIZING |
+CONFIRMING | WORLD_NOT_READY | POSE_INVALID`): hidden as soon as the state
+machine declares the loss (its own `state.mapLostFrameTolerance`
+hysteresis — a tolerated PnP dropout keeps what is shown), hidden while
+relocalizing and while an applied relocalization is still in its
+post-relocalization monitor window (`CONFIRMING`, strong or acceptable
+alike), shown again only on a fresh map pose. Hiding keeps the transforms,
+the world anchor, the map and the keyframes; the render loop, camera and
+relocalization keep running. The 10 s `holdPoseOnLostMs` hold is gone. HUD
+`OBJECT`: `Visible NO / Reason RELOCALIZING`, `Obj1 hidden`.
+
+Relocalization recovery speed (v14): the goal is to reach the *right*
+keyframe sooner, not to pass candidates more easily — PnP, the v12
+validation levels, the confirmation and v13 visibility are untouched.
+Every attempt ranks all keyframes by coarse similarity (zero-mean NCC
+shift search on a 1/16 image, `rankSearchRadius`), only the top
+`maxLkCandidatesPerFrame` (3; 4 on the first attempt) get the 1/8
+refinement (`coarseRefineRadius`) → LK → PnP; a strong candidate stops the
+search. Shifts are chosen by NCC × √overlap (`coarseMinOverlap`) so a large
+shift with little overlap cannot win by chance, and a shift that leaves
+fewer than `minInliers` observations inside the image skips LK as
+`out_of_bounds`; an LK run that started inside the image and ended outside
+it is reported as `diverged` (what a motion-blurred frame does).
+
+Long loss (v16): the relocalization-specific jump limits vs the held pose
+(`maxTranslationJumpDepthRatio`, `maxRotationJumpDeg`) apply only while
+the held pose is fresh — up to `jumpLimitMaxLostFrames` (30) lost frames.
+While lost the pose is dead-reckoned and after a turn that was lost
+half-way it points the other way; the correct candidate at the start view
+(263 inliers, 0.2 px in the synthetic replay, NCC 0.97 on device) was being
+rejected as a `rotation_jump` on every attempt. Beyond that age the jump is
+diagnostic only (HUD `Jump … no limit (long loss)`); the other validators
+and the confirmation / post-monitor are unchanged. The HUD shows the engine's
+per-stage time right under the FPS row (`Vis pyr … lk … 2view … map … plane …
+reloc … = total`) and, below it, where the rest of the frame's wall time goes
+(`Main grab … cap … q↑ … eng … q↓ … rtt …  world … show … ovl … hud …`:
+frame grab, display copy, worker transport both ways — the wall-clock stamps
+are comparable across threads — Three.js update, synchronized blit, debug
+overlay and the HUD itself; on Android Chrome the engine ran in 22–31 ms while
+vision reached only 10–14 fps — the `grab` entry was 31–41 ms: the 2D-canvas
+readback of the camera frame). The frame grabber therefore has a WebGL path
+(`WebGLFrameGrabber`: texture upload, luma shader packing four gray pixels per
+texel, `readPixels` straight into the pooled buffer) and `processing.grabber`
+defaults to `auto`: the 2D path is measured on the first frames and WebGL
+takes over when its median grab exceeds `grabAutoSwitchMs`; `?grab=2d|gl`
+forces one, HUD `Proc … grab 2d|gl`. Two engine-side savings for slower
+devices: the relocalization preparation (keyframe ranking while tracking is
+weak) is gated by its own thresholds (`prepareMinInliers`, `prepareMaxErrorPx`)
+rather than the `trusted` label — Android tracks healthily at 2.6–3.3 px and
+never reaches the 1.5 px label, so the ranking ran all session — and once the
+world exists the two-view RANSAC is capped at `pose.maxIterationsWhileMapped`
+iterations (the map PnP is the canonical pose then; the two-view result is a
+rotation prior). Before a world exists a plane search that keeps
+failing the 2D-extent test for `sidewaysGuidanceDelayMs` asks the user to
+move the phone sideways (`MOVE_SIDEWAYS`) instead of "show a flat surface".
+
+Keyframe coverage (v15): a new keyframe must be a new *view* with respect
+to every stored keyframe (rotation above `keyframeRotationDeg` or
+camera-center translation above `keyframeTranslationDepthRatio` × scene
+depth), not only the last one, and when the store is full the most
+redundant keyframe is evicted — never the first (origin view) or the
+newest. A camera swinging between two views keeps two keyframes instead of
+churning through the 8 slots. HUD `Reloc … kf 8 (N made, M out)`. The
+landmarks a stored keyframe observes are exempt from the map's age prune
+(they still count toward `maxLandmarks`), so a keyframe stays usable after
+the view has been out of sight for more than `maxLandmarkAgeFrames`; a
+keyframe with fewer live landmarks than `minInliers` is ranked but never
+spends an LK slot and is evicted first (`Rank KF17 0.91×26`). Keyframe → current LK has its own forward-backward / residual
+bounds (`lkForwardBackwardPx` 2.0, `lkMaxResidual`); the frame-to-frame
+tracker is unchanged. A keyframe that failed is not retried on an
+unchanged view for `retryCooldownFrames` (image change = zero-shift NCC
+vs the view it failed on below `retryImageChangeScore`); the lost pose
+never picks a keyframe. While tracking is weak (PnP below the trusted
+quality or fast motion) the ranking is kept warm (`prepare`) so the first
+lost frame starts from it. Diagnostics: per-keyframe LK status counts and
+a failure reason (`high_fb_error | high_lk_error | too_far | out_of_bounds
+| low_texture | insufficient_tracks`), the ranking, the search stage
+(`prepare | coarse | lk | pnp | validation | confirming | applied`), the
+pending candidate's age (`candidateMaxAgeFrames`) and an episode timeline
+(ms since the loss of the first coarse match / LK / PnP / validation /
+applied pose). `src/vision/RelocalizationSchedule.ts` holds the pure
+scheduling functions.
+
 ## Tests
 
 ```bash
@@ -331,10 +469,12 @@ src/
              OutlierRejection (Homography RANSAC), PoseEstimator (H/E model selection),
              LandmarkMap, MapTracker (init / PnP / triangulation), PlaneDetector,
              PlaneRecovery (plane re-seed after fast motion), PlaneTracker (experimental plane-relative pose),
-             Keyframe, Relocalizer (coarse NCC shift + LK + PnP), VisionEngine, TrackingQuality, types
+             Keyframe, Relocalizer (keyframe ranking + coarse NCC shift + LK + PnP),
+             RelocalizationSchedule (prepare / attempt / retry / timeline), VisionEngine, TrackingQuality, types
   math/      Matrix (3×3, linear solve), Homography (normalized DLT), Decomposition (Jacobi eigen, SVD),
              Pose (rotations, quaternions), EssentialMatrix (8-point, RANSAC, recoverPose),
-             HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber)
+             HomographyDecomposition (Faugeras), Triangulation, Plane (RANSAC), PnP (LM + Huber),
+             BundleAdjustment (LM + Schur complement over keyframes and landmarks),
              CoordinateSystem (map ↔ world ↔ Three.js, projection), Ray, OneEuroFilter
   ar/        WorldAnchor (world frame from the first plane, hit test)
   rendering/ ARCamera, ARWorld, ARObject (world-space motion API), ARRenderer, FramePresenter (pose-synchronized frame)

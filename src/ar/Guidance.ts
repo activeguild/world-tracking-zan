@@ -1,4 +1,4 @@
-import type { PlaneRecoveryState } from "../vision/types";
+import type { PlaneRecoveryState, PlaneSearchStage } from "../vision/types";
 import { TrackingState } from "./ARState";
 
 /**
@@ -20,6 +20,7 @@ export type GuidanceKey =
   | "MOVE_SLOWLY" // map exists, needs parallax
   | "SLOW_DOWN" // fast motion with the map still tracked (plane recovery, v11 §45)
   | "PLANE_WARMUP" // plane points re-collected after a fast motion (v11 §45)
+  | "MOVE_SIDEWAYS" // plane points form a thin strip (extent test), needs a sideways move (v16)
   | "PLANE_DETECTING" // plane candidate, waiting for stability
   | "TAP_TO_PLACE" // world established, nothing placed
   | "NONE" // AR active
@@ -53,6 +54,14 @@ export interface GuidanceContext {
   motionTooLow?: boolean;
   /** Plane recovery state after a significant motion (v11 §28, v11.1 §27); absent / "inactive" when idle. */
   planeRecovery?: PlaneRecoveryState;
+  /**
+   * Where the plane search stopped this frame and for how long it has been
+   * stopping there (ms), with the delay after which a persistent `extent`
+   * stop asks for a sideways move (v16). Absent = not evaluated.
+   */
+  planeSearchStage?: PlaneSearchStage | null;
+  planeSearchStageMs?: number;
+  sidewaysGuidanceDelayMs?: number;
 }
 
 /** Map the engine state to the v10 / v11 phase (v10 §3–§4, §26; v11 §28, §55). */
@@ -92,6 +101,18 @@ export function getGuidance(ctx: GuidanceContext): GuidanceKey {
     // Plane recovery after a fast motion (v11 §15, §45): slow down, then show
     // a flat surface at the new place. Never "go back" (§46).
     if (ctx.planeRecovery === "starting") return "SLOW_DOWN";
+    // v16: the landmarks are there but lie in a strip (the 2D-extent test
+    // keeps failing): only a sideways move widens the floor coverage. Takes
+    // precedence over the warmup / "move slowly" wording once it persists.
+    const candidate = ctx.planeCandidate || ctx.planeRecovery === "candidate" || ctx.planeRecovery === "stable";
+    if (
+      !candidate &&
+      ctx.planeSearchStage === "extent" &&
+      ctx.sidewaysGuidanceDelayMs !== undefined &&
+      (ctx.planeSearchStageMs ?? 0) >= ctx.sidewaysGuidanceDelayMs
+    ) {
+      return "MOVE_SIDEWAYS";
+    }
     if (ctx.planeRecovery === "warmup") return "PLANE_WARMUP";
     if (ctx.state === TrackingState.PLANE_DETECTING) {
       return ctx.planeCandidate || ctx.planeRecovery === "candidate" || ctx.planeRecovery === "stable" ? "PLANE_DETECTING" : "MOVE_SLOWLY";
@@ -122,6 +143,7 @@ export const GUIDANCE_TEXT_JA: Record<GuidanceKey, string> = {
   MOVE_SLOWLY: "スマホをゆっくり左右に動かしてください",
   SLOW_DOWN: "スマホをゆっくり動かしてください",
   PLANE_WARMUP: "平らな場所をゆっくり映してください",
+  MOVE_SIDEWAYS: "スマホを横にゆっくり動かしてください（床の広い範囲を映す）",
   PLANE_DETECTING: "平面を検出しています…",
   TAP_TO_PLACE: "平面をタップしてオブジェクトを置いてください",
   NONE: "",

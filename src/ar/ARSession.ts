@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { CameraManager, type CameraOptions } from "../camera/CameraManager";
-import { FrameGrabber } from "../camera/CameraFrame";
+import { FrameGrabber, type FrameGrabberKind, type FrameSource } from "../camera/CameraFrame";
+import { WebGLFrameGrabber } from "../camera/WebGLFrameGrabber";
 import { approximateIntrinsics, type CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
@@ -23,8 +24,11 @@ import type {
   PoseOutput,
   RelocalizationOutput,
   MotionDiagnostics,
+  BundleAdjustmentOutput,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
+import { wallNow, type EngineTiming } from "../worker/protocol";
+import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
 import { WorldAnchor } from "./WorldAnchor";
 import {
   MainThreadVisionBackend,
@@ -113,11 +117,19 @@ export interface ARStats {
   relocalization: RelocalizationOutput | null;
   /** Frame-to-frame motion level and LK diagnostics (v7). */
   motion: MotionDiagnostics | null;
+  /** Last local bundle adjustment on the current map (Phase 7); null before the first frame. */
+  bundleAdjustment: BundleAdjustmentOutput | null;
   /** World tracking established for the current map (v10): RELOCALIZING is reachable only when true. */
   worldEstablished: boolean;
   planeSearch: PlaneSearchOutput | null;
+  /** How long the plane search has been stopping at its current stage (ms, v16 guidance). */
+  planeSearchStageMs: number;
   /** Plane recovery after fast motion (v11 §23); null before the first frame. */
   planeRecovery: PlaneRecoveryDiagnostics | null;
+  /** Per-stage vision engine time of the last processed frame (ms, v16); null before the first frame. */
+  engineTiming: EngineTiming | null;
+  /** Main-thread / transport time of the last processed frame (ms, v16); null before the first frame. */
+  mainTiming: MainTiming | null;
   state: TrackingState;
   fastThreshold: number;
   framesProcessed: number;
@@ -138,15 +150,48 @@ export interface ARStats {
   poseStale: boolean;
   /** Three.js camera position in world meters (null before the world exists). */
   cameraWorldPosition: number[] | null;
-  /** How long tracking has been lost (ms), 0 while tracking; objects hold their pose meanwhile. */
+  /** How long tracking has been lost (ms), 0 while tracking. */
   lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
   objects: { id: number; position: number[]; yaw: number }[];
+  /** Whether the placed objects are shown, and why not (v13 §15–§16). */
+  objectVisibility: { visible: boolean; reason: ObjectVisibilityReason };
   /** Focal length in processing pixels. */
   focalPx: number;
   /** Frame-synchronized display active. */
   syncVideo: boolean;
   backend: "worker" | "main";
+  /** How the processing frame is read from the video (v16); null before the camera starts. */
+  grabber: FrameGrabberKind | null;
+}
+
+/**
+ * Where a frame's wall time goes outside the vision engine (v16). On Android
+ * Chrome the engine took 22–31 ms yet vision ran at 10–14 fps with 9–16
+ * dropped camera frames per second: the missing 45–65 ms were somewhere in
+ * grab → transfer → engine → transfer → world update → render → present.
+ */
+export interface MainTiming {
+  /** drawImage + getImageData + grayscale of the processing frame. */
+  grabMs: number;
+  /** FramePresenter.capture (display copy for the pose-synchronized frame). */
+  captureMs: number;
+  /** Frame message: handed to the backend → picked up by the worker. */
+  queueInMs: number;
+  /** Engine processing (= VisionResult.processingMs). */
+  engineMs: number;
+  /** Result message: posted by the worker → handled on the main thread (includes waiting for a busy main thread). */
+  queueOutMs: number;
+  /** Handed to the backend → result handled. */
+  roundTripMs: number;
+  /** updateWorld (anchor, visibility, Three.js camera + render). */
+  worldMs: number;
+  /** FramePresenter.present (blit of the synchronized frame). */
+  presentMs: number;
+  /** Debug overlay (features / motion vectors / landmarks / plane grid). */
+  overlayMs: number;
+  /** Interval between consecutive processed-frame results (ms). */
+  resultIntervalMs: number;
 }
 
 type Listener<K extends keyof ARSessionEvents> = ARSessionEvents[K];
@@ -176,7 +221,10 @@ export class ARSession {
   private syncActive = false;
   private backend: VisionBackend | null = null;
   private backendKind: "worker" | "main" = "worker";
-  private grabber: FrameGrabber | null = null;
+  private grabber: FrameSource | null = null;
+  /** Grab times of the first frames on the 2D path (auto grabber selection, v16). */
+  private grabSamplesMs: number[] = [];
+  private grabDecided = false;
   private intrinsics: CameraIntrinsics | null = null;
 
   private running = false;
@@ -205,11 +253,20 @@ export class ARSession {
   private landmarkCount = 0;
   private relocalization: RelocalizationOutput | null = null;
   private motion: MotionDiagnostics | null = null;
+  private bundleAdjustment: BundleAdjustmentOutput | null = null;
   private worldEstablished = false;
   /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
   private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
+  private planeSearchStageSinceMs = 0;
   private planeRecovery: PlaneRecoveryDiagnostics | null = null;
+  private engineTiming: EngineTiming | null = null;
+  private mainTiming: MainTiming | null = null;
+  /** Grab / capture time of the frame in flight (one at a time). */
+  private pendingGrabMs = 0;
+  private pendingCaptureMs = 0;
+  private lastResultAt = 0;
+  private objectVisibility: ObjectVisibilityDecision = { visible: false, reason: "WORLD_NOT_READY" };
   private loggedPlaneRecoveries = 0;
   private loggedPlaneStage: string | null = null;
   private planeWasFound = false;
@@ -246,7 +303,7 @@ export class ARSession {
     this.worldAnchor = new WorldAnchor({ assumedPlaneDistanceMeters: w.assumedPlaneDistanceMeters });
     this.arCamera = new ARCamera(w.near, w.far, w.positionSmoothing, w.rotationSmoothing, options.threeCamera);
     this.arCamera.setSmoothing(w.smoothing);
-    this.world = new ARWorld(w.holdPoseOnLostMs);
+    this.world = new ARWorld();
     this.externalScene = options.threeScene ?? null;
     this.arRenderer = options.threeCanvas ? new ARRenderer(options.threeCanvas, options.threeScene) : null;
     const scene = this.arRenderer?.scene ?? this.externalScene;
@@ -309,7 +366,9 @@ export class ARSession {
       this.config.processing.width,
       this.config.processing.height,
     );
-    this.grabber = new FrameGrabber(size.width, size.height);
+    this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
+    this.grabSamplesMs = [];
+    this.grabDecided = this.config.processing.grabber !== "auto";
     this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
 
     // Frame-synchronized display.
@@ -350,6 +409,8 @@ export class ARSession {
     this.vfcHandle = 0;
     this.backend?.dispose();
     this.backend = null;
+    this.grabber?.dispose?.();
+    this.grabber = null;
     this.camera.stop();
     this.renderer?.clear();
     this.worldAnchor.reset();
@@ -460,9 +521,13 @@ export class ARSession {
       placedObjects: this.world.placedCount,
       relocalization: this.relocalization,
       motion: this.motion,
+      bundleAdjustment: this.bundleAdjustment,
       worldEstablished: this.worldEstablished,
       planeSearch: this.planeSearch,
+      planeSearchStageMs: this.planeSearch ? performance.now() - this.planeSearchStageSinceMs : 0,
       planeRecovery: this.planeRecovery,
+      engineTiming: this.engineTiming,
+      mainTiming: this.mainTiming,
       planePose: this.planePose,
       planeAnchored: this.planeAnchored,
       frameTimestampMs: this.frameTimestampMs,
@@ -471,6 +536,7 @@ export class ARSession {
       poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
       lostMs: this.world.lostDurationMs(performance.now()),
+      objectVisibility: this.objectVisibility,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
@@ -483,6 +549,7 @@ export class ARSession {
       focalPx: this.intrinsics?.fx ?? 0,
       syncVideo: this.syncActive,
       backend: this.backendKind,
+      grabber: this.grabber?.kind ?? null,
     };
   }
 
@@ -543,10 +610,133 @@ export class ARSession {
       if (g && g.length === 3) gravity = [g[0], g[1], g[2]];
     }
     this.lastGravity = gravity;
-    const frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    const g0 = performance.now();
+    let frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    const g1 = performance.now();
+    // A lost WebGL context (GPU reset, background tab) falls back to the 2D path.
+    if (this.grabber instanceof WebGLFrameGrabber && this.grabber.lost) {
+      this.logger.warn("WebGL grabber lost its context: falling back to canvas2d");
+      this.grabber = new FrameGrabber(this.grabber.width, this.grabber.height);
+      this.grabDecided = true;
+      frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
+    }
+    this.maybeSwitchGrabber(g1 - g0);
     // Keep a display copy of this frame for when its pose arrives (GPU blit).
     if (this.syncActive) this.presenter!.capture(this.video, frame.frameId);
+    const g2 = performance.now();
+    this.pendingGrabMs = g1 - g0;
+    this.pendingCaptureMs = g2 - g1;
     this.backend.processFrame(frame);
+  }
+
+  private createGrabber(width: number, height: number, kind: "auto" | FrameGrabberKind): FrameSource {
+    if (kind === "webgl") {
+      try {
+        return new WebGLFrameGrabber(width, height);
+      } catch (e) {
+        this.logger.warn(`WebGL grabber unavailable (${e instanceof Error ? e.message : String(e)}): using canvas2d`);
+      }
+    }
+    return new FrameGrabber(width, height);
+  }
+
+  /**
+   * Auto grabber selection (v16): the 2D path is measured on the first
+   * frames and, when its median grab time exceeds `grabAutoSwitchMs`, the
+   * WebGL path takes over for the rest of the session. On Android Chrome the
+   * 2D readback cost 31–41 ms per frame (the engine took 22–31 ms); on iOS
+   * Safari it is cheap and nothing changes.
+   */
+  private maybeSwitchGrabber(grabMs: number): void {
+    if (this.grabDecided || !this.grabber || this.grabber.kind !== "canvas2d") return;
+    const cfg = this.config.processing;
+    this.grabSamplesMs.push(grabMs);
+    if (this.grabSamplesMs.length < Math.max(1, cfg.grabAutoSwitchFrames)) return;
+    this.grabDecided = true;
+    const sorted = [...this.grabSamplesMs].sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    if (median <= cfg.grabAutoSwitchMs || !WebGLFrameGrabber.available()) {
+      this.logger.info(`grabber: canvas2d (median grab ${median.toFixed(1)} ms over ${sorted.length} frames)`);
+      return;
+    }
+    try {
+      this.grabber = new WebGLFrameGrabber(this.grabber.width, this.grabber.height);
+      this.logger.info(`grabber: switched to webgl (canvas2d median grab ${median.toFixed(1)} ms > ${cfg.grabAutoSwitchMs} ms)`);
+    } catch (e) {
+      this.logger.warn(`WebGL grabber unavailable (${e instanceof Error ? e.message : String(e)}): staying on canvas2d`);
+    }
+  }
+
+  /**
+   * Debug: grab the current video frame with both grabbers and compare the
+   * gray images (mean / max absolute difference, 0–255). Used by the browser
+   * test to prove the WebGL path reproduces the 2D path's orientation and
+   * scale; the shader's luma rounding differs from the integer 2D conversion
+   * by about one gray level.
+   */
+  compareGrabbers(): {
+    meanAbsDiff: number;
+    maxAbsDiff: number;
+    width: number;
+    height: number;
+    /** Mean difference against transformed WebGL images — says *how* the images differ when they do. */
+    alternatives: Record<string, number>;
+    /** Mean difference between two consecutive 2D grabs (how much the frame itself moves between calls). */
+    twoDRepeat: number;
+  } | null {
+    if (!this.grabber || !this.intrinsics || this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+    const { width, height } = this.grabber;
+    const a = new FrameGrabber(width, height);
+    const b = new WebGLFrameGrabber(width, height);
+    // The live video advances between two synchronous grabs (headless
+    // Chromium: ~18 gray levels of difference between two 2D grabs of a
+    // sliding texture); freeze it for the comparison.
+    const wasPlaying = !this.video.paused;
+    if (wasPlaying) this.video.pause();
+    try {
+      const now = performance.now();
+      const ga = a.grab(this.video, now, this.intrinsics).data;
+      const gb = b.grab(this.video, now, this.intrinsics).data;
+      const ga2 = a.grab(this.video, now, this.intrinsics).data;
+      const meanDiff = (map: (x: number, y: number) => number) => {
+        let sum = 0;
+        let n = 0;
+        for (let y = 1; y < height - 1; y++) {
+          for (let x = 1; x < width - 1; x++) {
+            sum += Math.abs(ga[y * width + x] - gb[map(x, y)]);
+            n++;
+          }
+        }
+        return sum / n;
+      };
+      let sum = 0;
+      let max = 0;
+      for (let i = 0; i < ga.length; i++) {
+        const d = Math.abs(ga[i] - gb[i]);
+        sum += d;
+        if (d > max) max = d;
+      }
+      let rep = 0;
+      for (let i = 0; i < ga.length; i++) rep += Math.abs(ga[i] - ga2[i]);
+      return {
+        meanAbsDiff: sum / ga.length,
+        maxAbsDiff: max,
+        width,
+        height,
+        alternatives: {
+          flipY: meanDiff((x, y) => (height - 1 - y) * width + x),
+          flipX: meanDiff((x, y) => y * width + (width - 1 - x)),
+          "dx+1": meanDiff((x, y) => y * width + x + 1),
+          "dx-1": meanDiff((x, y) => y * width + x - 1),
+          "dy+1": meanDiff((x, y) => (y + 1) * width + x),
+          "dy-1": meanDiff((x, y) => (y - 1) * width + x),
+        },
+        twoDRepeat: rep / ga.length,
+      };
+    } finally {
+      b.dispose();
+      if (wasPlaying) void this.video.play().catch(() => undefined);
+    }
   }
 
   /** Show the frame the result belongs to, time-aligned with the pose. */
@@ -583,17 +773,45 @@ export class ARSession {
     this.landmarkCount = r.landmarkCount;
     this.relocalization = r.relocalization;
     this.motion = r.motion;
+    this.bundleAdjustment = r.bundleAdjustment;
+    if (r.bundleAdjustment.ranThisFrame) {
+      const b = r.bundleAdjustment;
+      // v18: the map moved under the camera; move the world frame with it so
+      // that placed objects stay put relative to the local map (no hop).
+      let anchorMoved = false;
+      if (!b.rejected && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: b.correctionRotation, translation: b.correctionTranslation });
+      }
+      if (this.config.debug.log) {
+        const t = b.correctionTranslation;
+        const corr = Math.hypot(t[0], t[1], t[2]);
+        this.logger.info(
+          `BA #${b.runs}${b.rejected ? ` REJECTED (${b.rejectReason}${b.rejectReason === "pose_jump" ? `: KF${b.jumpKeyframeId} ${b.jumpRotationDeg.toFixed(1)}° / ${b.jumpShift.toFixed(3)} u` : ""})` : ""} at frame ${b.lastFrameId}: kf ${b.keyframes} (${b.freeKeyframes} free${b.excludedKeyframes ? `, ${b.excludedKeyframes} excluded` : ""}) lm ${b.landmarks} obs ${b.observations} (+${b.outliers} out, ${b.shifted} shifted) ` +
+            `propagated ${b.propagated} untouched ${b.untouched} ` +
+            `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
+            `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}° ` +
+            `correction ${corr.toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
+    }
     this.worldEstablished = r.worldEstablished;
+    // v16 guidance: how long the plane search has been stuck at one stage
+    // (e.g. `extent` for 7 s on device while the user held the phone still).
+    if ((r.planeSearch?.stage ?? null) !== (this.planeSearch?.stage ?? null)) this.planeSearchStageSinceMs = arrived;
     this.planeSearch = r.planeSearch;
     this.planeRecovery = r.planeRecovery;
+    this.engineTiming = r.timing;
     this.logPlaneRecovery(r);
     this.planePose = r.planePose;
     this.planeAnchored = r.planeAnchor !== null;
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
     this.setState(r.state);
+    const w0 = performance.now();
     this.updateWorld(r);
+    const w1 = performance.now();
     if (this.syncActive) this.presentFrame(r.frameId);
+    const w2 = performance.now();
 
     const found = !!r.plane?.found;
     if (found && !this.planeWasFound) {
@@ -606,11 +824,29 @@ export class ARSession {
       this.emit("planeLost");
     }
 
+    const o0 = performance.now();
     if (this.renderer && this.config.debug.overlay && this.debugVisualization && this.grabber && this.intrinsics) {
       this.renderer.resize();
       this.renderer.draw(r.tracks, r.trackCount, this.grabber.width, this.grabber.height);
       this.planeRenderer?.draw(r.mapPose, r.plane, r.landmarks, r.landmarkCount, this.intrinsics, !this.worldAnchor.isReady);
     }
+    const o1 = performance.now();
+    // v16: main-thread / transport breakdown of this frame (the wall-clock
+    // stamps are comparable across the worker boundary, see protocol.wallNow).
+    const arrivedWall = wallNow();
+    this.mainTiming = {
+      grabMs: this.pendingGrabMs,
+      captureMs: this.pendingCaptureMs,
+      queueInMs: Math.max(0, r.receivedAt - r.sentAt),
+      engineMs: r.processingMs,
+      queueOutMs: Math.max(0, arrivedWall - r.postedAt),
+      roundTripMs: Math.max(0, arrivedWall - r.sentAt),
+      worldMs: w1 - w0,
+      presentMs: w2 - w1,
+      overlayMs: o1 - o0,
+      resultIntervalMs: this.lastResultAt > 0 ? arrived - this.lastResultAt : 0,
+    };
+    this.lastResultAt = arrived;
     this.logger.periodic(performance.now(), {
       state: r.state,
       features: r.quality.featureCount,
@@ -639,26 +875,43 @@ export class ARSession {
     // v5 §8, §18: every relocalization candidate, what was applied, what was
     // rejected (once per reject code), and how the map PnP agreed afterwards.
     const rl = r.relocalization;
+    // v14 §45–§46, §55: the episode timeline (ms since the loss) once the pose is applied.
+    const tl = rl.timeline;
+    const timeline =
+      tl && rl.attempt === "success"
+        ? `\ntimeline (ms since lost) = attempts ${tl.attempts}  first coarse ${tl.firstCoarseMatchMs}  lk ${tl.firstLkSuccessMs}  pnp ${tl.firstPnpSuccessMs}  validation ${tl.validationSuccessMs}  applied ${tl.confirmationSuccessMs}`
+        : "";
     if (rl.attempt === "candidate" || rl.attempt === "success") {
       this.logger.info(
         `RELOCALIZATION ${rl.attempt === "success" ? "APPLIED" : "CANDIDATE"} at frame ${r.frameId} (kf ${rl.keyframeId})\n` +
           `translation = ${len(rl.jumpTranslation)}\nrotation = ${rl.jumpRotationDeg.toFixed(1)}deg\n` +
           `inliers = ${rl.inlierCount}\nerror = ${rl.meanReprojectionErrorPx.toFixed(2)}px${rl.level === "acceptable" ? ` (ACCEPTABLE: relaxed ≤ ${this.config.relocalization.relaxedMeanErrorPx}px, confirmation required)` : rl.level === "strong" ? " (STRONG)" : ""}\nmatch = ${rl.matchScore.toFixed(2)}\n` +
-          `inlier ratio = ${rl.inlierRatio.toFixed(2)}\ncells = ${rl.spatialCells}/9`,
+          `inlier ratio = ${rl.inlierRatio.toFixed(2)}\ncells = ${rl.spatialCells}/9${timeline}`,
       );
       this.loggedRelocReject = null;
     } else if (rl.attempt === "fail") {
       // v6 §1–§5: where the keyframes dropped out (NCC → LK → PnP → VAL) and
       // the best of them, so a failing relocalization can be diagnosed from
-      // the console without the HUD.
+      // the console without the HUD. v14 §23, §48–§49: the ranking, the LK
+      // breakdown of the best candidate and the retry suppression too.
       const d = rl.diagnostics;
-      const key = `${rl.rejectCode}:${d?.best?.stage ?? ""}`;
+      const key = `${rl.rejectCode}:${d?.best?.stage ?? ""}:${d?.best?.lkFailureReason ?? ""}`;
       if (rl.rejectCode && key !== this.loggedRelocReject) {
+        const b = d?.best;
+        const lk = b && b.lkObservations > 0
+          ? `\nlk (best) = ${b.lkTracked}/${b.lkObservations}${b.lkFailureReason ? ` ${b.lkFailureReason}` : ""}  fb ${b.lkStatus.fbError} res ${b.lkStatus.highResidual} far ${b.lkStatus.tooFar} div ${b.lkStatus.diverged} oob ${b.lkStatus.outOfBounds} tex ${b.lkStatus.lowTexture}`
+          : "";
         const stages = d
-          ? `\nkeyframes = ${d.keyframes}  tried = ${d.candidatesTried}\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
-            (d.best
-              ? `\nbest = KF${d.best.keyframeId} stage ${d.best.stage}  ${d.best.inlierCount}i  ${d.best.meanReprojectionErrorPx.toFixed(2)}px  ratio ${d.best.inlierRatio.toFixed(2)}  cells ${d.best.spatialCells}/9  ncc ${d.best.coarseScore.toFixed(2)}`
+          ? `\nkeyframes = ${d.keyframes}  ranked = ${d.ranked.length}  lk budget = ${d.lkCandidates}  pnp budget = ${d.pnpCandidates}  retry suppressed = ${d.retrySuppressed}  thin = ${d.unusableKeyframes}${d.usedPreparedRanking ? "  (prepared ranking)" : ""}` +
+            `\nranking = ${d.ranked.map((k) => `KF${k.keyframeId}:${k.rankScore.toFixed(2)}${k.unusable ? `×${k.alive}` : k.suppressed ? "~" : k.selected ? "" : "·"}`).join(" ")}` +
+            `\nNCC ${d.coarsePassed}/${d.coarseTested} (best ${d.bestCoarseScore.toFixed(2)})  LK ${d.lkPassed}/${d.lkTested}  PnP ${d.pnpPassed}/${d.pnpTested}  VAL ${d.validated}` +
+            (b
+              ? `\nbest = KF${b.keyframeId} stage ${b.stage}  ${b.inlierCount}i  ${b.meanReprojectionErrorPx.toFixed(2)}px  ratio ${b.inlierRatio.toFixed(2)}  cells ${b.spatialCells}/9  ncc ${b.coarseScore.toFixed(2)}` +
+                (b.validation
+                  ? `\njump vs held = ${b.validation.translationJump.toFixed(2)} u / ${b.validation.rotationJumpDeg.toFixed(1)}deg (limits ${d.jumpLimitsActive ? `${b.validation.maxTranslationJump.toFixed(2)} u / ${b.validation.maxRotationJumpDeg}deg` : "off: long loss"})`
+                  : "")
               : "") +
+            lk +
             `\ntrials = ${d.trials.map((t) => `KF${t.keyframeId}:${t.stage}${t.inlierCount ? `(${t.inlierCount}i)` : ""}`).join(" ")}`
           : "";
         this.logger.info(`RELOC REJECT at frame ${r.frameId}\nreason = ${rl.rejectCode}${rl.reason ? `\ndetail = ${rl.reason}` : ""}${stages}`);
@@ -781,7 +1034,25 @@ export class ARSession {
     // Camera pose → Three.js camera. Objects are not touched here (修正指示書 §11, §16).
     if (pose && tracking) this.arCamera.setPose(pose, r.timestamp / 1000);
     const nowMs = performance.now();
-    this.world.updateTracking(tracking, nowMs);
+    this.world.markTracking(tracking, nowMs);
+    // Object visibility follows the trust in the current pose (v13): hidden
+    // while lost / relocalizing / confirming, shown again on a fresh map pose.
+    // The map, the world anchor and the keyframes are not touched by this.
+    const decision = decideObjectVisibility({
+      state: this._state,
+      worldReady: true,
+      worldEstablished: r.worldEstablished,
+      framesSinceTracked: r.mapPose.framesSinceTracked,
+      lostFrameTolerance: this.config.state.mapLostFrameTolerance,
+      relocalized: r.mapPose.relocalized,
+      poseFinite: pose !== null && Array.from(pose.position).every(Number.isFinite) && Array.from(pose.quaternion).every(Number.isFinite),
+      currentlyVisible: !this.world.isHidden,
+    });
+    if (decision.visible !== this.objectVisibility.visible || decision.reason !== this.objectVisibility.reason) {
+      this.logger.info(`OBJECTS ${decision.visible ? "visible" : "hidden"} (${decision.reason}) at frame ${r.frameId}`);
+    }
+    this.objectVisibility = decision;
+    this.world.setObjectsVisible(decision.visible);
     // Objects' own animation, world space, independent of the camera (§14, §29).
     if (this.lastWorldUpdateMs > 0) this.world.update(Math.min(0.1, (nowMs - this.lastWorldUpdateMs) / 1000));
     this.lastWorldUpdateMs = nowMs;

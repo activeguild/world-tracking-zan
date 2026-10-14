@@ -19,6 +19,8 @@ export class ARObject {
   readonly velocity = new THREE.Vector3();
   /** Own rotation about the world Y axis, radians per second. */
   angularVelocityY = 0;
+  /** Visibility requested by the world (tracking trust); rendered only when also placed. */
+  private shown = true;
 
   constructor(
     readonly id: number,
@@ -42,12 +44,16 @@ export class ARObject {
     return this.root.rotation.y;
   }
 
-  /** Put the object on the plane at a world position (Y = 0), optionally facing `yawRad`. */
+  /**
+   * Put the object on the plane at a world position (Y = 0), optionally
+   * facing `yawRad`. Visibility still follows the tracking trust (v13): an
+   * object placed while the objects are hidden stays hidden until shown.
+   */
   place(position: ArrayLike<number>, yawRad = 0): void {
     this.root.position.set(position[0], position[1], position[2]);
     this.root.rotation.set(0, yawRad, 0);
-    this.root.visible = true;
     this._placed = true;
+    this.root.visible = this.shown;
   }
 
   /** Set the world position directly (object motion, not camera motion). */
@@ -76,7 +82,9 @@ export class ARObject {
     if (this.angularVelocityY !== 0) this.root.rotation.y += this.angularVelocityY * dtSec;
   }
 
+  /** Show / hide (tracking trust, v13). The transform is untouched; an unplaced object is never rendered. */
   setVisible(v: boolean): void {
+    this.shown = v;
     this.root.visible = v && this._placed;
   }
 

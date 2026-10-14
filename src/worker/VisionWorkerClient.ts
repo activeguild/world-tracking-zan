@@ -10,11 +10,12 @@ import type {
   PlaneRecoveryDiagnostics,
   PlaneSearchOutput,
   PoseOutput,
+  BundleAdjustmentOutput,
   MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
 import { VisionEngine } from "../vision/VisionEngine";
-import type { EngineTiming, WorkerRequest, WorkerResponse } from "./protocol";
+import { wallNow, type EngineTiming, type WorkerRequest, type WorkerResponse } from "./protocol";
 
 /** Result delivered to the main thread for one processed frame. */
 export interface VisionResult {
@@ -30,6 +31,7 @@ export interface VisionResult {
   planePose: PlanePoseOutput | null;
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
+  bundleAdjustment: BundleAdjustmentOutput;
   worldEstablished: boolean;
   planeRecovery: PlaneRecoveryDiagnostics;
   landmarks: Float32Array;
@@ -41,6 +43,14 @@ export interface VisionResult {
   fastThreshold: number;
   /** The frame buffer, handed back for recycling. */
   grayBuffer: ArrayBuffer;
+  /**
+   * Wall-clock times (`wallNow()`): when the frame was handed to the
+   * backend, when the backend picked it up, when it posted the result
+   * (v16 main-thread timing; the in-thread backend sets them all at once).
+   */
+  sentAt: number;
+  receivedAt: number;
+  postedAt: number;
 }
 
 /**
@@ -62,6 +72,8 @@ export interface VisionBackend {
 export class VisionWorkerClient implements VisionBackend {
   private worker: Worker | null = null;
   private _busy = false;
+  /** Send time of the frame in flight (one at a time). */
+  private sentAt = 0;
   onResult: ((result: VisionResult) => void) | null = null;
   onError: ((message: string, grayBuffer?: ArrayBuffer) => void) | null = null;
 
@@ -106,6 +118,7 @@ export class VisionWorkerClient implements VisionBackend {
               planePose: msg.planePose,
               relocalization: msg.relocalization,
               motion: msg.motion,
+              bundleAdjustment: msg.bundleAdjustment,
               worldEstablished: msg.worldEstablished,
               planeRecovery: msg.planeRecovery,
               landmarks: new Float32Array(msg.landmarks),
@@ -116,6 +129,9 @@ export class VisionWorkerClient implements VisionBackend {
               timing: msg.timing,
               fastThreshold: msg.fastThreshold,
               grayBuffer: msg.gray,
+              sentAt: this.sentAt,
+              receivedAt: msg.receivedAt,
+              postedAt: msg.postedAt,
             });
             return;
           case "error":
@@ -133,6 +149,7 @@ export class VisionWorkerClient implements VisionBackend {
     if (!this.worker || this._busy) return;
     this._busy = true;
     const buffer = frame.data.buffer as ArrayBuffer;
+    this.sentAt = wallNow();
     const req: WorkerRequest = {
       type: "frame",
       frameId: frame.frameId,
@@ -142,6 +159,7 @@ export class VisionWorkerClient implements VisionBackend {
       gray: buffer,
       intrinsics: frame.intrinsics,
       gravity: frame.gravity ?? null,
+      sentAt: this.sentAt,
     };
     this.worker.postMessage(req, [buffer]);
   }
@@ -178,6 +196,7 @@ export class MainThreadVisionBackend implements VisionBackend {
   processFrame(frame: GrayFrame): void {
     const engine = this.engine;
     if (!engine) return;
+    const sentAt = wallNow();
     try {
       const out = engine.process({
         frameId: frame.frameId,
@@ -201,6 +220,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         planePose: out.planePose,
         relocalization: out.relocalization,
         motion: out.motion,
+        bundleAdjustment: out.bundleAdjustment,
         worldEstablished: out.worldEstablished,
         planeRecovery: out.planeRecovery,
         landmarks: out.landmarks,
@@ -211,6 +231,9 @@ export class MainThreadVisionBackend implements VisionBackend {
         timing: { ...engine.timing },
         fastThreshold: engine.fastThreshold,
         grayBuffer: frame.data.buffer as ArrayBuffer,
+        sentAt,
+        receivedAt: sentAt,
+        postedAt: wallNow(),
       });
     } catch (e) {
       this.onError?.(e instanceof Error ? e.message : String(e), frame.data.buffer as ArrayBuffer);

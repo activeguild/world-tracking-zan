@@ -25,10 +25,13 @@ import "./style.css";
  *   ?size=0.15        footprint of the model in meters (default 0.15)
  *   ?fov=66           camera field of view along the long side (degrees)
  *   ?sync=0           show the live video instead of the pose-synchronized frame
+ *   ?grab=2d|gl|auto  frame grabber: 2D canvas readback, WebGL shader, or auto (default: measure, then pick)
  *   ?smooth=1         enable pose smoothing (off by default while the raw pose is validated)
  *   ?dist=0.5         assumed camera→plane distance in meters (scale)
  *   ?walk=1           the placed object walks back and forth on the plane (object motion test)
  *   ?refine=1         re-enable landmark depth refinement (A/B against the fixed map, v2 §26)
+ *   ?freeze=1         no new landmarks once the world is established (A/B: map inconsistency vs camera model, v16)
+ *   ?ba=0             disable the local bundle adjustment on keyframe creation (Phase 7 A/B)
  *   ?planetrack=1     experimental plane-relative pose instead of landmark PnP
  */
 const params = new URLSearchParams(location.search);
@@ -43,12 +46,16 @@ const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 const fovDeg = Number(params.get("fov") ?? "") || undefined;
 const syncVideo = params.get("sync") !== "0";
+// Frame grabber (v16): auto picks canvas2d or webgl from the measured grab time; ?grab=2d / ?grab=gl force one.
+const grabParam = ({ "2d": "canvas2d", gl: "webgl", auto: "auto" } as const)[params.get("grab") ?? ""];
 // Pose smoothing is off by default while the raw pose is validated (v3 §22).
 const smoothingParam = params.get("smooth");
 const assumedDist = Number(params.get("dist") ?? "") || undefined;
 const walk = params.get("walk") === "1";
 const planeTracking = params.get("planetrack") === "1";
 const refineLandmarks = params.get("refine") === "1";
+const freezeMap = params.get("freeze") === "1";
+const bundleAdjustmentParam = params.get("ba");
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -82,9 +89,11 @@ const session = new ARSession({
     processing: {
       ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),
       syncVideoToPose: syncVideo,
+      ...(grabParam ? { grabber: grabParam } : {}),
     },
     planeTracking: { enabled: planeTracking },
-    landmarks: { enableLandmarkDepthRefinement: refineLandmarks },
+    landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap },
+    ...(bundleAdjustmentParam !== null ? { bundleAdjustment: { enabled: bundleAdjustmentParam !== "0" } } : {}),
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
       ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
@@ -126,6 +135,9 @@ function refreshGuidance(): void {
     lostMs: s.lostMs,
     relocGuidanceDelayMs: session.config.world.relocGuidanceDelayMs,
     planeRecovery: s.planeRecovery?.state,
+    planeSearchStage: s.planeSearch?.stage ?? null,
+    planeSearchStageMs: s.planeSearchStageMs,
+    sidewaysGuidanceDelayMs: session.config.world.sidewaysGuidanceDelayMs,
   });
   let text = GUIDANCE_TEXT_JA[key];
   if (key === "TAP_TO_PLACE" && placed) text = "";
@@ -255,6 +267,13 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
     pnpPassed: d.pnpPassed,
     validated: d.validated,
     bestCoarseScore: d.bestCoarseScore,
+    ranked: d.ranked.map((k) => ({ keyframeId: k.keyframeId, score: k.rankScore, selected: k.selected, suppressed: k.suppressed, unusable: k.unusable, alive: k.alive })),
+    lkCandidates: d.lkCandidates,
+    pnpCandidates: d.pnpCandidates,
+    retrySuppressed: d.retrySuppressed,
+    unusableKeyframes: d.unusableKeyframes,
+    usedPreparedRanking: d.usedPreparedRanking,
+    jumpLimitsActive: d.jumpLimitsActive,
     best: b
       ? {
           keyframeId: b.keyframeId,
@@ -264,6 +283,17 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
           inlierRatio: b.inlierRatio,
           spatialCells: b.spatialCells,
           coarseScore: b.coarseScore,
+          lk: {
+            observations: b.lkObservations,
+            tracked: b.lkTracked,
+            fb: b.lkStatus.fbError,
+            residual: b.lkStatus.highResidual,
+            far: b.lkStatus.tooFar,
+            diverged: b.lkStatus.diverged,
+            oob: b.lkStatus.outOfBounds,
+            texture: b.lkStatus.lowTexture,
+            reason: b.lkFailureReason,
+          },
           validation: b.validation
             ? {
                 inliers: b.validation.inliers,
@@ -277,6 +307,10 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
                 nccPassed: b.validation.nccPassed,
                 translationJumpPassed: b.validation.translationJumpPassed,
                 rotationJumpPassed: b.validation.rotationJumpPassed,
+                translationJump: b.validation.translationJump,
+                rotationJumpDeg: b.validation.rotationJumpDeg,
+                maxTranslationJump: b.validation.maxTranslationJump,
+                maxRotationJumpDeg: b.validation.maxRotationJumpDeg,
                 ratio: b.validation.inlierRatio,
                 minRatio: b.validation.minInlierRatio,
                 cells: b.validation.coveredCells,
@@ -303,11 +337,13 @@ function hudRelocDiagnostics(d: RelocalizationDiagnostics | null, age: number): 
 // HUD refresh loop (independent of vision rate). With the HUD hidden nothing
 // is formatted or written to the DOM (v9 §28); the engine's diagnostics are
 // still computed and available through getStats().
+let lastHudMs = 0;
 function refreshHud(): void {
   if (!hudVisible) {
     requestAnimationFrame(refreshHud);
     return;
   }
+  const hud0 = performance.now();
   const s = session.getStats();
   hud.update({
     renderFps: s.renderFps,
@@ -328,8 +364,12 @@ function refreshHud(): void {
     worldEstablished: s.worldEstablished,
     visionMs: s.visionMs,
     framesDropped: s.framesDropped,
+    engineTiming: s.engineTiming,
+    bundleAdjustment: s.bundleAdjustment,
+    mainTiming: s.mainTiming,
+    hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {
@@ -360,6 +400,7 @@ function refreshHud(): void {
           landmarks: s.mapPose.landmarkCount,
           pnpInliers: s.mapPose.inlierCount,
           reprojPx: s.mapPose.meanReprojectionErrorPx,
+          reprojection: s.mapPose.reprojection,
           cameraCenter: s.mapPose.cameraCenter,
           framesSinceTracked: s.mapPose.framesSinceTracked,
           deltaTranslationM: s.worldReady ? s.mapPose.deltaTranslation * s.worldScale : NaN,
@@ -433,10 +474,13 @@ function refreshHud(): void {
       : null,
     cameraWorld: s.cameraWorldPosition,
     objects: s.objects,
+    objectVisibility: s.objectVisibility,
     timing: s.frameTimestampMs > 0 ? { frameMs: s.frameTimestampMs, poseMs: s.poseTimestampMs, ageMs: s.poseAgeMs, stale: s.poseStale } : null,
     reloc: s.relocalization
       ? {
           keyframes: s.relocalization.keyframes,
+          keyframesCreated: s.relocalization.keyframesCreated,
+          keyframesEvicted: s.relocalization.keyframesEvicted,
           attempt: s.relocalization.attempt,
           inliers: s.relocalization.inlierCount,
           errorPx: s.relocalization.meanReprojectionErrorPx,
@@ -454,10 +498,26 @@ function refreshHud(): void {
           postDeg: s.relocalization.postDeltaRotationDeg,
           postInconsistent: s.relocalization.postInconsistent,
           diag: hudRelocDiagnostics(s.relocalization.diagnostics, s.relocalization.framesSinceAttempt),
+          searchStage: s.relocalization.searchStage,
+          preparing: s.relocalization.preparing,
+          pendingKeyframeId: s.relocalization.pendingKeyframeId,
+          candidateAgeFrames: s.relocalization.candidateAgeFrames,
+          timeline: s.relocalization.timeline
+            ? {
+                attempts: s.relocalization.timeline.attempts,
+                firstCoarseMs: s.relocalization.timeline.firstCoarseMatchMs,
+                firstLkMs: s.relocalization.timeline.firstLkSuccessMs,
+                firstPnpMs: s.relocalization.timeline.firstPnpSuccessMs,
+                validationMs: s.relocalization.timeline.validationSuccessMs,
+                confirmationMs: s.relocalization.timeline.confirmationSuccessMs,
+              }
+            : null,
         }
       : null,
     build: typeof __BUILD_LABEL__ === "string" ? __BUILD_LABEL__ : "dev",
   });
+  // v16: the HUD's own cost (formatting + DOM) is part of the main-thread budget.
+  lastHudMs = performance.now() - hud0;
   requestAnimationFrame(refreshHud);
 }
 requestAnimationFrame(refreshHud);
@@ -469,6 +529,8 @@ declare global {
       session: ARSession;
       stats: () => ReturnType<ARSession["getStats"]>;
       start: () => Promise<void>;
+      /** Compare the 2D and WebGL grabbers on the current frame (v16 test hook). */
+      grabCompare: () => ReturnType<ARSession["compareGrabbers"]>;
     };
   }
 }
@@ -476,4 +538,5 @@ window.__ar = {
   session,
   stats: () => session.getStats(),
   start: () => session.start(),
+  grabCompare: () => session.compareGrabbers(),
 };

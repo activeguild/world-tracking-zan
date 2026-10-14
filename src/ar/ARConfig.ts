@@ -29,6 +29,17 @@ export interface ProcessingConfig {
    * ~2 frames ahead of the pose and objects would lag during motion).
    */
   syncVideoToPose: boolean;
+  /**
+   * How the processing frame is read from the video (v16). `canvas2d` =
+   * drawImage + getImageData (fast on iOS Safari, 31–41 ms per frame on
+   * Android Chrome); `webgl` = texture upload + luma shader + readPixels;
+   * `auto` = start with canvas2d, measure the first `grabAutoSwitchFrames`
+   * grabs and switch to webgl for good when their median exceeds
+   * `grabAutoSwitchMs` (so devices where the 2D path is fast stay on it).
+   */
+  grabber: "auto" | "canvas2d" | "webgl";
+  grabAutoSwitchMs: number;
+  grabAutoSwitchFrames: number;
 }
 
 /** Feature detection configuration (spec §11, §49). */
@@ -126,6 +137,15 @@ export interface PoseConfig {
   /** Hard cap on RANSAC iterations for E. */
   maxIterations: number;
   /**
+   * RANSAC iteration cap (H and E) once the world is established (v16). The
+   * map PnP is then the canonical pose and the two-view estimate only a
+   * rotation prior for lost frames; a low inlier ratio otherwise ran the
+   * essential RANSAC to `maxIterations` (6–17 ms per frame on Android).
+   * Before the world exists the full cap applies (map initialization, plane
+   * recovery triggers). 0 = no reduction.
+   */
+  maxIterationsWhileMapped: number;
+  /**
    * Choose the homography model when H_inliers / (H_inliers + E_inliers)
    * exceeds this (planar scene or pure rotation; ORB-SLAM uses 0.45).
    */
@@ -207,6 +227,19 @@ export interface LandmarkConfig {
    * into the map (pose → landmark → pose). `?refine=1` in the demo for A/B.
    */
   enableLandmarkDepthRefinement: boolean;
+  /**
+   * Diagnostic A/B (v16): stop triangulating new landmarks once the world is
+   * established, so the map stays the one the world was anchored to. On
+   * Android the PnP error grew from 1.4 px (fresh map) to 2.5–3 px while
+   * staying uniform over image position, parallax, track age and landmark
+   * age: the signature of later landmarks being created from slightly
+   * drifted poses. With the map frozen, returning to the first view must
+   * give the fresh-map error if that is the cause (then bundle adjustment
+   * is the fix); if it does not, the camera model is wrong instead. The
+   * frozen map only covers the first view, so tracking is lost when the
+   * camera leaves it. `?freeze=1` in the demo; off by default.
+   */
+  freezeAfterWorld: boolean;
   /**
    * Temporal jump gate (修正指示書 v2 §8, v4 §2–§5). Every pose candidate (map
    * PnP and plane PnP alike) is rejected (frame counted as lost, pose
@@ -337,20 +370,97 @@ export interface RelocalizationConfig {
   keyframeRotationDeg: number;
   /** Median landmark displacement since the last keyframe (px) that triggers a new one. */
   keyframeParallaxPx: number;
-  /** Keyframe candidates tried per lost frame. */
-  candidatesPerFrame: number;
-  /** Coarse search radius (pixels of the coarse image ≈ level-0 / 8). */
+  /**
+   * View coverage (v15): a new keyframe must also differ from *every* stored
+   * keyframe by more than `keyframeRotationDeg` or by a camera-center
+   * translation above this fraction of the scene depth; when the store is
+   * full the most redundant keyframe (closest to another one) is dropped,
+   * never the first or the newest. Stops the 8 slots from churning through
+   * the same two views while the camera swings back and forth.
+   */
+  keyframeTranslationDepthRatio: number;
+  /**
+   * Keyframe ranking (v14 §8–§12): every attempt ranks *all* keyframes by a
+   * cheap coarse similarity (zero-mean NCC on a 1/16 image, shift search of
+   * this radius in its pixels — the same ±level-0 range as
+   * `coarseSearchRadius` on the 1/8 image) and only the best
+   * `maxLkCandidatesPerFrame` go on to the 1/8 refinement, LK and PnP. No
+   * keyframe is excluded by its age or by the lost pose (§13–§15, §35).
+   */
+  rankSearchRadius: number;
+  /**
+   * Refinement of the ranked shift on the 1/8 coarse image (radius in its
+   * pixels around 2 × the rank shift); its score is the coarse NCC that
+   * `coarseMinScore` gates and that v12's relaxed range requires.
+   */
+  coarseRefineRadius: number;
+  /** Coarse search radius (pixels of the coarse image ≈ level-0 / 8); kept for the full search used in tests / fallback. */
   coarseSearchRadius: number;
+  /**
+   * Smallest overlap per axis (fraction of the image) a coarse shift may
+   * have. Shifts are chosen by NCC × √overlap so that a large shift with a
+   * small overlap does not win by chance (on device such shifts put most
+   * keyframe observations outside the image: `out_of_bounds`).
+   */
+  coarseMinOverlap: number;
+  /**
+   * While tracking is weak the keyframe ranking is kept warm every this
+   * many frames (v14 §3–§6). Ranking 8 keyframes costs about one LK pass, so
+   * this is sparser than `attemptEveryNFrames`; a prepared ranking is reused
+   * on the first lost frame only while it is at most this old and the view
+   * has not changed.
+   */
+  prepareEveryNFrames: number;
+  /**
+   * The located PnP counts as weak — and the ranking is prepared — below
+   * this many inliers or above this mean reprojection error (px) (v16).
+   * Separate from the `jumpRejectTrusted*` label: Android Chrome tracks
+   * healthily at 2.6–3.3 px (never ≤ 1.5 px), and with the trusted label as
+   * the gate the preparation ran all session long. The on-device case the
+   * preparation was made for (29 inliers / 1.82 px) still qualifies.
+   */
+  prepareMinInliers: number;
+  prepareMaxErrorPx: number;
   /** Minimum NCC score of the coarse alignment to proceed. */
   coarseMinScore: number;
+  /**
+   * Search budget per attempt (v14 §16–§17): keyframes sent to LK (the top
+   * of the ranking) and to PnP; the first attempt of a lost episode may try
+   * more (`lkCandidatesFirstAttempt`). Never every keyframe (§11).
+   */
+  maxLkCandidatesPerFrame: number;
+  lkCandidatesFirstAttempt: number;
+  maxPnpCandidatesPerFrame: number;
   /** LK displacement gate around the coarse guess (px). */
   lkMaxDisplacementPx: number;
+  /**
+   * Relocalization-specific LK thresholds (v14 §28–§30): keyframe → current
+   * frame LK bridges seconds and a viewpoint change, so its forward-backward
+   * tolerance and residual bound are its own; the normal tracker's values
+   * are untouched. The checks themselves (FB, residual, texture, bounds,
+   * displacement) all stay in force, and PnP + validation remain the
+   * verifiers. Initial candidate values.
+   */
+  lkForwardBackwardPx: number;
+  lkMaxResidual: number;
+  /**
+   * Retry scheduling (v14 §21–§22, §34): a keyframe that failed is not sent
+   * to LK again for this many frames *unless the image changed* — the
+   * current 1/16 image vs the one it failed on has a zero-shift NCC below
+   * `retryImageChangeScore`. It stays ranked and visible in the diagnostics.
+   */
+  retryCooldownFrames: number;
+  retryImageChangeScore: number;
+  /**
+   * A pending (validated, unconfirmed) candidate older than this many frames
+   * is dropped and recomputed (v14 §43–§44): a stale candidate is never
+   * applied as the current pose.
+   */
+  candidateMaxAgeFrames: number;
   pnpHuberPx: number;
   pnpInlierPx: number;
   /** Inliers needed to accept a relocalization. */
   minInliers: number;
-  /** Stop trying more candidates once this many inliers are found. */
-  goodInliers: number;
   /** Strict reprojection bound: a candidate at or below this is `strong` (v12 §3.1). */
   maxMeanErrorPx: number;
   /**
@@ -381,6 +491,20 @@ export interface RelocalizationConfig {
    */
   maxTranslationJumpDepthRatio: number;
   maxRotationJumpDeg: number;
+  /**
+   * The jump limits above are only applied while the held pose is fresh:
+   * up to this many lost frames (v16). While lost the pose is dead-reckoned
+   * (velocity for a few frames, then held; rotation from the two-view prior
+   * when one exists), and on device a full turn that was lost half-way left
+   * it ~150° from the true pose — the correct candidate at the start view
+   * (NCC 0.97, 263 inliers in the synthetic replay) was rejected as a
+   * `rotation_jump` on every attempt. Beyond this age the jump is recorded
+   * as a diagnostic only; the other validators (inliers, error, ratio,
+   * spatial, NCC, confirmation, post-monitor) still apply. Same horizon as
+   * `landmarks.longLostFrames`, after which relocalization is the preferred
+   * way back anyway.
+   */
+  jumpLimitMaxLostFrames: number;
   /** Frames the map may stay lost before a relocalization attempt starts. */
   startAfterLostFrames: number;
   /** Failed relocalization attempts required (besides the lost time) before the map / world are reset. */
@@ -422,7 +546,13 @@ export interface RelocalizationConfig {
 export interface WorldConfig {
   /** Assumed camera→plane distance (m) when the world is created; fixes the monocular scale. */
   assumedPlaneDistanceMeters: number;
-  /** Keep rendering objects at the last pose for this long after tracking is lost (ms, spec §33). */
+  /**
+   * No longer used for object visibility (v13 §1–§2, §5): objects are hidden
+   * as soon as the state machine declares the loss (its own
+   * `state.mapLostFrameTolerance` / `lostFrameTolerance` hysteresis) and
+   * shown again only on a fresh, confirmed map pose. Kept for configuration
+   * compatibility.
+   */
   holdPoseOnLostMs: number;
   /**
    * After the world was lost, show generic recovery guidance first; the
@@ -430,6 +560,14 @@ export interface WorldConfig {
    * has been failing for this long (ms, v10 §14–§15).
    */
   relocGuidanceDelayMs: number;
+  /**
+   * Before a world exists, when the plane search has been stopping at the
+   * 2D-extent test for this long (ms, v16): the floor landmarks form a thin
+   * strip (low-texture carpet, little translation — 7 s on device while the
+   * phone was held still), so ask for a sideways move instead of "show a
+   * flat surface".
+   */
+  sidewaysGuidanceDelayMs: number;
   /**
    * Apply the One Euro filters to the rendered camera pose. Off while the
    * raw pose is being validated (v3 §22): filter lag and real drift must not
@@ -517,6 +655,73 @@ export interface PlaneTrackingConfig {
   liftCooldownFrames: number;
 }
 
+/**
+ * Local bundle adjustment (Phase 7, spec §37). Each time a keyframe is
+ * created, the stored keyframes' poses (the first one fixed) and the
+ * landmarks they observe in at least `minLandmarkObservations` of them are
+ * refined jointly against the keyframe observations. On device the map
+ * built from fixed per-creation poses drifted into groups that disagreed by
+ * 2–3 px (recordings 18–19); BA is the step that makes them one map.
+ */
+export interface BundleAdjustmentConfig {
+  enabled: boolean;
+  /** Run only once this many keyframes exist (the first is fixed, so 2 = one free pose). */
+  minKeyframes: number;
+  /**
+   * A landmark is refined when at least this many keyframes observe it. 1
+   * (v18): with the landmark prior holding the depth, a single keyframe
+   * observation still ties the landmark to that keyframe's corrected pose;
+   * at 2 (recording 21) only a third of the map was solved and the rest
+   * stayed in the old frame, splitting the map the BA was meant to unify.
+   */
+  minLandmarkObservations: number;
+  /** Observations whose error before the solve exceeds this (px) are left out as gross outliers. */
+  maxObservationErrorPx: number;
+  /** Huber threshold on the reprojection error (px). */
+  huberPx: number;
+  maxIterations: number;
+  /**
+   * Weak priors (v17, recording 20): keyframes made mostly by rotation leave
+   * landmark depths nearly free, and the solve slid 25–60% of the landmarks
+   * by more than 20% of their depth and dragged the poses along. A landmark
+   * moving this fraction of its depth from its start costs as much as one
+   * observation off by `huberPx`; likewise a free keyframe moving
+   * `posePriorTranslationDepthRatio` × median depth or rotating
+   * `posePriorRotationDeg`. 0 disables the prior.
+   */
+  landmarkPriorDepthRatio: number;
+  posePriorTranslationDepthRatio: number;
+  posePriorRotationDeg: number;
+  /**
+   * Sanity check on the whole solve: a landmark moved by more than this
+   * fraction of its depth counts as "shifted"; when more than
+   * `maxShiftedFraction` of the landmarks shifted, the run is rejected and
+   * the map and keyframe poses are left untouched (a partial write-back
+   * would split the map into two inconsistent groups).
+   */
+  maxLandmarkShiftRatio: number;
+  maxShiftedFraction: number;
+  /**
+   * v18 (iPhone recording 22): a run is also rejected when it does not cut
+   * the keyframe-observation error by at least this fraction. A consistent
+   * map (1.0 → 0.91 px on iPhone) gains nothing from the solve, yet every
+   * run moved the keyframes 0.3 u / 1° along weakly constrained directions
+   * and the placed cube hopped on screen at every keyframe. 0 disables.
+   */
+  minGainFraction: number;
+  /**
+   * v19 (Android recording 24): a run in which any free keyframe moved by
+   * more than this multiple of its prior σ (rotation `posePriorRotationDeg`
+   * or translation `posePriorTranslationDepthRatio` × median depth) is
+   * rejected as `pose_jump` — a diverged solve (a keyframe rotating 11°
+   * against a 3° prior) must not be written back. A keyframe that causes
+   * this `maxPoseJumpStrikes` runs in a row is left out of later solves
+   * (its observations disagree with the map). 0 disables the guard.
+   */
+  maxPoseJumpPriorRatio: number;
+  maxPoseJumpStrikes: number;
+}
+
 export interface ARConfig {
   processing: ProcessingConfig;
   features: FeatureConfig;
@@ -527,6 +732,7 @@ export interface ARConfig {
   plane: PlaneConfig;
   planeTracking: PlaneTrackingConfig;
   relocalization: RelocalizationConfig;
+  bundleAdjustment: BundleAdjustmentConfig;
   world: WorldConfig;
   state: StateConfig;
   debug: DebugConfig;
@@ -541,6 +747,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxVisionFps: 30,
     longSideFovDeg: 66,
     syncVideoToPose: true,
+    grabber: "auto",
+    grabAutoSwitchMs: 12,
+    grabAutoSwitchFrames: 30,
   },
   features: {
     maxFeatures: 300,
@@ -591,6 +800,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     minCorrespondences: 20,
     ransacThresholdPx: 1.5,
     maxIterations: 300,
+    maxIterationsWhileMapped: 80,
     homographyRatioThreshold: 0.45,
     minParallaxPx: 2.0,
     fullConfidenceParallaxPx: 25,
@@ -626,6 +836,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     lostResetFrames: 300,
     refineParallaxGrowth: 1.3,
     enableLandmarkDepthRefinement: false,
+    freezeAfterWorld: false,
     jumpRejectDepthRatio: 0.08,
     jumpRejectSpeedFactor: 3,
     jumpRejectRotationDeg: 20,
@@ -657,17 +868,46 @@ export const DEFAULT_CONFIG: ARConfig = {
     keyframeMaxFrameGap: 90,
     keyframeRotationDeg: 10,
     keyframeParallaxPx: 40,
-    candidatesPerFrame: 2,
+    // Consistent with keyframeParallaxPx: 40 px at the default focal length
+    // (≈ 640 px) is a camera translation of about 6 % of the scene depth.
+    keyframeTranslationDepthRatio: 0.06,
+    // v14 §10–§11: rank all keyframes on the 1/16 image (±12 px there = the
+    // ±192 level-0 px the old ±24 px search on the 1/8 image covered, at
+    // ~1/8 of its cost per keyframe), refine the top ones on the 1/8 image.
+    rankSearchRadius: 12,
+    coarseRefineRadius: 2,
     coarseSearchRadius: 24,
+    coarseMinOverlap: 0.5,
+    // On device the preparation every 3 frames (PnP below trusted quality the
+    // whole time) cost 25 → 43 ms per frame; every 10 frames keeps the
+    // ranking at most a third of a second old.
+    prepareEveryNFrames: 10,
+    prepareMinInliers: 40,
+    prepareMaxErrorPx: 3.5,
     // The PnP acceptance (≥ 25 inliers, ≤ 1.5 px) is the real verifier; the
     // coarse score only saves work. 0.45 refused views that came back with a
     // few degrees of rotation.
     coarseMinScore: 0.25,
+    // v14 §16–§17: top 3 keyframes per attempt (4 on the first attempt of an
+    // episode), never all 8 through LK / PnP.
+    maxLkCandidatesPerFrame: 3,
+    lkCandidatesFirstAttempt: 4,
+    maxPnpCandidatesPerFrame: 3,
     lkMaxDisplacementPx: 40,
+    // v14 §28–§30: keyframe → current LK after seconds and a viewpoint change
+    // is not frame-to-frame LK; its forward-backward tolerance is its own
+    // (the tracker keeps 1.0 px). PnP (6 px) and validation still decide.
+    lkForwardBackwardPx: 2.0,
+    lkMaxResidual: 30,
+    // v14 §21–§22: a failed keyframe waits two attempt periods (3 frames
+    // each) unless the image changed (NCC vs the frame it failed on < 0.9).
+    retryCooldownFrames: 6,
+    retryImageChangeScore: 0.9,
+    // v14 §43–§44: a candidate is confirmed in the next frame or dropped.
+    candidateMaxAgeFrames: 2,
     pnpHuberPx: 4,
     pnpInlierPx: 6,
     minInliers: 25,
-    goodInliers: 60,
     maxMeanErrorPx: 1.5,
     // Keyframe→current LK after a loss is naturally noisier than the
     // per-frame LK; between 1.5 and 3 px the other conditions decide (v12).
@@ -675,6 +915,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     relaxedMinMatchScore: 0.5,
     maxTranslationJumpDepthRatio: 1.0,
     maxRotationJumpDeg: 90,
+    jumpLimitMaxLostFrames: 30,
     startAfterLostFrames: 1,
     minAttemptsBeforeReset: 10,
     // Every 3rd frame: relocalization attempts dominated the lost-frame cost
@@ -709,10 +950,10 @@ export const DEFAULT_CONFIG: ARConfig = {
   },
   world: {
     assumedPlaneDistanceMeters: 0.5,
-    // Debug value (v3 §14): a short loss must not hide the content; the pose
-    // is held at the last good one. Tighten for production.
+    // Unused since v13 (objects hide on the engine's own lost hysteresis).
     holdPoseOnLostMs: 10000,
     relocGuidanceDelayMs: 2000,
+    sidewaysGuidanceDelayMs: 1500,
     smoothing: false,
     // Light smoothing: with the displayed frame synchronized to the pose,
     // any filter lag shows up as the object sliding during motion.
@@ -739,6 +980,22 @@ export const DEFAULT_CONFIG: ARConfig = {
     minRayAngleDeg: 5,
     maxLiftDistanceRatio: 4,
     liftCooldownFrames: 10,
+  },
+  bundleAdjustment: {
+    enabled: true,
+    minKeyframes: 2,
+    minLandmarkObservations: 1,
+    maxObservationErrorPx: 10,
+    huberPx: 2,
+    maxIterations: 15,
+    landmarkPriorDepthRatio: 0.1,
+    posePriorTranslationDepthRatio: 0.05,
+    posePriorRotationDeg: 3,
+    maxLandmarkShiftRatio: 0.2,
+    maxShiftedFraction: 0.1,
+    minGainFraction: 0.15,
+    maxPoseJumpPriorRatio: 2,
+    maxPoseJumpStrikes: 2,
   },
   state: {
     minTrackedForTracking: 40,
@@ -773,6 +1030,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
     plane: { ...base.plane, ...overrides.plane },
     planeTracking: { ...base.planeTracking, ...overrides.planeTracking },
     relocalization: { ...base.relocalization, ...overrides.relocalization },
+    bundleAdjustment: { ...base.bundleAdjustment, ...overrides.bundleAdjustment },
     world: {
       ...base.world,
       ...overrides.world,
@@ -796,6 +1054,7 @@ function structuredCloneConfig(c: ARConfig): ARConfig {
     plane: { ...c.plane },
     planeTracking: { ...c.planeTracking },
     relocalization: { ...c.relocalization },
+    bundleAdjustment: { ...c.bundleAdjustment },
     world: { ...c.world, positionSmoothing: { ...c.world.positionSmoothing }, rotationSmoothing: { ...c.world.rotationSmoothing } },
     state: { ...c.state },
     debug: { ...c.debug },

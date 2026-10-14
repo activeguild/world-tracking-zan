@@ -15,7 +15,7 @@ import {
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
-import type { PoseCandidateReport, Track, TriangulationStats } from "./types";
+import { emptyReprojectionBreakdown, type PoseCandidateReport, type ReprojectionBreakdown, type Track, type TriangulationStats } from "./types";
 
 /**
  * SLAM-lite front end (spec §19–§20, Phase 3):
@@ -51,6 +51,8 @@ export interface MapTrackingResult {
   reassociated: number;
   /** Why landmark-less tracks did / did not become landmarks this frame (v11 diagnostics). */
   triangulation: TriangulationStats;
+  /** PnP inlier error by image region / landmark kind (v16 diagnostics). */
+  reprojection: ReprojectionBreakdown;
 }
 
 export function emptyTriangulationStats(): TriangulationStats {
@@ -121,10 +123,25 @@ const EMPTY_RESULT: MapTrackingResult = {
   jumpRejected: false,
   reassociated: 0,
   triangulation: emptyTriangulationStats(),
+  reprojection: emptyReprojectionBreakdown(),
 };
 
 export class MapTracker {
   readonly map = new LandmarkMap();
+  /** Landmarks exempt from the age prune (those a stored keyframe observes, v15); set by the engine each frame. */
+  protectedLandmarkIds: ReadonlySet<number> | null = null;
+  /**
+   * No new landmarks this frame (the `freezeAfterWorld` A/B, set by the
+   * engine once the world exists). PnP, classification, re-association and
+   * pruning are unchanged; only the triangulation block is skipped.
+   */
+  freezeTriangulation = false;
+  /**
+   * Id of the newest stored keyframe (set by the engine after each keyframe
+   * creation); recorded on every landmark triangulated from now on as its
+   * reference keyframe (Phase 7 v18). -1 before the first keyframe.
+   */
+  referenceKeyframeId = -1;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -233,6 +250,7 @@ export class MapTracker {
     this.framesSinceSwitch = 0;
     this.velocity.fill(0);
     this.lastDepth = 0;
+    this.referenceKeyframeId = -1;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -287,6 +305,7 @@ export class MapTracker {
       lm.anchorY = track.refY;
       lm.parallax = this.tri.parallax; // last computed; refined below
       track.landmarkId = lm.id;
+      track.linkSource = "native";
     }
     // Record each landmark's own parallax (the loop above reused the scratch).
     for (const { track, p } of created) {
@@ -555,6 +574,7 @@ export class MapTracker {
     let tracked = false;
     let inlierCount = 0;
     let meanErrPx = 0;
+    let reprojection = emptyReprojectionBreakdown();
     // v4 §10: a jump of either candidate is a jump.
     const jumpRejected = isJumpRejection(mapRejection) || isJumpRejection(planeRejection);
     if (chosen) {
@@ -572,6 +592,7 @@ export class MapTracker {
         const cls = this.classify(this._pose, n, cfg.pnpInlierPx / f);
         inlierCount = cls.inlierCount;
         meanErrPx = cls.meanError * f;
+        reprojection = this.reprojectionBreakdown(this._pose, n, obsTracks, cls.inliers, k, frameId);
         const maxErr = cfg.maxTriangulationErrorPx / f;
         for (let i = 0; i < n; i++) {
           const lm = this.map.get(obsTracks[i].landmarkId)!;
@@ -677,13 +698,16 @@ export class MapTracker {
     // ---- Triangulate new landmarks ----
     let created = 0;
     const tri = emptyTriangulationStats();
-    if (tracked) {
+    if (tracked && !this.freezeTriangulation) {
       const maxErr = cfg.maxTriangulationErrorPx / f;
       const minAngle = (cfg.minTriangulationAngleDeg * Math.PI) / 180;
       const minPar = cfg.triangulateMinParallaxPx;
       // Depth sanity against the existing map (a point "at infinity" or in
       // front of the lens is a triangulation failure, not a landmark).
       const medDepth = n > 0 ? this.medianDepth(this._pose, n) : 0;
+      // The landmark cap bounds the *unprotected* landmarks (v15): the
+      // keyframe-protected ones must not block triangulation in a new view.
+      let unprotectedCount = this.map.countUnprotected(this.protectedLandmarkIds);
       for (const t of tracks) {
         if (t.landmarkId >= 0 || !t.anchorPose || t.anchorFrame === frameId) continue;
         tri.candidates++;
@@ -691,7 +715,7 @@ export class MapTracker {
           tri.parallaxRejected++;
           continue;
         }
-        if (this.map.size >= cfg.maxLandmarks) break;
+        if (unprotectedCount >= cfg.maxLandmarks) break;
         // Relative pose anchor → current, triangulate in the anchor frame.
         const anchorInv = invertTransform(t.anchorPose);
         const rel = composeTransforms(this._pose, anchorInv);
@@ -724,12 +748,15 @@ export class MapTracker {
         const Y = r[3] * pa[0] + r[4] * pa[1] + r[5] * pa[2] + tt[1];
         const Z = r[6] * pa[0] + r[7] * pa[1] + r[8] * pa[2] + tt[2];
         const lm = this.map.add([X, Y, Z], t.id, frameId);
+        unprotectedCount++;
         lm.observations = 2;
         lm.anchorPose = t.anchorPose;
         lm.anchorX = t.anchorX;
         lm.anchorY = t.anchorY;
         lm.parallax = this.tri.parallax;
+        lm.refKeyframeId = this.referenceKeyframeId;
         t.landmarkId = lm.id;
+        t.linkSource = "native";
         created++;
       }
     }
@@ -748,7 +775,8 @@ export class MapTracker {
       reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, imageMotion ? null : this._pose);
     }
     // Pruning by age counts only tracked frames: a loss must not erode the map.
-    if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks);
+    // Landmarks a stored keyframe observes are exempt from the age rule (v15).
+    if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks, this.protectedLandmarkIds);
     const center = this.cameraCenter();
     this.lastResult = {
       tracked,
@@ -762,8 +790,169 @@ export class MapTracker {
       translationPredicted,
       jumpRejected,
       triangulation: tri,
+      reprojection,
     };
     return this.lastResult;
+  }
+
+  /**
+   * Phase 7: after a bundle adjustment moved the map, triangulation anchors
+   * taken under the old poses would pair an old pose with a refined one.
+   * Clear them; landmark-less tracks re-anchor in the next tracked frame.
+   */
+  resetAnchors(tracks: readonly Track[]): void {
+    for (const t of tracks) {
+      if (t.landmarkId >= 0) continue;
+      t.anchorFrame = -1;
+      t.anchorPose = null;
+    }
+  }
+
+  /**
+   * Phase 7 (v18): a bundle adjustment moved the map; `correction` maps old
+   * map coordinates to new ones near the current view (the correction of the
+   * keyframe created in this frame, whose pose *is* this frame's pose).
+   * Re-express the canonical pose in the corrected map so the next PnP
+   * starts from — and the temporal gate measures against — a pose
+   * consistent with the landmarks it will see. Not a candidate: the pose
+   * itself did not change, only the frame it is written in.
+   */
+  rebasePose(correction: RigidTransform): void {
+    // X_cam = T_cur X_old = T_cur C⁻¹ X_new  →  T_new = T_cur ∘ C⁻¹
+    const p = composeTransforms(this._pose, invertTransform(correction));
+    this._pose = { rotation: Float64Array.from(p.rotation), translation: Float64Array.from(p.translation) };
+  }
+
+  /**
+   * Reprojection error of the PnP inliers split by image region (center
+   * disc vs edge ring, radius = half the half-diagonal) and by landmark kind
+   * (on the detected plane vs the rest), v16 diagnostics. A device whose
+   * focal length or lens distortion departs from the assumed pinhole model
+   * shows a larger error in the edge ring than in the center. Also by the
+   * landmark's triangulation parallax (depth noise) and by the age of the
+   * observing track vs the age of the landmark (LK drift vs map
+   * inconsistency).
+   */
+  private reprojectionBreakdown(
+    pose: RigidTransform,
+    n: number,
+    obsTracks: Track[],
+    inliers: Uint8Array,
+    k: CameraIntrinsics,
+    frameId: number,
+  ): ReprojectionBreakdown {
+    const out = emptyReprojectionBreakdown();
+    const r = pose.rotation;
+    const t = pose.translation;
+    const halfDiag = Math.hypot(k.width, k.height) / 2;
+    const centerR = out.centerRadius * halfDiag;
+    const f = (k.fx + k.fy) / 2;
+    for (let i = 0; i < n; i++) {
+      if (!inliers[i]) continue;
+      const X = this.pts3[i * 3], Y = this.pts3[i * 3 + 1], Z = this.pts3[i * 3 + 2];
+      const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
+      if (z <= 1e-6) continue;
+      const u = (r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z;
+      const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
+      const errPx = Math.hypot(u - this.obsX[i], v - this.obsY[i]) * f;
+      const tr = obsTracks[i];
+      const radius = Math.hypot(tr.x - k.cx, tr.y - k.cy);
+      if (radius <= centerR) {
+        out.centerCount++;
+        out.centerErrorPx += errPx;
+      } else {
+        out.edgeCount++;
+        out.edgeErrorPx += errPx;
+      }
+      const lm = this.map.get(tr.landmarkId);
+      if (lm?.planeInlier) {
+        out.planeCount++;
+        out.planeErrorPx += errPx;
+      } else {
+        out.otherCount++;
+        out.otherErrorPx += errPx;
+      }
+      // By the landmark's own triangulation parallax (ray angle, radians).
+      const parDeg = lm ? (lm.parallax * 180) / Math.PI : 0;
+      if (parDeg < out.parallaxLowDeg) {
+        out.lowParallaxCount++;
+        out.lowParallaxErrorPx += errPx;
+      } else if (parDeg < out.parallaxHighDeg) {
+        out.midParallaxCount++;
+        out.midParallaxErrorPx += errPx;
+      } else {
+        out.highParallaxCount++;
+        out.highParallaxErrorPx += errPx;
+      }
+      // By track age (frames since FAST detected this corner).
+      if (tr.age < out.ageYoungFrames) {
+        out.youngTrackCount++;
+        out.youngTrackErrorPx += errPx;
+      } else if (tr.age < out.ageOldFrames) {
+        out.midTrackCount++;
+        out.midTrackErrorPx += errPx;
+      } else {
+        out.oldTrackCount++;
+        out.oldTrackErrorPx += errPx;
+      }
+      // By landmark age (frames since triangulation).
+      const lmAge = lm ? frameId - lm.firstFrame : 0;
+      if (lmAge < out.ageYoungFrames) {
+        out.youngLandmarkCount++;
+        out.youngLandmarkErrorPx += errPx;
+      } else if (lmAge < out.ageOldFrames) {
+        out.midLandmarkCount++;
+        out.midLandmarkErrorPx += errPx;
+      } else {
+        out.oldLandmarkCount++;
+        out.oldLandmarkErrorPx += errPx;
+      }
+      // By how the last bundle adjustment treated the landmark (v18): a gap
+      // between the adjusted and the untouched group is a map BA split in two.
+      const mode = lm?.baMode ?? "none";
+      if (mode === "adjusted") {
+        out.adjustedCount++;
+        out.adjustedErrorPx += errPx;
+      } else if (mode === "propagated") {
+        out.propagatedCount++;
+        out.propagatedErrorPx += errPx;
+      } else {
+        out.untouchedCount++;
+        out.untouchedErrorPx += errPx;
+      }
+      // By how the track got its landmark (v19): association vs map error.
+      const src = tr.linkSource ?? "native";
+      if (src === "relink") {
+        out.relinkCount++;
+        out.relinkErrorPx += errPx;
+      } else if (src === "reloc") {
+        out.relocCount++;
+        out.relocErrorPx += errPx;
+      } else {
+        out.nativeCount++;
+        out.nativeErrorPx += errPx;
+      }
+    }
+    if (out.nativeCount) out.nativeErrorPx /= out.nativeCount;
+    if (out.relinkCount) out.relinkErrorPx /= out.relinkCount;
+    if (out.relocCount) out.relocErrorPx /= out.relocCount;
+    if (out.adjustedCount) out.adjustedErrorPx /= out.adjustedCount;
+    if (out.propagatedCount) out.propagatedErrorPx /= out.propagatedCount;
+    if (out.untouchedCount) out.untouchedErrorPx /= out.untouchedCount;
+    if (out.centerCount) out.centerErrorPx /= out.centerCount;
+    if (out.edgeCount) out.edgeErrorPx /= out.edgeCount;
+    if (out.planeCount) out.planeErrorPx /= out.planeCount;
+    if (out.otherCount) out.otherErrorPx /= out.otherCount;
+    if (out.lowParallaxCount) out.lowParallaxErrorPx /= out.lowParallaxCount;
+    if (out.midParallaxCount) out.midParallaxErrorPx /= out.midParallaxCount;
+    if (out.highParallaxCount) out.highParallaxErrorPx /= out.highParallaxCount;
+    if (out.youngTrackCount) out.youngTrackErrorPx /= out.youngTrackCount;
+    if (out.midTrackCount) out.midTrackErrorPx /= out.midTrackCount;
+    if (out.oldTrackCount) out.oldTrackErrorPx /= out.oldTrackCount;
+    if (out.youngLandmarkCount) out.youngLandmarkErrorPx /= out.youngLandmarkCount;
+    if (out.midLandmarkCount) out.midLandmarkErrorPx /= out.midLandmarkCount;
+    if (out.oldLandmarkCount) out.oldLandmarkErrorPx /= out.oldLandmarkCount;
+    return out;
   }
 
   /**
@@ -862,6 +1051,7 @@ export class MapTracker {
       }
       if (best) {
         best.landmarkId = lm.id;
+        best.linkSource = "relink";
         best.anchorFrame = -1;
         best.anchorPose = null;
         lm.trackId = best.id;

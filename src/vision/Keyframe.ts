@@ -18,21 +18,25 @@ export interface Keyframe {
   /** X_cam = R X_map + t */
   pose: RigidTransform;
   pyramid: ImagePyramid;
-  /** Coarse (level-3 equivalent) image used for the global shift search. */
-  coarse: { width: number; height: number; data: Uint8Array; mean: number; norm: number };
+  /** Coarse (level-3 equivalent, 1/8) image used for the global shift search. */
+  coarse: CoarseImage;
+  /** Even coarser (1/16) image used to rank all keyframes cheaply every attempt (v14 §10). */
+  rank: CoarseImage;
   observations: KeyframeObservation[];
 }
 
-/**
- * Downsample a pyramid level by 2 (box filter) into a fresh buffer.
- */
-export function downsampleToCoarse(src: { width: number; height: number; data: Uint8Array }): {
+export interface CoarseImage {
   width: number;
   height: number;
   data: Uint8Array;
   mean: number;
   norm: number;
-} {
+}
+
+/**
+ * Downsample a pyramid level by 2 (box filter) into a fresh buffer.
+ */
+export function downsampleToCoarse(src: { width: number; height: number; data: Uint8Array }): CoarseImage {
   const w = src.width >> 1;
   const h = src.height >> 1;
   const out = new Uint8Array(w * h);

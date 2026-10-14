@@ -23,7 +23,7 @@ export interface HudCandidate {
   rejectDetail: string | null;
 }
 
-/** Stage counters of the last relocalization attempt (v6 §1, §5). */
+/** Stage counters of the last relocalization attempt (v6 §1, §5; v14 §23, §46–§48). */
 export interface HudRelocDiagnostics {
   keyframes: number;
   tried: number;
@@ -33,6 +33,16 @@ export interface HudRelocDiagnostics {
   pnpPassed: number;
   validated: number;
   bestCoarseScore: number;
+  /** v14: ranking of all keyframes (best first), the LK / PnP budget used and the keyframes held back by the retry cooldown. */
+  ranked: { keyframeId: number; score: number; selected: boolean; suppressed: boolean; unusable: boolean; alive: number }[];
+  lkCandidates: number;
+  pnpCandidates: number;
+  retrySuppressed: number;
+  /** Keyframes with too few live landmarks to relocalize (v15). */
+  unusableKeyframes: number;
+  usedPreparedRanking: boolean;
+  /** The jump limits vs the held pose were in force (v16); false after a long loss. */
+  jumpLimitsActive: boolean;
   best: {
     keyframeId: number;
     stage: string;
@@ -41,6 +51,8 @@ export interface HudRelocDiagnostics {
     inlierRatio: number;
     spatialCells: number;
     coarseScore: number;
+    /** v14 §49: LK breakdown of the best candidate. */
+    lk: { observations: number; tracked: number; fb: number; residual: number; far: number; diverged: number; oob: number; texture: number; reason: string | null };
     /** Per-condition validation of the best candidate (v9 §21), null before PnP. */
     validation: {
       inliers: number;
@@ -56,6 +68,11 @@ export interface HudRelocDiagnostics {
       nccPassed: boolean;
       translationJumpPassed: boolean;
       rotationJumpPassed: boolean;
+      /** Jump vs the held pose (map units / deg) and the limits in force (Infinity = not checked, v16). */
+      translationJump: number;
+      rotationJumpDeg: number;
+      maxTranslationJump: number;
+      maxRotationJumpDeg: number;
       ratio: number;
       minRatio: number;
       cells: number;
@@ -93,6 +110,51 @@ export interface HudStats {
   visionMs: number;
   /** Camera frames skipped because the vision backend was still busy. */
   framesDropped?: number;
+  /** Per-stage vision engine time of the last frame (ms, v16). */
+  engineTiming?: { pyramid: number; track: number; ransac: number; detect: number; pose: number; map: number; plane: number; reloc: number; ba: number; total: number } | null;
+  /** Phase 7: last local bundle adjustment on the current map (null before the first frame). */
+  bundleAdjustment?: {
+    runs: number;
+    lastFrameId: number;
+    keyframes: number;
+    freeKeyframes: number;
+    landmarks: number;
+    observations: number;
+    outliers: number;
+    shifted: number;
+    rejected: boolean;
+    rejectReason: string;
+    jumpKeyframeId: number;
+    jumpRotationDeg: number;
+    jumpShift: number;
+    excludedKeyframes: number;
+    propagated: number;
+    untouched: number;
+    correctionTranslation: ArrayLike<number>;
+    errorBeforePx: number;
+    errorAfterPx: number;
+    iterations: number;
+    converged: boolean;
+    ms: number;
+    maxLandmarkShift: number;
+    maxKeyframeShift: number;
+    maxKeyframeRotationDeg: number;
+  } | null;
+  /** Main-thread / transport time of the last frame (ms, v16). */
+  mainTiming?: {
+    grabMs: number;
+    captureMs: number;
+    queueInMs: number;
+    engineMs: number;
+    queueOutMs: number;
+    roundTripMs: number;
+    worldMs: number;
+    presentMs: number;
+    overlayMs: number;
+    resultIntervalMs: number;
+  } | null;
+  /** Time of the previous HUD refresh (formatting + DOM, ms). */
+  hudMs?: number;
   fastThreshold: number;
   processingSize: string;
   backend: string;
@@ -114,6 +176,51 @@ export interface HudStats {
     landmarks: number;
     pnpInliers: number;
     reprojPx: number;
+    /** v16: inlier error by image region / landmark kind (null before a tracked frame). */
+    reprojection: {
+      centerCount: number;
+      centerErrorPx: number;
+      edgeCount: number;
+      edgeErrorPx: number;
+      planeCount: number;
+      planeErrorPx: number;
+      otherCount: number;
+      otherErrorPx: number;
+      lowParallaxCount: number;
+      lowParallaxErrorPx: number;
+      midParallaxCount: number;
+      midParallaxErrorPx: number;
+      highParallaxCount: number;
+      highParallaxErrorPx: number;
+      parallaxLowDeg: number;
+      parallaxHighDeg: number;
+      youngTrackCount: number;
+      youngTrackErrorPx: number;
+      midTrackCount: number;
+      midTrackErrorPx: number;
+      oldTrackCount: number;
+      oldTrackErrorPx: number;
+      youngLandmarkCount: number;
+      youngLandmarkErrorPx: number;
+      midLandmarkCount: number;
+      midLandmarkErrorPx: number;
+      oldLandmarkCount: number;
+      oldLandmarkErrorPx: number;
+      ageYoungFrames: number;
+      ageOldFrames: number;
+      adjustedCount: number;
+      adjustedErrorPx: number;
+      propagatedCount: number;
+      propagatedErrorPx: number;
+      untouchedCount: number;
+      untouchedErrorPx: number;
+      nativeCount: number;
+      nativeErrorPx: number;
+      relinkCount: number;
+      relinkErrorPx: number;
+      relocCount: number;
+      relocErrorPx: number;
+    } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
     /** Camera center displacement since the previous frame, world meters (NaN before the world exists). */
@@ -208,10 +315,15 @@ export interface HudStats {
   cameraWorld?: number[] | null;
   /** Placed objects' world positions (m); must not move with the camera. */
   objects?: { id: number; position: number[] }[];
+  /** Whether the objects are shown and why not (v13 §15–§16). */
+  objectVisibility?: { visible: boolean; reason: string } | null;
   /** Frame capture time, pose arrival time, render-time pose age (ms). */
   timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
   reloc?: {
     keyframes: number;
+    /** Keyframes created / evicted so far (v15 churn). */
+    keyframesCreated: number;
+    keyframesEvicted: number;
     /** none / candidate / success / fail (v5 §18). */
     attempt: string;
     inliers: number;
@@ -234,6 +346,19 @@ export interface HudStats {
     postInconsistent: boolean;
     /** Last attempt of the current lost episode (null while tracking). */
     diag: HudRelocDiagnostics | null;
+    /** v14 §24, §47: search stage, preparation, pending candidate age and the episode timeline (ms since the loss, −1 = not yet). */
+    searchStage: string;
+    preparing: boolean;
+    pendingKeyframeId: number;
+    candidateAgeFrames: number;
+    timeline: {
+      attempts: number;
+      firstCoarseMs: number;
+      firstLkMs: number;
+      firstPnpMs: number;
+      validationMs: number;
+      confirmationMs: number;
+    } | null;
   } | null;
   /** Frame-to-frame motion level and LK diagnostics (v7 §12–§13). */
   motion?: {
@@ -311,9 +436,45 @@ export class DebugOverlay {
       rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
     }
     if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
+    // v18: the processing size / grabber / flags were only in the TIMING
+    // section, below the fold of the iPhone recording — repeat them here.
     rows.push(
-      row("FPS", `${s.renderFps.toFixed(0)} / vis ${s.visionFps.toFixed(0)} (${s.visionMs.toFixed(0)}ms)${s.framesDropped ? `  drop ${s.framesDropped}` : ""}`),
+      row(
+        "FPS",
+        `${s.renderFps.toFixed(0)} / vis ${s.visionFps.toFixed(0)} (${s.visionMs.toFixed(0)}ms)${s.framesDropped ? `  drop ${s.framesDropped}` : ""}${s.processingSize ? `  ${s.processingSize}` : ""}`,
+      ),
     );
+    // v16: where the vision time goes (the engine measured it all along; the
+    // 17 → 120 ms climb before the world existed on device had no breakdown).
+    // Right under FPS: at the end of the TIMING section it was below the fold
+    // of the on-device recording.
+    const et = s.engineTiming;
+    if (et) {
+      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
+      rows.push(
+        row(
+          "Vis",
+          `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)}${et.ba > 0 ? ` ba ${ms(et.ba)}` : ""} = ${ms(et.total)}ms`,
+          et.total > 33 ? "hud-warn" : undefined,
+        ),
+      );
+    }
+    // v16: the rest of the frame's wall time (main thread + worker transport).
+    // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this
+    // row says whether the grab, the display copy, the result waiting for a
+    // busy main thread (q↓), the Three.js update or the HUD itself is to blame.
+    const mt = s.mainTiming;
+    if (mt) {
+      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
+      const overhead = mt.roundTripMs - mt.engineMs;
+      rows.push(
+        row(
+          "Main",
+          `grab ${ms(mt.grabMs)} cap ${ms(mt.captureMs)} q↑ ${ms(mt.queueInMs)} eng ${ms(mt.engineMs)} q↓ ${ms(mt.queueOutMs)} rtt ${ms(mt.roundTripMs)}  world ${ms(mt.worldMs)} show ${ms(mt.presentMs)} ovl ${ms(mt.overlayMs)} hud ${ms(s.hudMs ?? 0)}  every ${ms(mt.resultIntervalMs)}ms`,
+          overhead > 20 ? "hud-warn" : undefined,
+        ),
+      );
+    }
 
     // ---- TRACK ----
     rows.push(section("TRACK"));
@@ -321,6 +482,93 @@ export class DebugOverlay {
     if (m) {
       const flags = `${m.relinked ? `  relink ${m.relinked}` : ""}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));
+      // v16: where the error sits. Edge ≫ center → focal length / lens
+      // distortion (objects shift while tilting and come back); plane ≠
+      // other → biased landmark depths.
+      const rb = m.reprojection;
+      if (rb && (rb.centerCount || rb.edgeCount)) {
+        const ratio = rb.centerCount && rb.edgeCount && rb.centerErrorPx > 0 ? rb.edgeErrorPx / rb.centerErrorPx : 0;
+        rows.push(
+          row(
+            "Err",
+            `center ${rb.centerErrorPx.toFixed(2)}px (${rb.centerCount})  edge ${rb.edgeErrorPx.toFixed(2)}px (${rb.edgeCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}  |  plane ${rb.planeErrorPx.toFixed(2)} (${rb.planeCount})  other ${rb.otherErrorPx.toFixed(2)} (${rb.otherCount})`,
+            ratio >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        // By the landmark's triangulation parallax: error concentrated in the
+        // low bin = noisy depths (multi-view refinement); uniform = observation noise.
+        const lowHigh = rb.lowParallaxCount && rb.highParallaxCount && rb.highParallaxErrorPx > 0 ? rb.lowParallaxErrorPx / rb.highParallaxErrorPx : 0;
+        rows.push(
+          row(
+            "Par",
+            `<${rb.parallaxLowDeg}° ${rb.lowParallaxErrorPx.toFixed(2)}px (${rb.lowParallaxCount})  ${rb.parallaxLowDeg}–${rb.parallaxHighDeg}° ${rb.midParallaxErrorPx.toFixed(2)} (${rb.midParallaxCount})  >${rb.parallaxHighDeg}° ${rb.highParallaxErrorPx.toFixed(2)} (${rb.highParallaxCount})${lowHigh ? `  ×${lowHigh.toFixed(1)}` : ""}`,
+            lowHigh >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        // By track age vs landmark age: error growing with track age = LK
+        // drift of the observation; growing with landmark age only = map
+        // inconsistency (bundle adjustment).
+        const trackOldYoung = rb.youngTrackCount && rb.oldTrackCount && rb.youngTrackErrorPx > 0 ? rb.oldTrackErrorPx / rb.youngTrackErrorPx : 0;
+        const lmOldYoung = rb.youngLandmarkCount && rb.oldLandmarkCount && rb.youngLandmarkErrorPx > 0 ? rb.oldLandmarkErrorPx / rb.youngLandmarkErrorPx : 0;
+        const bins = (y: number, yc: number, m: number, mc: number, o: number, oc: number) =>
+          `<${rb.ageYoungFrames} ${y.toFixed(2)} (${yc})  ${rb.ageYoungFrames}–${rb.ageOldFrames} ${m.toFixed(2)} (${mc})  >${rb.ageOldFrames} ${o.toFixed(2)} (${oc})`;
+        rows.push(
+          row(
+            "Age",
+            `track ${bins(rb.youngTrackErrorPx, rb.youngTrackCount, rb.midTrackErrorPx, rb.midTrackCount, rb.oldTrackErrorPx, rb.oldTrackCount)}${trackOldYoung ? `  ×${trackOldYoung.toFixed(1)}` : ""}`,
+            trackOldYoung >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        rows.push(
+          row(
+            "",
+            `lm    ${bins(rb.youngLandmarkErrorPx, rb.youngLandmarkCount, rb.midLandmarkErrorPx, rb.midLandmarkCount, rb.oldLandmarkErrorPx, rb.oldLandmarkCount)}${lmOldYoung ? `  ×${lmOldYoung.toFixed(1)}` : ""}`,
+            lmOldYoung >= 1.5 ? "hud-warn" : undefined,
+          ),
+        );
+        // v19: by how the track got its landmark. A relink group clearly
+        // worse than the native one is association error (a re-detected
+        // corner linked to the wrong landmark), not map error.
+        if (rb.relinkCount || rb.relocCount) {
+          const ratio = rb.nativeCount && rb.relinkCount && rb.nativeErrorPx > 0 ? rb.relinkErrorPx / rb.nativeErrorPx : 0;
+          rows.push(
+            row(
+              "Link",
+              `native ${rb.nativeErrorPx.toFixed(2)}px (${rb.nativeCount})  relink ${rb.relinkErrorPx.toFixed(2)} (${rb.relinkCount})  reloc ${rb.relocErrorPx.toFixed(2)} (${rb.relocCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
+              ratio >= 1.5 ? "hud-warn" : undefined,
+            ),
+          );
+        }
+        // v18: by how the last BA treated the landmark. Once a BA ran, a gap
+        // between the solved group and the rest is the map split in two.
+        if (rb.adjustedCount || rb.propagatedCount) {
+          const rest = rb.propagatedCount + rb.untouchedCount;
+          const restErr = rest ? (rb.propagatedErrorPx * rb.propagatedCount + rb.untouchedErrorPx * rb.untouchedCount) / rest : 0;
+          const ratio = rb.adjustedCount && rest && rb.adjustedErrorPx > 0 ? restErr / rb.adjustedErrorPx : 0;
+          rows.push(
+            row(
+              "BAlm",
+              `adj ${rb.adjustedErrorPx.toFixed(2)}px (${rb.adjustedCount})  prop ${rb.propagatedErrorPx.toFixed(2)} (${rb.propagatedCount})  none ${rb.untouchedErrorPx.toFixed(2)} (${rb.untouchedCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
+              ratio >= 1.5 || (ratio > 0 && ratio <= 1 / 1.5) ? "hud-warn" : undefined,
+            ),
+          );
+        }
+      }
+      // Phase 7: what the last bundle adjustment did to the map. The error is
+      // the keyframe-observation error (not this frame's PnP); a run that does
+      // not converge or leaves > 2 px is orange. Right under the PnP
+      // breakdown: at the end of the TRACK section it was below the fold of
+      // the iPhone recordings.
+      const ba = s.bundleAdjustment;
+      if (ba && ba.runs > 0) {
+        rows.push(
+          row(
+            "BA",
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
+            (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
+          ),
+        );
+      }
       rows.push(row("Source", `${lost ? "LOST" : m.source.toUpperCase()}${m.relocalized ? " (RELOC)" : ""}  ${m.history.slice(-20)}`));
     } else {
       rows.push(row("PnP", "—"));
@@ -348,7 +596,7 @@ export class DebugOverlay {
       rows.push(
         row(
           "Reloc",
-          `${r.attempt}  kf ${r.keyframes}  ok×${r.successes}${r.diag && r.diag.age > 0 && r.attempt === "none" ? `  (last ${r.diag.age}f ago)` : ""}`,
+          `${r.attempt}  kf ${r.keyframes} (${r.keyframesCreated} made, ${r.keyframesEvicted} out)  ok×${r.successes}${r.diag && r.diag.age > 0 && r.attempt === "none" ? `  (last ${r.diag.age}f ago)` : ""}`,
           r.attempt === "fail" ? "hud-warn" : undefined,
         ),
       );
@@ -386,16 +634,68 @@ export class DebugOverlay {
       rows.push(section("RELOC"));
       // v10 §28: why we are here — only an established world is relocalized into.
       if (lost) rows.push(row("Reason", s.worldEstablished ? "WORLD_LOST" : "scan continues (no world)"));
+      // v14 §24, §47: where the search stands (prepare / coarse / lk / pnp /
+      // validation / confirming / applied) before the stage counters.
+      rows.push(
+        row(
+          "Stage",
+          `${r.searchStage.toUpperCase()}${r.preparing ? " (tracking)" : ""}${r.pendingKeyframeId >= 0 ? `  cand KF${r.pendingKeyframeId} age ${r.candidateAgeFrames}f` : ""}`,
+          r.searchStage === "confirming" || r.searchStage === "applied" ? undefined : lost ? "hud-warn" : undefined,
+        ),
+      );
       const d = r.diag;
+      // v14 §48–§49: the LK breakdown of the best candidate says whether the
+      // keyframe, the initial guess or the window fails. Right under Stage so
+      // it is above the fold on a phone (the on-device recording cut it off).
+      const lk = d?.best?.lk;
+      if (lk && lk.observations > 0) {
+        rows.push(
+          row(
+            "LKpts",
+            `${lk.tracked}/${lk.observations}${lk.reason ? `  ${lk.reason}` : ""}  fb ${lk.fb} res ${lk.residual} far ${lk.far} div ${lk.diverged} oob ${lk.oob} tex ${lk.texture}`,
+            lk.reason ? "hud-warn" : undefined,
+          ),
+        );
+      }
+      // v16: the verdict on the best candidate right under the LK row, so
+      // the reason is above the fold (on device the Best / Reject rows at the
+      // end of the section were cut off while a full turn kept failing).
+      if (d?.best) {
+        const b = d.best;
+        const v = b.validation;
+        const verdict = v
+          ? v.rejectReason
+            ? `✗ ${v.rejectReason}`
+            : `✓ ${v.level.toUpperCase()}`
+          : `✗ ${d.fail ?? b.stage}`;
+        rows.push(
+          row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}  ${verdict}`, v && !v.rejectReason ? undefined : "hud-warn"),
+        );
+      }
       if (d) {
-        rows.push(row("KF", `${d.keyframes} / try ${d.tried}${d.age > 0 ? `  (${d.age}f ago)` : ""}`));
-        rows.push(row("NCC", `${d.coarsePassed}  best ${d.bestCoarseScore.toFixed(2)}`));
-        rows.push(row("LK", `${d.lkPassed}`));
+        // v14 §23, §36: total keyframes, how many were ranked (all), sent to LK
+        // / PnP (the budget), validated, held back by the retry cooldown.
+        rows.push(
+          row(
+            "KF",
+            `${d.keyframes}  ranked ${d.ranked.length}  lk ${d.lkCandidates}  pnp ${d.pnpCandidates}  val ${d.validated}${d.retrySuppressed > 0 ? `  retry ${d.retrySuppressed}` : ""}${d.unusableKeyframes > 0 ? `  thin ${d.unusableKeyframes}` : ""}${d.age > 0 ? `  (${d.age}f ago)` : ""}`,
+            d.unusableKeyframes > 0 ? "hud-warn" : undefined,
+          ),
+        );
+        if (d.ranked.length > 0) {
+          // × = too few live landmarks (v15), ~ = retry cooldown, · = not selected.
+          const top = d.ranked
+            .slice(0, 4)
+            .map((k) => `KF${k.keyframeId} ${k.score.toFixed(2)}${k.unusable ? `×${k.alive}` : k.suppressed ? "~" : k.selected ? "" : "·"}`)
+            .join("  ");
+          rows.push(row("Rank", `${top}${d.usedPreparedRanking ? "  (prepared)" : ""}`));
+        }
+        rows.push(row("NCC", `${d.coarsePassed}/${d.tried}  best ${d.bestCoarseScore.toFixed(2)}`));
+        rows.push(row("LK", `${d.lkPassed}/${d.lkCandidates}`));
         rows.push(row("PnP", `${d.pnpTested} ran / ${d.pnpPassed} ok`));
         rows.push(row("VAL", `${d.validated}`, d.validated === 0 && d.tried > 0 ? "hud-warn" : undefined));
         if (d.best) {
           const b = d.best;
-          rows.push(row("Best", `KF${b.keyframeId} ${b.inliers}i ${b.errorPx.toFixed(2)}px  ncc ${b.coarseScore.toFixed(2)}`));
           const v = b.validation;
           if (v) {
             // v9 §21: every condition with its value, its threshold and PASS / FAIL.
@@ -416,8 +716,18 @@ export class DebugOverlay {
             if (Number.isFinite(v.requiredNcc)) {
               rows.push(row("NCC", `${v.ncc.toFixed(2)}/${v.requiredNcc.toFixed(2)}  ${ok(v.nccPassed)}`, v.nccPassed ? undefined : "hud-warn"));
             }
-            if (!v.translationJumpPassed || !v.rotationJumpPassed) {
-              rows.push(row("Jump", `${!v.translationJumpPassed ? "translation " : ""}${!v.rotationJumpPassed ? "rotation " : ""}NG (reloc limit)`, "hud-warn"));
+            // v16: the jump vs the held pose with the limits in force; after a
+            // long loss the limits are off and the jump is information only.
+            if (Number.isFinite(v.rotationJumpDeg) || Number.isFinite(v.translationJump)) {
+              const lim = (x: number) => (Number.isFinite(x) ? x.toFixed(x >= 10 ? 0 : 1) : "∞");
+              const ng = !v.translationJumpPassed || !v.rotationJumpPassed;
+              rows.push(
+                row(
+                  "Jump",
+                  `${v.translationJump.toFixed(2)}/${lim(v.maxTranslationJump)} u  ${v.rotationJumpDeg.toFixed(0)}/${lim(v.maxRotationJumpDeg)}°  ${ng ? "NG (reloc limit)" : d.jumpLimitsActive ? "OK" : "no limit (long loss)"}`,
+                  ng ? "hud-warn" : undefined,
+                ),
+              );
             }
             if (!v.posePassed) rows.push(row("Pose", "invalid", "hud-warn"));
             rows.push(row("Level", v.level.toUpperCase(), v.level === "reject" ? "hud-warn" : undefined));
@@ -441,8 +751,16 @@ export class DebugOverlay {
         rows.push(row("Jump", `${cm(r.jumpM)} / ${r.jumpDeg.toFixed(1)}°`));
       }
       if (r.attempt === "fail" && r.rejectCode === "confirmation_failed") rows.push(row("Fail", "confirmation", "hud-warn"));
+      if (r.attempt === "fail" && r.rejectCode === "stale_candidate") rows.push(row("Fail", "stale candidate", "hud-warn"));
+      if (r.attempt === "fail" && r.rejectCode === "retry_cooldown") rows.push(row("Fail", "retry cooldown (view unchanged)", "hud-warn"));
       if (r.postM > 0 || r.postInconsistent) {
         rows.push(row("Post", `map Δ ${cm(r.postM)} / ${r.postDeg.toFixed(1)}°${r.postInconsistent ? "  INCONSISTENT" : ""}`, r.postInconsistent ? "hud-warn" : undefined));
+      }
+      // v14 §45–§47, §55: ms since the loss at which each stage first succeeded.
+      const tl = r.timeline;
+      if (tl) {
+        const t = (ms: number) => (ms < 0 ? "-" : `${Math.round(ms)}`);
+        rows.push(row("Time", `try ${tl.attempts}  ncc ${t(tl.firstCoarseMs)}  lk ${t(tl.firstLkMs)}  pnp ${t(tl.firstPnpMs)}  val ${t(tl.validationMs)}  apply ${t(tl.confirmationMs)} ms`));
       }
     }
 
@@ -530,8 +848,14 @@ export class DebugOverlay {
 
     // ---- OBJECT ----
     rows.push(section("OBJECT"));
+    const ov = s.objectVisibility;
+    if (ov) {
+      rows.push(row("Visible", ov.visible ? "YES" : "NO", ov.visible ? undefined : "hud-warn"));
+      rows.push(row("Reason", ov.reason));
+    }
     if (s.objects && s.objects.length) {
-      for (const o of s.objects.slice(0, 2)) rows.push(row(`Obj${o.id}`, xyz(o.position)));
+      // Transforms are kept while hidden (v13 §12); the HUD says "hidden" instead of a stale-looking position.
+      for (const o of s.objects.slice(0, 2)) rows.push(row(`Obj${o.id}`, ov && !ov.visible ? "hidden" : xyz(o.position)));
     } else {
       rows.push(row("Obj", "—"));
     }

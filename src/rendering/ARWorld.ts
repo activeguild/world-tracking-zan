@@ -2,11 +2,14 @@ import * as THREE from "three";
 import { ARObject } from "./ARObject";
 
 /**
- * World root of the AR scene (spec §29, §33, §44).
+ * World root of the AR scene (spec §29, §33, §44; 修正指示書 v13).
  *
  * Holds the placed objects and the plane visualization at Y = 0. Objects
- * are fixed in world space; when tracking is lost they stay where they are
- * for a grace period and are then hidden until tracking returns.
+ * are fixed in world space. Their *visibility* follows the trust in the
+ * current camera pose (`ObjectVisibility.ts`): hidden while tracking is
+ * lost, relocalizing or confirming a relocalization, shown again once world
+ * tracking is back on a fresh map pose. Hiding never touches the objects'
+ * transforms, the world root or the plane grid data.
  */
 export class ARWorld {
   readonly root = new THREE.Group();
@@ -15,8 +18,9 @@ export class ARWorld {
   private nextId = 1;
   private lostSince: number | null = null;
   private hidden = false;
+  private planeGridWanted = false;
 
-  constructor(private readonly holdPoseOnLostMs: number) {
+  constructor() {
     this.root.name = "ARWorld";
     this.root.add(this.planeGroup);
     this.planeGroup.visible = false;
@@ -46,7 +50,8 @@ export class ARWorld {
 
   /** Toggle the plane grid without rebuilding it (debug HUD on/off, v7 §17). */
   setPlaneGridVisible(visible: boolean): void {
-    this.planeGroup.visible = visible && this.planeGroup.children.length > 0;
+    this.planeGridWanted = visible;
+    this.planeGroup.visible = visible && !this.hidden && this.planeGroup.children.length > 0;
   }
 
   /** Transparent grid on the plane (spec §44). `extent` in meters. */
@@ -69,28 +74,28 @@ export class ARWorld {
     );
     fill.rotation.x = -Math.PI / 2;
     this.planeGroup.add(fill);
-    this.planeGroup.visible = true;
+    this.planeGridWanted = true;
+    this.planeGroup.visible = !this.hidden;
   }
 
   createCube(size: number): ARObject {
-    const obj = ARObject.cube(this.nextId++, size);
-    this.objects.push(obj);
-    this.root.add(obj.root);
-    return obj;
+    return this.register(ARObject.cube(this.nextId++, size));
   }
 
   add(object3d: THREE.Object3D): ARObject {
-    const obj = new ARObject(this.nextId++, object3d);
-    this.objects.push(obj);
-    this.root.add(obj.root);
-    return obj;
+    return this.register(new ARObject(this.nextId++, object3d));
   }
 
   /** Add a loaded model normalized to `targetSize` meters (see ARObject.fromModel). */
   addModel(model: THREE.Object3D, targetSize: number): ARObject {
-    const obj = ARObject.fromModel(this.nextId++, model, targetSize);
+    return this.register(ARObject.fromModel(this.nextId++, model, targetSize));
+  }
+
+  private register(obj: ARObject): ARObject {
     this.objects.push(obj);
     this.root.add(obj.root);
+    // An object placed while the pose is not trusted starts hidden too.
+    if (this.hidden) obj.setVisible(false);
     return obj;
   }
 
@@ -123,29 +128,30 @@ export class ARWorld {
   }
 
   /**
-   * Tracking status update (spec §33): keep objects at their last pose for
-   * `holdPoseOnLostMs`, then hide them until tracking resumes.
+   * Show or hide the placed objects (and the plane grid) as one, idempotently
+   * (v13 §24): only a change touches the Three.js objects. Transforms are
+   * never altered (§12); the world root stays attached and the render loop
+   * keeps running (§20).
    */
-  updateTracking(tracking: boolean, nowMs: number): void {
-    if (tracking) {
-      this.lostSince = null;
-      if (this.hidden) {
-        this.hidden = false;
-        for (const o of this.objects) o.setVisible(true);
-        this.planeGroup.visible = this.planeGroup.children.length > 0;
-      }
-      return;
-    }
-    if (this.lostSince === null) this.lostSince = nowMs;
-    if (!this.hidden && nowMs - this.lostSince > this.holdPoseOnLostMs) {
-      this.hidden = true;
-      for (const o of this.objects) o.setVisible(false);
-      this.planeGroup.visible = false;
-    }
+  setObjectsVisible(visible: boolean): void {
+    if (visible === !this.hidden) return;
+    this.hidden = !visible;
+    for (const o of this.objects) o.setVisible(visible);
+    this.planeGroup.visible = visible && this.planeGridWanted && this.planeGroup.children.length > 0;
   }
 
+  /** Objects are currently hidden because the camera pose is not trusted. */
   get isHidden(): boolean {
     return this.hidden;
+  }
+
+  /** Record whether the camera is tracked this frame (for `lostDurationMs`). */
+  markTracking(tracking: boolean, nowMs: number): void {
+    if (tracking) {
+      this.lostSince = null;
+    } else if (this.lostSince === null) {
+      this.lostSince = nowMs;
+    }
   }
 
   /** How long tracking has been lost (ms), 0 while tracking. */

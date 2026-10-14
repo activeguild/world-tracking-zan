@@ -109,9 +109,17 @@ export class TrackingStateMachine {
         const relocatable = !!obs.mapInitialized && !!obs.worldEstablished;
         if (obs.inlierCount >= t.minTrackedForTracking) {
           // Features track again. If an established world exists but the
-          // camera is not yet located in it, we are relocalizing; otherwise
-          // plain tracking (surface scan).
-          this._state = relocatable && obs.mapLost ? TrackingState.RELOCALIZING : TrackingState.TRACKING;
+          // camera is not yet located in it, we are relocalizing. Located
+          // again in an established world (relocalized or re-associated):
+          // straight back to world tracking — the world is the fixed plane,
+          // there is nothing to re-detect (v14 §60). Otherwise plain
+          // tracking (surface scan).
+          this._state =
+            relocatable && obs.mapLost
+              ? TrackingState.RELOCALIZING
+              : relocatable && obs.planeFound
+                ? TrackingState.PLANE_FOUND
+                : TrackingState.TRACKING;
           this.badFrames = 0;
         } else if (this._state === TrackingState.TRACKING_LOST) {
           // Nothing tracked for a while → searching (or relocalizing when an established world exists).

@@ -36,6 +36,25 @@ export function composeTransforms(b: RigidTransform, a: RigidTransform): RigidTr
   return { rotation, translation };
 }
 
+/** Camera center in the world/map frame: C = −Rᵀ t. */
+export function cameraCenterOf(T: RigidTransform, out = new Float64Array(3)): Float64Array {
+  const r = T.rotation, t = T.translation;
+  out[0] = -(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]);
+  out[1] = -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]);
+  out[2] = -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2]);
+  return out;
+}
+
+/** out = R p + t. */
+export function applyTransform(T: RigidTransform, p: ArrayLike<number>, out = new Float64Array(3)): Float64Array {
+  const r = T.rotation, t = T.translation;
+  const x = p[0], y = p[1], z = p[2];
+  out[0] = r[0] * x + r[1] * y + r[2] * z + t[0];
+  out[1] = r[3] * x + r[4] * y + r[5] * z + t[1];
+  out[2] = r[6] * x + r[7] * y + r[8] * z + t[2];
+  return out;
+}
+
 export function invertTransform(p: RigidTransform): RigidTransform {
   const rt = transpose3(p.rotation);
   const t = p.translation;

@@ -30,6 +30,24 @@ export function rgbaToGray(rgba: Uint8ClampedArray | Uint8Array, out: Uint8Array
   }
 }
 
+/** How the processing frame is read from the video (v16). */
+export type FrameGrabberKind = "canvas2d" | "webgl";
+
+/**
+ * A source of grayscale processing frames. Two implementations: the 2D
+ * canvas (`FrameGrabber`) and the WebGL shader path (`WebGLFrameGrabber`),
+ * chosen per device by ARSession from the measured grab time.
+ */
+export interface FrameSource {
+  readonly kind: FrameGrabberKind;
+  readonly width: number;
+  readonly height: number;
+  grab(video: HTMLVideoElement, timestamp: number, intrinsics: CameraIntrinsics, gravity?: number[] | null): GrayFrame;
+  /** Return a buffer to the pool for reuse. */
+  release(buffer: ArrayBuffer): void;
+  dispose?(): void;
+}
+
 /**
  * Grabs the current video frame into a small canvas at processing resolution
  * and converts it to grayscale.
@@ -38,7 +56,8 @@ export function rgbaToGray(rgba: Uint8ClampedArray | Uint8Array, out: Uint8Array
  * worker has transferred them back, so steady-state operation allocates
  * nothing per frame.
  */
-export class FrameGrabber {
+export class FrameGrabber implements FrameSource {
+  readonly kind = "canvas2d" as const;
   private readonly canvas: HTMLCanvasElement | OffscreenCanvas;
   private readonly ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   private readonly pool: ArrayBuffer[] = [];

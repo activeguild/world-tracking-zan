@@ -3,6 +3,7 @@ import type { TrackingState } from "../ar/ARState";
 import type { TrackingQuality } from "./TrackingQuality";
 import type { PoseRejection } from "./PoseValidation";
 import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
+import type { RelocalizationSearchStage, RelocalizationTimeline } from "./RelocalizationSchedule";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -16,6 +17,8 @@ export interface Corner {
  *
  * Positions are in level-0 processing-image pixels.
  */
+export type TrackLinkSource = "native" | "relink" | "reloc";
+
 export interface Track {
   id: number;
   /** Position in the current frame. */
@@ -43,6 +46,16 @@ export interface Track {
   refFrame: number;
   /** Landmark observed by this track (Phase 3), -1 when none. */
   landmarkId: number;
+  /**
+   * How the track came to observe its landmark (v19 diagnostics): `native`
+   * = the landmark was triangulated from this very track, `relink` =
+   * re-association of a re-detected corner to an existing landmark (within
+   * `reassociateRadiusPx`), `reloc` = a keyframe observation matched by the
+   * relocalizer. Undefined counts as native. A re-linked track that sits on
+   * a neighbouring corner carries a systematic error for as long as it
+   * lives; this splits that from map error.
+   */
+  linkSource?: TrackLinkSource;
   /**
    * Anchor observation for triangulation: the map-frame camera pose and the
    * pixel position at the frame where the track started being watched by
@@ -164,6 +177,8 @@ export interface MapPoseOutput {
   relocalized: boolean;
   /** New-landmark triangulation of this frame (v11 diagnostics). */
   triangulation: TriangulationStats;
+  /** PnP inlier error by image region / landmark kind (v16 diagnostics). */
+  reprojection: ReprojectionBreakdown;
   /**
    * Where this frame's pose came from: "plane" = plane-relative estimate
    * (depth-free), "map" = PnP on triangulated landmarks, "propagated" = no
@@ -288,6 +303,246 @@ export interface PlaneRecoveryDiagnostics {
   recoveries: number;
 }
 
+/**
+ * Reprojection error of this frame's PnP inliers split by image region and
+ * by landmark kind (v16 diagnostics). On Android the mean error sat at
+ * 2.4–3.0 px while a small early map gave 0.5 px, and placed objects shifted
+ * while the phone was tilted and came back when it was tilted back: the
+ * signature of a camera model (focal length / lens distortion) that does not
+ * match the device. Edge ≫ center says distortion / focal length; plane ≠
+ * other says the landmark depths are biased.
+ */
+export interface ReprojectionBreakdown {
+  /** Inliers inside / outside `centerRadius` × half the image diagonal from the principal point. */
+  centerCount: number;
+  centerErrorPx: number;
+  edgeCount: number;
+  edgeErrorPx: number;
+  /** Inliers on the detected plane vs the rest. */
+  planeCount: number;
+  planeErrorPx: number;
+  otherCount: number;
+  otherErrorPx: number;
+  /** Normalized radius that splits center from edge (fraction of the half diagonal). */
+  centerRadius: number;
+  /**
+   * Inliers by the ray parallax angle of their landmark's triangulation
+   * (`Landmark.parallax`): below `parallaxLowDeg`, between, above
+   * `parallaxHighDeg`. A depth error scales with 1 / parallax, so a map whose
+   * error sits in the low bin has noisy landmark depths (multi-view
+   * refinement helps); a uniform error across the bins is observation noise
+   * (LK precision / resolution).
+   */
+  lowParallaxCount: number;
+  lowParallaxErrorPx: number;
+  midParallaxCount: number;
+  midParallaxErrorPx: number;
+  highParallaxCount: number;
+  highParallaxErrorPx: number;
+  parallaxLowDeg: number;
+  parallaxHighDeg: number;
+  /**
+   * Inliers by the age of the *track* that observes them (frames since FAST
+   * detected the corner, `Track.age`): below `ageYoungFrames`, between, at or
+   * above `ageOldFrames`. Tracks are followed frame to frame and never
+   * re-matched to the landmark's first view, so LK drift accumulates with
+   * track age: an error that grows with it is observation drift (fix: re-anchor
+   * observations to the landmark's reference patch).
+   */
+  youngTrackCount: number;
+  youngTrackErrorPx: number;
+  midTrackCount: number;
+  midTrackErrorPx: number;
+  oldTrackCount: number;
+  oldTrackErrorPx: number;
+  /**
+   * The same inliers by the age of the *landmark* (frames since
+   * triangulation, `Landmark.firstFrame`). A re-linked landmark has an old
+   * landmark age but a young track. An error that grows with landmark age
+   * while flat in track age is map inconsistency (landmarks created from
+   * drifted anchor poses): the domain of bundle adjustment.
+   */
+  youngLandmarkCount: number;
+  youngLandmarkErrorPx: number;
+  midLandmarkCount: number;
+  midLandmarkErrorPx: number;
+  oldLandmarkCount: number;
+  oldLandmarkErrorPx: number;
+  ageYoungFrames: number;
+  ageOldFrames: number;
+  /**
+   * The same inliers by how the last accepted bundle adjustment treated
+   * their landmark (v18, recording 21): solved in the BA (`adjusted`), moved
+   * with its reference keyframe (`propagated`), or left where it was
+   * (`untouched`). Before any BA every landmark is untouched. A gap between
+   * the groups means the BA moved part of the map and not the rest.
+   */
+  adjustedCount: number;
+  adjustedErrorPx: number;
+  propagatedCount: number;
+  propagatedErrorPx: number;
+  untouchedCount: number;
+  untouchedErrorPx: number;
+  /**
+   * The same inliers by how their track got its landmark (v19,
+   * `Track.linkSource`): triangulated from the track itself (`native`),
+   * re-associated after a re-detection (`relink`), or injected by the
+   * relocalizer (`reloc`). On Android the error stepped up for good after
+   * a fast move with many re-detections and relinks; a relink group
+   * clearly worse than the native one is association error, not map error.
+   */
+  nativeCount: number;
+  nativeErrorPx: number;
+  relinkCount: number;
+  relinkErrorPx: number;
+  relocCount: number;
+  relocErrorPx: number;
+}
+
+/** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
+export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain" | "pose_jump";
+
+/**
+ * Local bundle adjustment report (Phase 7): what the last run over the
+ * stored keyframes did to the map. Errors are mean keyframe-observation
+ * reprojection errors (processing pixels); shifts are map units.
+ */
+export interface BundleAdjustmentOutput {
+  /** Runs on the current map. */
+  runs: number;
+  /** Frame of the last run (-1 = none yet). */
+  lastFrameId: number;
+  /** Whether the engine ran BA in this frame. */
+  ranThisFrame: boolean;
+  keyframes: number;
+  freeKeyframes: number;
+  /** Landmarks refined (observed by ≥ minLandmarkObservations keyframes). */
+  landmarks: number;
+  observations: number;
+  /** Observations left out as gross outliers before the solve. */
+  outliers: number;
+  /** Landmarks the solve moved by more than maxLandmarkShiftRatio × depth. */
+  shifted: number;
+  /** The whole run was discarded (`rejectReason`); map and keyframe poses untouched. */
+  rejected: boolean;
+  /**
+   * `shift` = too many shifted landmarks, `no_gain` = the error did not drop
+   * by `minGainFraction` (v18), `pose_jump` = a keyframe moved beyond
+   * `maxPoseJumpPriorRatio` × its prior (v19).
+   */
+  rejectReason: BundleAdjustmentRejectReason;
+  /** v19: the keyframe that moved the most in a `pose_jump` rejection (-1 otherwise) and how far. */
+  jumpKeyframeId: number;
+  jumpRotationDeg: number;
+  jumpShift: number;
+  /** v19: keyframes left out of the solve after repeated pose jumps (count among the stored ones). */
+  excludedKeyframes: number;
+  /**
+   * v18: landmarks outside the solve that were moved with their reference
+   * keyframe's correction, and landmarks left where they were (reference
+   * keyframe gone or none). The three groups partition the map.
+   */
+  propagated: number;
+  untouched: number;
+  /**
+   * v18: rigid correction (old map → new map) near the current view, the
+   * one applied to the keyframe created in this frame and to the canonical
+   * pose. Identity when the run was rejected. The session applies it to the
+   * world anchor so that placed objects do not hop on screen when the map
+   * moves under the camera.
+   */
+  correctionRotation: Float64Array;
+  correctionTranslation: Float64Array;
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  ms: number;
+  maxLandmarkShift: number;
+  maxKeyframeShift: number;
+  maxKeyframeRotationDeg: number;
+}
+
+export function emptyBundleAdjustment(): BundleAdjustmentOutput {
+  return {
+    runs: 0,
+    lastFrameId: -1,
+    ranThisFrame: false,
+    keyframes: 0,
+    freeKeyframes: 0,
+    landmarks: 0,
+    observations: 0,
+    outliers: 0,
+    shifted: 0,
+    rejected: false,
+    rejectReason: "none",
+    jumpKeyframeId: -1,
+    jumpRotationDeg: 0,
+    jumpShift: 0,
+    excludedKeyframes: 0,
+    propagated: 0,
+    untouched: 0,
+    correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    correctionTranslation: new Float64Array(3),
+    errorBeforePx: 0,
+    errorAfterPx: 0,
+    iterations: 0,
+    converged: false,
+    ms: 0,
+    maxLandmarkShift: 0,
+    maxKeyframeShift: 0,
+    maxKeyframeRotationDeg: 0,
+  };
+}
+
+export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
+  return {
+    centerCount: 0,
+    centerErrorPx: 0,
+    edgeCount: 0,
+    edgeErrorPx: 0,
+    planeCount: 0,
+    planeErrorPx: 0,
+    otherCount: 0,
+    otherErrorPx: 0,
+    centerRadius: 0.5,
+    lowParallaxCount: 0,
+    lowParallaxErrorPx: 0,
+    midParallaxCount: 0,
+    midParallaxErrorPx: 0,
+    highParallaxCount: 0,
+    highParallaxErrorPx: 0,
+    parallaxLowDeg: 2,
+    parallaxHighDeg: 5,
+    youngTrackCount: 0,
+    youngTrackErrorPx: 0,
+    midTrackCount: 0,
+    midTrackErrorPx: 0,
+    oldTrackCount: 0,
+    oldTrackErrorPx: 0,
+    youngLandmarkCount: 0,
+    youngLandmarkErrorPx: 0,
+    midLandmarkCount: 0,
+    midLandmarkErrorPx: 0,
+    oldLandmarkCount: 0,
+    oldLandmarkErrorPx: 0,
+    ageYoungFrames: 30,
+    ageOldFrames: 150,
+    adjustedCount: 0,
+    adjustedErrorPx: 0,
+    propagatedCount: 0,
+    propagatedErrorPx: 0,
+    untouchedCount: 0,
+    untouchedErrorPx: 0,
+    nativeCount: 0,
+    nativeErrorPx: 0,
+    relinkCount: 0,
+    relinkErrorPx: 0,
+    relocCount: 0,
+    relocErrorPx: 0,
+  };
+}
+
 /** New-landmark triangulation of one frame (v11 diagnostics: why the map does / does not grow). */
 export interface TriangulationStats {
   /** Landmark-less tracks with an anchor from an earlier frame. */
@@ -309,6 +564,9 @@ export interface TriangulationStats {
 
 export interface RelocalizationOutput {
   keyframes: number;
+  /** Keyframes created / evicted in this map so far (v15 churn diagnostics). */
+  keyframesCreated: number;
+  keyframesEvicted: number;
   /**
    * Result of the attempt made in this frame (v5 §18): `candidate` = passed
    * the global validation, held for confirmation; `success` = applied to the
@@ -356,6 +614,25 @@ export interface RelocalizationOutput {
    */
   diagnostics: RelocalizationDiagnostics | null;
   framesSinceAttempt: number;
+  /**
+   * v14 §24: where the relocalization stands this frame — `idle`,
+   * `prepare` (tracking, keyframes ranked in the background), the furthest
+   * stage of this frame's attempt, `confirming`, `applied`.
+   */
+  searchStage: RelocalizationSearchStage;
+  /** Preparation active this frame (v14 §3–§6); never hides objects or changes the pose. */
+  preparing: boolean;
+  /** Frames since the keyframe ranking was last prepared (−1 = none). */
+  preparedAgeFrames: number;
+  /** Keyframe of the candidate waiting for confirmation (−1 = none) and its age in frames (v14 §43–§44). */
+  pendingKeyframeId: number;
+  candidateAgeFrames: number;
+  /**
+   * Timing of the current (or last) lost episode (v14 §45–§46): frame /
+   * ms since the loss of the first coarse match, LK success, PnP success,
+   * validation and the applied pose. Measured for comparison, not a target.
+   */
+  timeline: RelocalizationTimeline | null;
 }
 
 /**
@@ -467,6 +744,8 @@ export interface VisionOutput {
   relocalization: RelocalizationOutput;
   /** Frame-to-frame motion level and LK diagnostics (v7). */
   motion: MotionDiagnostics;
+  /** Last local bundle adjustment (Phase 7); `runs` 0 before the first. */
+  bundleAdjustment: BundleAdjustmentOutput;
   /**
    * World tracking established for the current map (v10 §5–§7): a plane was
    * found and the world anchored to it. Only then does a lost map lead to
