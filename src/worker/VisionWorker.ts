@@ -50,6 +50,7 @@ ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
           gray: new Uint8Array(msg.gray),
           intrinsics: msg.intrinsics,
           gravity: msg.gravity,
+          anchorPoints: msg.anchorPoints,
         });
         const tracksBuf = out.tracks.buffer as ArrayBuffer;
         const landmarksBuf = out.landmarks.buffer as ArrayBuffer;

@@ -159,6 +159,7 @@ export class VisionWorkerClient implements VisionBackend {
       gray: buffer,
       intrinsics: frame.intrinsics,
       gravity: frame.gravity ?? null,
+      anchorPoints: frame.anchorPoints ?? null,
       sentAt: this.sentAt,
     };
     this.worker.postMessage(req, [buffer]);
@@ -206,6 +207,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         gray: frame.data,
         intrinsics: frame.intrinsics,
         gravity: frame.gravity ?? null,
+        anchorPoints: frame.anchorPoints ?? null,
       });
       this.onResult?.({
         frameId: out.frameId,

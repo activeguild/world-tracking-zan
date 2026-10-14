@@ -66,7 +66,14 @@ the radius, and the track is snapped onto that keyframe-consistent position
 (`relink 3/5 ✗2 raw 1 snap 0.8px` on the PnP row; `raw` = linked without a
 keyframe to check against). `?relinkverify=0` turns the check off for A/B.
 The BA stops once an iteration gains less than 1 % of the cost, so `it`
-reads as a real iteration count instead of the cap.
+reads as a real iteration count instead of the cap. After an accepted run
+the world anchor follows a robust rigid fit of the adjusted landmarks
+around the world origin and the placed objects (`VisionInput.anchorPoints`,
+sent by the session each frame), not the newest keyframe's own pose
+correction: the keyframe correction also carries that frame's tracking
+error, which the object then kept (a growing 2.4 px in the synthetic
+session vs 1.4 px for the local fit; `?anchor=kf|none` for A/B, HUD `corr …
+(kf … local … nN)`).
 
 ## Phase 5 — keyframes and relocalization
 

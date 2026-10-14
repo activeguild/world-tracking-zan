@@ -45,6 +45,7 @@ import {
 } from "./types";
 import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
 import { type BAObservation, bundleAdjust } from "../math/BundleAdjustment";
+import { rigidFit } from "../math/RigidFit";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { transpose3 } from "../math/Decomposition";
 import { applyTransform, cameraCenterOf, composeTransforms, invertTransform, rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
@@ -166,6 +167,8 @@ export class VisionEngine {
    * dropped and the scan restarts where the camera looks now.
    */
   private worldEstablished = false;
+  /** Map-frame points the BA anchor correction is fitted around (Phase 2), from the latest input. */
+  private anchorPoints: number[] | null = null;
   /** Stage counters of the most recent relocalization attempt of the current lost episode (v6). */
   private relocDiagnostics: RelocalizationDiagnostics | null = null;
   private relocDiagnosticsAge = 0;
@@ -495,6 +498,7 @@ export class VisionEngine {
     let propagated = 0;
     let untouched = 0;
     const correction: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
+    let keyframeCorrectionShift = 0, keyframeCorrectionDeg = 0, localCorrectionShift = 0, localCorrectionDeg = 0, localFitLandmarks = 0;
     if (rejected) {
       for (let i = 0; i < kfs.length; i++) {
         kfs[i].pose.rotation.set(savedPoses[i].rotation);
@@ -509,10 +513,43 @@ export class VisionEngine {
         if (i === 0) continue;
         corrections.set(kfs[i].id, composeTransforms(invertTransform(kfs[i].pose), savedPoses[i]));
       }
+      // Phase 2: the rigid motion of the adjusted landmarks around the anchor
+      // points (world origin, placed objects) is what the world anchor should
+      // follow: it keeps the objects attached to the floor landmarks next to
+      // them whether the run restored a drifted map or refined it. Gaussian
+      // weights by the distance to the nearest anchor point, radius
+      // `anchorFitDepthRatio` × median depth; the fit is robust (reweighted).
+      const oldPositions = new Float64Array(ids.length * 3);
+      for (let i = 0; i < ids.length; i++) oldPositions.set(map.get(ids[i])!.position, i * 3);
+      let fit: ReturnType<typeof rigidFit> = null;
+      const ap = this.anchorPoints;
+      if (cfg.anchorCorrection === "local" && ap && ap.length >= 3 && cfg.anchorFitDepthRatio > 0) {
+        const radius = cfg.anchorFitDepthRatio * Math.max(medianDepth, 1e-6);
+        const inv2r2 = 1 / (2 * radius * radius);
+        const weights = new Float64Array(ids.length);
+        let weighted = 0;
+        for (let i = 0; i < ids.length; i++) {
+          let best = Infinity;
+          for (let a = 0; a + 2 < ap.length; a += 3) {
+            const d2 = (oldPositions[i * 3] - ap[a]) ** 2 + (oldPositions[i * 3 + 1] - ap[a + 1]) ** 2 + (oldPositions[i * 3 + 2] - ap[a + 2]) ** 2;
+            if (d2 < best) best = d2;
+          }
+          weights[i] = Math.exp(-best * inv2r2);
+          if (weights[i] > 0.3) weighted++;
+        }
+        if (weighted >= cfg.anchorFitMinLandmarks) {
+          fit = rigidFit(oldPositions, positions, ids.length, 3, weights);
+          if (fit) localFitLandmarks = weighted;
+        }
+      }
       for (let i = 0; i < ids.length; i++) {
         const lm = map.get(ids[i])!;
         lm.position.set(positions.subarray(i * 3, i * 3 + 3));
         lm.baMode = "adjusted";
+      }
+      if (fit) {
+        localCorrectionShift = Math.hypot(fit.transform.translation[0], fit.transform.translation[1], fit.transform.translation[2]);
+        localCorrectionDeg = (rotationDistance(fit.transform.rotation, correction.rotation) * 180) / Math.PI;
       }
       // Landmarks no stored keyframe observes follow their reference
       // keyframe (v18): without this the solved and the unsolved part of the
@@ -540,9 +577,19 @@ export class VisionEngine {
       const newest = kfs[kfs.length - 1];
       const c = corrections.get(newest.id);
       if (c && newest.frameId === frameId) {
-        correction.rotation.set(c.rotation);
-        correction.translation.set(c.translation);
+        keyframeCorrectionShift = Math.hypot(c.translation[0], c.translation[1], c.translation[2]);
+        keyframeCorrectionDeg = (rotationDistance(c.rotation, correction.rotation) * 180) / Math.PI;
         this.mapTracker.rebasePose(c);
+        // The keyframe correction is the fallback of the local mode (no
+        // anchor points known, or too few landmarks around them).
+        if (cfg.anchorCorrection === "keyframe" || (cfg.anchorCorrection === "local" && !fit)) {
+          correction.rotation.set(c.rotation);
+          correction.translation.set(c.translation);
+        }
+      }
+      if (cfg.anchorCorrection === "local" && fit) {
+        correction.rotation.set(fit.transform.rotation);
+        correction.translation.set(fit.transform.translation);
       }
     }
     const ms = now() - t0;
@@ -568,6 +615,11 @@ export class VisionEngine {
       untouched,
       correctionRotation: correction.rotation,
       correctionTranslation: correction.translation,
+      keyframeCorrectionShift,
+      keyframeCorrectionDeg,
+      localCorrectionShift,
+      localCorrectionDeg,
+      localFitLandmarks,
       errorBeforePx: res.errorBefore * f,
       errorAfterPx: res.errorAfter * f,
       iterations: res.iterations,
@@ -613,6 +665,7 @@ export class VisionEngine {
       );
     }
 
+    this.anchorPoints = input.anchorPoints ?? null;
     // 1. Pyramid
     this.curPyramid.build(input.gray);
     const t1 = now();

@@ -131,6 +131,11 @@ export interface HudStats {
     propagated: number;
     untouched: number;
     correctionTranslation: ArrayLike<number>;
+    keyframeCorrectionShift: number;
+    keyframeCorrectionDeg: number;
+    localCorrectionShift: number;
+    localCorrectionDeg: number;
+    localFitLandmarks: number;
     errorBeforePx: number;
     errorAfterPx: number;
     iterations: number;
@@ -576,7 +581,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
             (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );

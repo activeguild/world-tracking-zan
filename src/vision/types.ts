@@ -482,6 +482,19 @@ export interface BundleAdjustmentOutput {
    */
   correctionRotation: Float64Array;
   correctionTranslation: Float64Array;
+  /**
+   * Phase 2 diagnostics: the two candidate anchor motions of this run. The
+   * newest keyframe's own correction (what the canonical pose is rebased
+   * with) and the local rigid fit of the adjusted landmarks' displacement
+   * around the anchor points, each as a translation magnitude (map units)
+   * and rotation (degrees); `localFitLandmarks` = landmarks that carried
+   * weight in the fit (0 = no fit, the keyframe correction was used).
+   */
+  keyframeCorrectionShift: number;
+  keyframeCorrectionDeg: number;
+  localCorrectionShift: number;
+  localCorrectionDeg: number;
+  localFitLandmarks: number;
   errorBeforePx: number;
   errorAfterPx: number;
   iterations: number;
@@ -513,6 +526,11 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     untouched: 0,
     correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
     correctionTranslation: new Float64Array(3),
+    keyframeCorrectionShift: 0,
+    keyframeCorrectionDeg: 0,
+    localCorrectionShift: 0,
+    localCorrectionDeg: 0,
+    localFitLandmarks: 0,
     errorBeforePx: 0,
     errorAfterPx: 0,
     iterations: 0,
@@ -744,6 +762,12 @@ export interface VisionInput {
    * device dependent). Used only for the horizontality test of planes.
    */
   gravity?: number[] | null;
+  /**
+   * Map-frame points (x,y,z interleaved) the bundle adjustment's world
+   * anchor correction is fitted around: the world origin and the placed
+   * objects (改善指示書 Phase 2). Null / empty = no local fit possible.
+   */
+  anchorPoints?: number[] | null;
 }
 
 /**

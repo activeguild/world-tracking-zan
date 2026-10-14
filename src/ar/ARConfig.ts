@@ -743,6 +743,26 @@ export interface BundleAdjustmentConfig {
    * the error by thousandths of a pixel. 0 keeps the strict criteria only.
    */
   minIterationGain: number;
+  /**
+   * 改善指示書 Phase 2: which rigid motion the session applies to the world
+   * anchor after an accepted run. `local` (default) = a robust rigid fit of
+   * the adjusted landmarks' old → new positions weighted around the world
+   * origin and the placed objects (`VisionInput.anchorPoints`, Gaussian
+   * radius `anchorFitDepthRatio` × median depth): objects stay attached to
+   * the floor landmarks next to them, whether the run restored a drifted
+   * map rigidly or refined it non-rigidly. `keyframe` = the newest
+   * keyframe's own pose correction (v18): no hop at the BA frame by
+   * construction, but it also contains that keyframe's tracking-pose error,
+   * which the object then keeps (a growing 1–2.6 px in the synthetic
+   * session). `none` = the anchor never moves (off by the whole correction
+   * when the map is pulled back toward the first keyframe). Falls back to
+   * `keyframe` when no anchor points are known or fewer than
+   * `anchorFitMinLandmarks` landmarks carry weight. The canonical pose is
+   * always re-expressed with the keyframe correction. `?anchor=local|kf|none`.
+   */
+  anchorCorrection: "local" | "keyframe" | "none";
+  anchorFitDepthRatio: number;
+  anchorFitMinLandmarks: number;
 }
 
 export interface ARConfig {
@@ -1021,6 +1041,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxPoseJumpPriorRatio: 2,
     maxPoseJumpStrikes: 2,
     minIterationGain: 0.01,
+    anchorCorrection: "local",
+    anchorFitDepthRatio: 0.05,
+    anchorFitMinLandmarks: 10,
   },
   state: {
     minTrackedForTracking: 40,

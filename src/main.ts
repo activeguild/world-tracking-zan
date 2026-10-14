@@ -58,6 +58,8 @@ const freezeMap = params.get("freeze") === "1";
 const bundleAdjustmentParam = params.get("ba");
 // v20: keyframe check of re-associations, off with ?relinkverify=0 for A/B.
 const relinkVerify = params.get("relinkverify") !== "0";
+// Phase 2: what moves the world anchor after a BA run (?anchor=local|kf|none).
+const anchorParam = ({ local: "local", kf: "keyframe", none: "none" } as const)[params.get("anchor") ?? ""];
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -95,7 +97,10 @@ const session = new ARSession({
     },
     planeTracking: { enabled: planeTracking },
     landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap, relinkVerify },
-    ...(bundleAdjustmentParam !== null ? { bundleAdjustment: { enabled: bundleAdjustmentParam !== "0" } } : {}),
+    bundleAdjustment: {
+      ...(bundleAdjustmentParam !== null ? { enabled: bundleAdjustmentParam !== "0" } : {}),
+      ...(anchorParam ? { anchorCorrection: anchorParam } : {}),
+    },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
       ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
@@ -371,7 +376,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {

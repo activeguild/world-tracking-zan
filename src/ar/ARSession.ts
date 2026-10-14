@@ -6,7 +6,7 @@ import { approximateIntrinsics, type CameraIntrinsics } from "../camera/CameraIn
 import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
 import { PlaneRenderer } from "../debug/PlaneRenderer";
-import { viewportIntrinsics } from "../math/CoordinateSystem";
+import { viewportIntrinsics, worldToMap } from "../math/CoordinateSystem";
 import { ARCamera } from "../rendering/ARCamera";
 import type { ARObject } from "../rendering/ARObject";
 import { ARRenderer } from "../rendering/ARRenderer";
@@ -621,6 +621,21 @@ export class ARSession {
       frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
     }
     this.maybeSwitchGrabber(g1 - g0);
+    // Phase 2: the BA's anchor correction is fitted to the landmarks around
+    // the world origin and the placed objects (map frame, current anchor).
+    if (this.worldAnchor.isReady) {
+      const wf = this.worldAnchor.frame!;
+      const pts: number[] = [];
+      const o = worldToMap(wf, [0, 0, 0]);
+      pts.push(o[0], o[1], o[2]);
+      for (const obj of this.world.objects) {
+        if (!obj.placed) continue;
+        const p = obj.position;
+        const m = worldToMap(wf, [p.x, p.y, p.z]);
+        pts.push(m[0], m[1], m[2]);
+      }
+      frame.anchorPoints = pts;
+    }
     // Keep a display copy of this frame for when its pose arrives (GPU blit).
     if (this.syncActive) this.presenter!.capture(this.video, frame.frameId);
     const g2 = performance.now();
