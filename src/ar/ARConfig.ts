@@ -731,6 +731,11 @@ export interface BundleAdjustmentConfig {
    * against a 3° prior) must not be written back. A keyframe that causes
    * this `maxPoseJumpStrikes` runs in a row is left out of later solves
    * (its observations disagree with the map). 0 disables the guard.
+   * Ratio 1 (Android recording 30): accepted runs moved the newest keyframe
+   * by 5.1–5.3° / 0.6–0.8 u (1.8 σ, under the earlier 2 σ limit) although
+   * its PnP pose had a 2 px residual over 100+ inliers — a 5° pose error
+   * would show as tens of pixels, so those solutions ran along the
+   * pitch–height ambiguity of a near-planar scene and tilted the world.
    */
   maxPoseJumpPriorRatio: number;
   maxPoseJumpStrikes: number;
@@ -1038,7 +1043,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxLandmarkShiftRatio: 0.2,
     maxShiftedFraction: 0.1,
     minGainFraction: 0.15,
-    maxPoseJumpPriorRatio: 2,
+    maxPoseJumpPriorRatio: 1,
     maxPoseJumpStrikes: 2,
     minIterationGain: 0.01,
     anchorCorrection: "local",
