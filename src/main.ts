@@ -32,6 +32,8 @@ import "./style.css";
  *   ?refine=1         re-enable landmark depth refinement (A/B against the fixed map, v2 §26)
  *   ?freeze=1         no new landmarks once the world is established (A/B: map inconsistency vs camera model, v16)
  *   ?ba=0             disable the local bundle adjustment on keyframe creation (Phase 7 A/B)
+ *   ?relinkverify=0   link re-detected corners by distance alone, no keyframe check (v20 A/B)
+ *   ?purge=0          keep landmarks a keyframe contradicts in the map (v21 A/B)
  *   ?planetrack=1     experimental plane-relative pose instead of landmark PnP
  */
 const params = new URLSearchParams(location.search);
@@ -58,6 +60,8 @@ const freezeMap = params.get("freeze") === "1";
 const bundleAdjustmentParam = params.get("ba");
 // v20: keyframe check of re-associations, off with ?relinkverify=0 for A/B.
 const relinkVerify = params.get("relinkverify") !== "0";
+// v21: removal of landmarks a keyframe contradicts, off with ?purge=0 for A/B.
+const purgeInconsistent = params.get("purge") !== "0";
 // Phase 2: what moves the world anchor after a BA run (?anchor=local|kf|none).
 const anchorParam = ({ local: "local", kf: "keyframe", none: "none" } as const)[params.get("anchor") ?? ""];
 
@@ -96,7 +100,7 @@ const session = new ARSession({
       ...(grabParam ? { grabber: grabParam } : {}),
     },
     planeTracking: { enabled: planeTracking },
-    landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap, relinkVerify },
+    landmarks: { enableLandmarkDepthRefinement: refineLandmarks, freezeAfterWorld: freezeMap, relinkVerify, purgeInconsistent },
     bundleAdjustment: {
       ...(bundleAdjustmentParam !== null ? { enabled: bundleAdjustmentParam !== "0" } : {}),
       ...(anchorParam ? { anchorCorrection: anchorParam } : {}),
@@ -376,7 +380,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {

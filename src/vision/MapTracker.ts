@@ -191,10 +191,23 @@ export class MapTracker {
    * pre-v20 behaviour; relinks then count as `relinkRaw`).
    */
   relinkVerifier: RelinkVerifier | null = null;
+  /**
+   * v21 (Android recording 31): a re-association candidate whose keyframe
+   * patch tracks into the current frame but lands at least this far (px)
+   * from the landmark's projection is not merely rejected — the landmark is
+   * removed from the map. Its keyframe view and the map disagree by that
+   * much (on device 9–15 px, the same population the BA leaves out as
+   * gross outliers each run), so it would keep feeding PnP compromises and
+   * relink candidates. 0 = off (reject only). The engine sets this to
+   * `bundleAdjustment.maxObservationErrorPx` so both purges share one
+   * criterion.
+   */
+  purgeFarPx = 0;
   /** Re-association candidates of the current frame (reset in update). */
   private relinkStats: RelinkStats = emptyRelinkStats();
   private relinkSnapSum = 0;
   private relinkFarSum = 0;
+  private purgedTotal = 0;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -293,6 +306,7 @@ export class MapTracker {
 
   reset(tracks: readonly Track[]): void {
     this.map.clear();
+    this.purgedTotal = 0;
     this._initialized = false;
     this._mapFrameId = -1;
     this._pose = identity();
@@ -345,6 +359,7 @@ export class MapTracker {
     if (created.length < cfg.initMinLandmarks) return false;
 
     this.map.clear();
+    this.purgedTotal = 0;
     this._initialized = true;
     this._mapFrameId = refFrameId;
     this._pose = { rotation: Float64Array.from(rel.rotation), translation: Float64Array.from(rel.translationDirection) };
@@ -836,6 +851,7 @@ export class MapTracker {
     const center = this.cameraCenter();
     if (this.relinkStats.verified) this.relinkStats.meanSnapPx = this.relinkSnapSum / this.relinkStats.verified;
     if (this.relinkStats.rejectedTooFar) this.relinkStats.meanFarPx = this.relinkFarSum / this.relinkStats.rejectedTooFar;
+    this.relinkStats.purgedTotal = this.purgedTotal;
     this.lastResult = {
       tracked,
       reassociated,
@@ -865,6 +881,34 @@ export class MapTracker {
       t.anchorFrame = -1;
       t.anchorPose = null;
     }
+  }
+
+  /**
+   * v21: remove landmarks the bundle adjustment found inconsistent with a
+   * stored keyframe (an observation beyond `maxObservationErrorPx`). The
+   * track still observing one is unlinked and its anchor dropped, so the
+   * corner is triangulated afresh from the current poses instead of
+   * re-creating the same landmark from the old anchor pair. Returns the
+   * number removed; counted in `RelinkStats.purgedTotal`.
+   */
+  purgeLandmarks(ids: Iterable<number>, tracks: readonly Track[]): number {
+    let removed = 0;
+    const gone = new Set<number>();
+    for (const id of ids) {
+      if (!this.map.get(id)) continue;
+      this.map.remove(id);
+      gone.add(id);
+      removed++;
+    }
+    if (removed === 0) return 0;
+    for (const t of tracks) {
+      if (!gone.has(t.landmarkId)) continue;
+      t.landmarkId = -1;
+      t.anchorFrame = -1;
+      t.anchorPose = null;
+    }
+    this.purgedTotal += removed;
+    return removed;
   }
 
   /**
@@ -1142,6 +1186,13 @@ export class MapTracker {
         if (v.reason === "too_far") {
           this.relinkStats.rejectedTooFar++;
           this.relinkFarSum += v.landedPx ?? 0;
+          // v21: the keyframe's view of this landmark is not where the map
+          // projects it — an inconsistent landmark, not a wrong candidate.
+          if (this.purgeFarPx > 0 && (v.landedPx ?? 0) >= this.purgeFarPx) {
+            this.map.remove(lm.id);
+            this.relinkStats.purged++;
+            this.purgedTotal++;
+          }
         } else {
           this.relinkStats.rejectedLk++;
         }

@@ -77,6 +77,17 @@ rigid fit on a dozen clustered landmarks gave 2–7° rotations on device, so
 only the translation is local). `?anchor=kf|none` for A/B, HUD `corr …
 (kf … local … nN)`.
 
+Landmarks a stored keyframe contradicts are removed from the map (v21):
+a keyframe observation the BA leaves out as a gross outlier (> 10 px,
+`maxObservationErrorPx`), or a re-association candidate whose keyframe patch
+lands that far from the landmark's projection. On device both were the same
+population (`+22–32 out` per BA run, `relink ✗ far 7–14@9–15px` every
+frame): such a landmark used to stay in the map, come back as a relink
+candidate frame after frame and pull PnP towards a compromise. The track
+observing a purged landmark re-anchors and the corner is triangulated again
+from current poses. HUD: `purge N` on the BA and PnP rows, `LM … purged N`
+cumulative; `?purge=0` for A/B.
+
 ## Phase 5 — keyframes and relocalization
 
 ```

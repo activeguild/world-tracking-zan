@@ -238,6 +238,8 @@ export class VisionEngine {
       this.mapTracker.relinkVerifier = {
         verify: (candidates, pose, radiusPx) => this.relocalizer.verifyRelinks(candidates, this.curPyramid, pose, radiusPx),
       };
+      // v21: a keyframe patch landing a BA-outlier distance away removes the landmark.
+      if (config.landmarks.purgeInconsistent) this.mapTracker.purgeFarPx = config.bundleAdjustment.maxObservationErrorPx;
     }
   }
 
@@ -401,6 +403,9 @@ export class VisionEngine {
     const maxErr = cfg.maxObservationErrorPx / f;
     const observations: BAObservation[] = [];
     let outliers = 0;
+    // v21: landmarks a keyframe contradicts (an observation beyond the
+    // outlier gate) are removed from the map after the run.
+    const inconsistent = new Set<number>();
     const kfIndex = new Map<number, number>();
     kfs.forEach((kf, i) => kfIndex.set(kf.id, i));
     for (let ki = 0; ki < kfs.length; ki++) {
@@ -413,6 +418,7 @@ export class VisionEngine {
         const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
         if (z <= 1e-6) {
           outliers++;
+          inconsistent.add(o.landmarkId);
           continue;
         }
         const x = (o.x - k.cx) / k.fx, y = (o.y - k.cy) / k.fy;
@@ -420,6 +426,7 @@ export class VisionEngine {
         const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
         if (Math.hypot(u - x, v - y) > maxErr) {
           outliers++;
+          inconsistent.add(o.landmarkId);
           continue;
         }
         observations.push({ keyframe: ki, landmark: li, x, y });
@@ -597,6 +604,10 @@ export class VisionEngine {
         correction.translation.set(fit.transform.translation);
       }
     }
+    // v21: drop the landmarks the keyframes contradict, accepted run or not
+    // (the test is against the state before the solve). Their tracks
+    // re-anchor and the corners are triangulated again from current poses.
+    const purged = this.config.landmarks.purgeInconsistent ? this.mapTracker.purgeLandmarks(inconsistent, this.tracks) : 0;
     const ms = now() - t0;
     this.timing.ba += ms;
     const prev = this.lastBundleAdjustment;
@@ -609,6 +620,7 @@ export class VisionEngine {
       landmarks: ids.length,
       observations: observations.length,
       outliers,
+      purged,
       shifted,
       rejected,
       rejectReason,

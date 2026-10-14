@@ -121,6 +121,7 @@ export interface HudStats {
     landmarks: number;
     observations: number;
     outliers: number;
+    purged: number;
     shifted: number;
     rejected: boolean;
     rejectReason: string;
@@ -254,7 +255,7 @@ export interface HudStats {
     /** Landmarks re-linked to tracks this frame. */
     relinked: number;
     /** Keyframe check of this frame's re-association candidates (v20). */
-    relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number; rejectedTooFar: number; rejectedLk: number; meanFarPx: number };
+    relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number; rejectedTooFar: number; rejectedLk: number; meanFarPx: number; purged: number; purgedTotal: number };
     /** Pose re-seeded by a relocalization (this frame or its monitoring window). */
     relocalized: boolean;
     /** Map PnP recovery status (v6 §10). */
@@ -494,7 +495,7 @@ export class DebugOverlay {
       // mean distance the verified tracks were snapped by.
       const rl = m.relink;
       const relinkText = rl && rl.candidates
-        ? `  relink ${m.relinked}/${rl.candidates}${rl.rejected ? ` ✗${rl.rejected} (far ${rl.rejectedTooFar}${rl.rejectedTooFar ? `@${rl.meanFarPx.toFixed(1)}px` : ""} lk ${rl.rejectedLk})` : ""}${rl.unverified ? ` raw ${rl.unverified}` : ""}${rl.verified ? ` snap ${rl.meanSnapPx.toFixed(1)}px` : ""}`
+        ? `  relink ${m.relinked}/${rl.candidates}${rl.rejected ? ` ✗${rl.rejected} (far ${rl.rejectedTooFar}${rl.rejectedTooFar ? `@${rl.meanFarPx.toFixed(1)}px` : ""} lk ${rl.rejectedLk})` : ""}${rl.unverified ? ` raw ${rl.unverified}` : ""}${rl.verified ? ` snap ${rl.meanSnapPx.toFixed(1)}px` : ""}${rl.purged ? ` purge ${rl.purged}` : ""}`
         : m.relinked ? `  relink ${m.relinked}` : "";
       const flags = `${relinkText}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));
@@ -581,7 +582,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
             (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );
@@ -849,7 +850,7 @@ export class DebugOverlay {
     if (m) {
       rows.push(row("mapC", xyz(m.cameraCenter)));
       rows.push(row("Δcam", `${cm(m.deltaTranslationM)} / ${m.deltaRotationDeg.toFixed(2)}°`));
-      rows.push(row("LM", `${m.landmarks}  plane ${p ? p.inliers : 0}  other ${p ? Math.max(0, m.landmarks - p.inliers) : m.landmarks}`));
+      rows.push(row("LM", `${m.landmarks}  plane ${p ? p.inliers : 0}  other ${p ? Math.max(0, m.landmarks - p.inliers) : m.landmarks}${m.relink?.purgedTotal ? `  purged ${m.relink.purgedTotal}` : ""}`));
     }
     if (p) {
       rows.push(row("Plane", `n(${p.normal.map((v) => v.toFixed(2)).join(",")}) rms ${p.rms.toFixed(3)}`));

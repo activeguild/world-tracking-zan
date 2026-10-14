@@ -306,6 +306,19 @@ export interface LandmarkConfig {
    * `?relinkverify=0` in the demo turns the check off for A/B.
    */
   relinkVerify: boolean;
+  /**
+   * v21 (Android recording 31): remove landmarks that a stored keyframe
+   * contradicts. Two sources, one criterion
+   * (`bundleAdjustment.maxObservationErrorPx`): a keyframe observation the
+   * bundle adjustment leaves out as a gross outlier, and a re-association
+   * candidate whose keyframe patch lands that far from the landmark's
+   * projection (`relink ✗ far@9–15px` on device). Until now such landmarks
+   * were only skipped per run / per frame and stayed in the map, where they
+   * keep producing relink candidates and pull PnP towards a compromise.
+   * The track observing a purged landmark re-anchors and the corner is
+   * triangulated again from the current poses. `?purge=0` for A/B.
+   */
+  purgeInconsistent: boolean;
   /** Also re-associate with the propagated pose while lost for at most this many frames. */
   reassociateMaxLostFrames: number;
   /**
@@ -903,6 +916,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     // matches on unrelated texture rare.
     reassociateRadiusPx: 2.5,
     relinkVerify: true,
+    purgeInconsistent: true,
     reassociateMaxLostFrames: 90,
     minRecoveryInliers: 24,
     recoverySeedInliers: 4,

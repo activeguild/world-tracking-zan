@@ -426,10 +426,20 @@ export interface RelinkStats {
   rejectedTooFar: number;
   rejectedLk: number;
   meanFarPx: number;
+  /**
+   * v21: landmarks removed from the map in this frame because the keyframe
+   * patch landed at least `bundleAdjustment.maxObservationErrorPx` from the
+   * candidate — the keyframe's view of the landmark and its projection
+   * under the current pose disagree, so the landmark is inconsistent with
+   * the map (the same population as the BA's gross outliers).
+   */
+  purged: number;
+  /** v21: landmarks removed so far on the current map (relink + BA). */
+  purgedTotal: number;
 }
 
 export function emptyRelinkStats(): RelinkStats {
-  return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0, rejectedTooFar: 0, rejectedLk: 0, meanFarPx: 0 };
+  return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0, rejectedTooFar: 0, rejectedLk: 0, meanFarPx: 0, purged: 0, purgedTotal: 0 };
 }
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
@@ -454,6 +464,12 @@ export interface BundleAdjustmentOutput {
   observations: number;
   /** Observations left out as gross outliers before the solve. */
   outliers: number;
+  /**
+   * v21: landmarks removed from the map after the run because a keyframe
+   * observation of them was a gross outlier (keyframe view and map
+   * disagree by more than `maxObservationErrorPx`); 0 with the purge off.
+   */
+  purged: number;
   /** Landmarks the solve moved by more than maxLandmarkShiftRatio × depth. */
   shifted: number;
   /** The whole run was discarded (`rejectReason`); map and keyframe poses untouched. */
@@ -519,6 +535,7 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     landmarks: 0,
     observations: 0,
     outliers: 0,
+    purged: 0,
     shifted: 0,
     rejected: false,
     rejectReason: "none",

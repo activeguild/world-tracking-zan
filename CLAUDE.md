@@ -528,6 +528,16 @@ v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Reloca
 - **未解決（最重要）**: 6° 程度の傾きで PnP 誤差が 1.2 → 2.4 px に一様に跳ね、戻らない現象（14 本目から続く「傾けるとずれる」の HUD 上の姿）。relink / BA / Keyframe とは独立に World 確立前の小さな Map で起きる。候補: 処理画像の縦横比・主点（取り込み経路の cover / stretch）、ローリングシャッター以外の端末固有のカメラモデル。次の指示書 Phase では `?fov=` ではなく `fx ≠ fy` / 主点オフセットの A/B（`?fy=` / `?cx=`）か、傾き前後の同一 Landmark 群の残差ベクトル場（方向の系統性）を HUD に出して切り分ける
 - **残る Phase（指示書 §5〜§10）**: Phase 2 の補正の累積テスト、Phase 3 の即時適用経路の評価（現状: strong かつ 60i / 1.0 px のみ即適用 + 事後監視 3 フレーム）、Phase 5 の P50 / P95 計測、Phase 6 の回帰シナリオは次の段階
 
+### v21 — Keyframe と矛盾する Landmark の除去（2026-10-14、ユーザー選択「１」、実機確認待ち）
+
+31 本目の結論（`relink ✗ far 7–14@9–15 px` と BA の `+22–32 out` は同じ集団 = Keyframe 観測と Map 位置が 10 px 食い違う「汚れた Landmark」が Map に残り続ける）への対処。**PnP / LK / RANSAC / 三角測量 / Plane / 再局所化 / Keyframe 方針 / BA の数式・prior・採否は不変**。新しい数値閾値は追加せず、既存の `bundleAdjustment.maxObservationErrorPx`（10 px）を両経路の判定に共用。
+
+- **BA 経路（`VisionEngine.runBundleAdjustment`）**: 解く前の外れ値判定（Keyframe 観測の再投影誤差 > 10 px、またはその Keyframe の背後）で除外した観測の Landmark を記録し、解いた後（採用・棄却に関係なく。判定は解く前の状態に対するもの）に `MapTracker.purgeLandmarks(ids, tracks)` で Map から削除。観測中の追跡点は紐づけを外し**アンカーも捨てる**ので、同じ角は現在の姿勢から改めて三角測量される（旧アンカー対からの複製は起きない）。出力 `BundleAdjustmentOutput.purged`
+- **再関連付け経路（`MapTracker.reassociateWith`）**: v20 の照合で `too_far` かつ `landedPx ≥ purgeFarPx`（エンジンが 10 px を設定）の候補は棄却に加えて Landmark を削除（`RelinkStats.purged`、累計 `purgedTotal`。Map 初期化・リセットで 0）。半径 4 px 未満の `too_far`（隣の角）は従来どおり棄却のみ
+- **設定 / A/B**: `landmarks.purgeInconsistent`（既定 true）、`?purge=0` で従来の「無視するだけ」（FPS 行末尾 `noPurge`）。HUD: PnP 行 `relink 1/8 ✗7 (far 5@12.1px lk 2) … purge 3`、`BA` 行 `obs 936 (+28 out) purge 25`、WORLD 節 `LM 812 plane 190 other 622 purged 41`（累計）。ログ `BA #n … (+28 out, 0 shifted, 25 purged)`
+- テスト 267 件（+2、`tests/vision/PurgeInconsistent.test.ts`、二平面シーン）: (1) BA: 清浄な Map では外れ値 0 / 削除 0。最新 Keyframe の観測 20 点を 15 px ずらす → `+20 out / 20 purged`、ちょうどその 20 点が消え追跡点は翌フレームで全 20 本が再アンカー、失探 0、Map id 不変、PnP 0.21 → 0.27 px（清浄と同水準）。OFF では 20 点とも Map に残る。(2) relink: Keyframe が観測する Landmark 30 点を「投影が真の角から 12 px 横」に動かし、そこに紐づけなしの追跡点を置く（Map が誤って説明する再検出角）→ 30 件とも `far@12.0 px` → 30 件削除（候補 59 件で終わる）、失探 0。**OFF では同じ 30 点が 30 フレームで 844 回候補になり 808 回 `far@12.1` で棄却され続ける**（実機の `far 7–14` が毎フレーム出る形の再現）。既存: 壊した Map の修復テストは外れ値 140 点が削除されても 0.51 → 2.49 → 0.45 px で不変、配置点ドリフト 0.48 / 1.26 px 不変。ブラウザテスト 3 件合格
+- **実機で読むべきもの**: `LM … purged N` の増え方（1 分で数十なら想定どおり。数百なら Keyframe 側の姿勢が悪く良い Landmark まで消している → `BA` 行の `out` の比率で判断）、`relink` 行の `far@` が 10 px 以上の候補が消えて `✗` が減るか、`BA` 行の `+N out` が回を追って減るか（同じ外れ値が毎回残らない）、PnP 誤差が移動後に 2–3 px から下がるか（`?purge=0` と A/B）。削除が多すぎて `LM` が減り続ける・Keyframe の `alive`（`Rank KF×26` の表示）が落ちるなら、基準を 10 px より緩める方向
+
 ### Phase 5 — 実装済み（承認待ち）
 
 - `src/vision/Keyframe.ts`: Keyframe（姿勢、画像ピラミッドのコピー、粗画像、Landmark 観測）
