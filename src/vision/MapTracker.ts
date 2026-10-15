@@ -20,6 +20,7 @@ import {
   emptyRelinkStats,
   emptyReprojectionBreakdown,
   type PoseCandidateReport,
+  type ReanchorStats,
   type RelinkStats,
   type ReprojectionBreakdown,
   type Track,
@@ -43,7 +44,17 @@ export interface RelinkVerdict {
   /** Why a candidate was rejected: the keyframe patch landed beyond the radius (`too_far`, with `landedPx` = its distance from the candidate) or LK failed outright (`lk_failed`). */
   reason?: "too_far" | "lk_failed";
   landedPx?: number;
+  /** Frame id of the keyframe whose observation was tracked (verified / rejected). */
+  keyframeFrameId?: number;
 }
+
+/**
+ * Which keyframe observation to track when several keyframes observe the
+ * landmark: the one whose view is nearest the current pose (the relink
+ * check: most likely to track) or the oldest one (the re-anchor probe: the
+ * view the landmark was built from, before any later drift of the track).
+ */
+export type RelinkKeyframeChoice = "nearest" | "oldest";
 
 /**
  * Checks re-association candidates against stored keyframe observations
@@ -52,7 +63,7 @@ export interface RelinkVerdict {
  * have from the candidate track.
  */
 export interface RelinkVerifier {
-  verify(candidates: RelinkCandidate[], pose: RigidTransform, radiusPx: number): RelinkVerdict[];
+  verify(candidates: RelinkCandidate[], pose: RigidTransform, radiusPx: number, choice?: RelinkKeyframeChoice): RelinkVerdict[];
 }
 
 /**
@@ -89,6 +100,8 @@ export interface MapTrackingResult {
   reassociated: number;
   /** What the keyframe check made of this frame's re-association candidates (v20). */
   relink: RelinkStats;
+  /** Last re-anchor probe on this map (v24 diagnostics; held until the next probe, null until the first). */
+  reanchor: ReanchorStats | null;
   /** Why landmark-less tracks did / did not become landmarks this frame (v11 diagnostics). */
   triangulation: TriangulationStats;
   /** PnP inlier error by image region / landmark kind (v16 diagnostics). */
@@ -163,6 +176,7 @@ const EMPTY_RESULT: MapTrackingResult = {
   jumpRejected: false,
   reassociated: 0,
   relink: emptyRelinkStats(),
+  reanchor: null,
   triangulation: emptyTriangulationStats(),
   reprojection: emptyReprojectionBreakdown(),
 };
@@ -204,6 +218,16 @@ export class MapTracker {
    * criterion.
    */
   purgeFarPx = 0;
+  /**
+   * v24 re-anchor probe (diagnostics only): every this many frames a sample
+   * of at most `reanchorProbeMaxTracks` PnP inliers is re-observed from the
+   * oldest keyframe observation of their landmark and the residuals of the
+   * live track and of the landed position are compared (`ReanchorStats`).
+   * 0 = off. Needs the `relinkVerifier`. Never changes a track or a landmark.
+   */
+  reanchorProbeEveryFrames = 0;
+  reanchorProbeMaxTracks = 40;
+  private lastReanchor: ReanchorStats | null = null;
   /** Re-association candidates of the current frame (reset in update). */
   private relinkStats: RelinkStats = emptyRelinkStats();
   private relinkSnapSum = 0;
@@ -308,6 +332,7 @@ export class MapTracker {
   reset(tracks: readonly Track[]): void {
     this.map.clear();
     this.purgedTotal = 0;
+    this.lastReanchor = null;
     this._initialized = false;
     this._mapFrameId = -1;
     this._pose = identity();
@@ -361,6 +386,7 @@ export class MapTracker {
 
     this.map.clear();
     this.purgedTotal = 0;
+    this.lastReanchor = null;
     this._initialized = true;
     this._mapFrameId = refFrameId;
     this._pose = { rotation: Float64Array.from(rel.rotation), translation: Float64Array.from(rel.translationDirection) };
@@ -665,6 +691,10 @@ export class MapTracker {
         inlierCount = cls.inlierCount;
         meanErrPx = cls.meanError * f;
         reprojection = this.reprojectionBreakdown(this._pose, n, obsTracks, cls.inliers, k, frameId);
+        if (this.reanchorProbeEveryFrames > 0 && this.relinkVerifier && frameId % this.reanchorProbeEveryFrames === 0) {
+          const probe = this.reanchorProbe(this._pose, n, obsTracks, cls.inliers, k, frameId);
+          if (probe) this.lastReanchor = probe;
+        }
         const maxErr = cfg.maxTriangulationErrorPx / f;
         for (let i = 0; i < n; i++) {
           const lm = this.map.get(obsTracks[i].landmarkId)!;
@@ -857,6 +887,7 @@ export class MapTracker {
       tracked,
       reassociated,
       relink: this.relinkStats,
+      reanchor: this.lastReanchor,
       inlierCount,
       meanReprojectionErrorPx: meanErrPx,
       newLandmarks: created,
@@ -869,6 +900,124 @@ export class MapTracker {
       reprojection,
     };
     return this.lastResult;
+  }
+
+  /**
+   * v24 re-anchor probe (see `ReanchorStats`). A stride sample of the PnP
+   * inliers is handed to the keyframe check with the live track as the LK
+   * start, choosing the *oldest* keyframe observation of each landmark; the
+   * radius is wide (`maxObservationErrorPx`-class, via `purgeFarPx`, or 10 px)
+   * because the point is to measure where the patch lands, not to gate it.
+   * Returns null when nothing landed.
+   */
+  private reanchorProbe(pose: RigidTransform, n: number, obsTracks: Track[], inliers: Uint8Array, k: CameraIntrinsics, frameId: number): ReanchorStats | null {
+    const verifier = this.relinkVerifier;
+    if (!verifier) return null;
+    let inlierTotal = 0;
+    for (let i = 0; i < n; i++) if (inliers[i]) inlierTotal++;
+    if (inlierTotal === 0) return null;
+    const max = Math.max(1, this.reanchorProbeMaxTracks);
+    const stride = Math.max(1, Math.ceil(inlierTotal / max));
+    const idx: number[] = [];
+    for (let i = 0, seen = 0; i < n; i++) {
+      if (!inliers[i]) continue;
+      if (seen % stride === 0 && idx.length < max) idx.push(i);
+      seen++;
+    }
+    const radiusPx = this.purgeFarPx > 0 ? this.purgeFarPx : 10;
+    const verdicts = verifier.verify(
+      idx.map((i) => ({ landmarkId: obsTracks[i].landmarkId, x: obsTracks[i].x, y: obsTracks[i].y })),
+      pose,
+      radiusPx,
+      "oldest",
+    );
+    const r = pose.rotation, t = pose.translation;
+    const f = (k.fx + k.fy) / 2;
+    const out: ReanchorStats = {
+      frameId,
+      sampled: idx.length,
+      landed: 0,
+      lkFailed: 0,
+      tooFar: 0,
+      noKeyframe: 0,
+      trackRmsPx: 0,
+      landedRmsPx: 0,
+      meanSnapPx: 0,
+      medianSnapPx: 0,
+      improved: 0,
+      keyframeAgeMedianFrames: 0,
+      trackPnpErrorPx: 0,
+      trackPnpInliers: 0,
+      landedPnpErrorPx: 0,
+      landedPnpInliers: 0,
+      landedPoseDeltaTranslation: 0,
+      landedPoseDeltaDeg: 0,
+    };
+    const snaps: number[] = [];
+    const ages: number[] = [];
+    const sub3: number[] = [];
+    const subTrackX: number[] = [], subTrackY: number[] = [];
+    const subLandX: number[] = [], subLandY: number[] = [];
+    let trackSq = 0, landSq = 0;
+    for (let j = 0; j < idx.length; j++) {
+      const v = verdicts[j];
+      if (v.status === "unverified") {
+        out.noKeyframe++;
+        continue;
+      }
+      if (v.status === "rejected") {
+        if (v.reason === "too_far") out.tooFar++;
+        else out.lkFailed++;
+        continue;
+      }
+      const i = idx[j];
+      const X = this.pts3[i * 3], Y = this.pts3[i * 3 + 1], Z = this.pts3[i * 3 + 2];
+      const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
+      if (z <= 1e-6) continue;
+      const px = ((r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z) * k.fx + k.cx;
+      const py = ((r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z) * k.fy + k.cy;
+      const tr = obsTracks[i];
+      const eTrack = Math.hypot(tr.x - px, tr.y - py);
+      const eLand = Math.hypot(v.x - px, v.y - py);
+      trackSq += eTrack * eTrack;
+      landSq += eLand * eLand;
+      if (eLand < eTrack) out.improved++;
+      snaps.push(Math.hypot(v.x - tr.x, v.y - tr.y));
+      if (v.keyframeFrameId !== undefined) ages.push(frameId - v.keyframeFrameId);
+      sub3.push(X, Y, Z);
+      subTrackX.push(this.obsX[i]);
+      subTrackY.push(this.obsY[i]);
+      subLandX.push((v.x - k.cx) / k.fx);
+      subLandY.push((v.y - k.cy) / k.fy);
+      out.landed++;
+    }
+    if (out.landed === 0) return out;
+    out.trackRmsPx = Math.sqrt(trackSq / out.landed);
+    out.landedRmsPx = Math.sqrt(landSq / out.landed);
+    out.meanSnapPx = snaps.reduce((a, b) => a + b, 0) / snaps.length;
+    const sorted = snaps.slice().sort((a, b) => a - b);
+    out.medianSnapPx = sorted[sorted.length >> 1];
+    if (ages.length) {
+      ages.sort((a, b) => a - b);
+      out.keyframeAgeMedianFrames = ages[ages.length >> 1];
+    }
+    // PnP on the sample with either set of observations: does re-anchoring
+    // the observations lower the error the pose can reach?
+    if (out.landed >= 6) {
+      const cfg = this.config;
+      const opts = { huber: cfg.pnpHuberPx / f, inlierThreshold: cfg.pnpInlierPx / f, maxIterations: cfg.pnpMaxIterations, epsilon: 1e-6 };
+      const pts = Float64Array.from(sub3);
+      const a = refinePosePnP(pose, pts, subTrackX, subTrackY, out.landed, opts);
+      const b = refinePosePnP(pose, pts, subLandX, subLandY, out.landed, opts);
+      out.trackPnpErrorPx = a.meanError * f;
+      out.trackPnpInliers = a.inlierCount;
+      out.landedPnpErrorPx = b.meanError * f;
+      out.landedPnpInliers = b.inlierCount;
+      const d = poseDelta(b.pose, a.pose);
+      out.landedPoseDeltaTranslation = d.translation;
+      out.landedPoseDeltaDeg = d.rotationDeg;
+    }
+    return out;
   }
 
   /**

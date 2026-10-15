@@ -37,6 +37,7 @@ function mapPoseOf(p: RigidTransform, mapFrameId = 0): MapPoseOutput {
     jumpRejected: false,
     reassociated: 0,
     relink: emptyRelinkStats(),
+    reanchor: null,
     mapInlierCount: 100,
     planeInlierCount: 0,
     rejectReason: null,

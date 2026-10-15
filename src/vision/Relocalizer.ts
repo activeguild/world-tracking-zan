@@ -6,7 +6,7 @@ import { FeatureTracker, TrackStatus } from "./FeatureTracker";
 import type { ImagePyramid } from "./ImagePyramid";
 import { clonePyramid, type CoarseImage, downsampleToCoarse, type Keyframe, type KeyframeObservation } from "./Keyframe";
 import type { LandmarkMap } from "./LandmarkMap";
-import type { RelinkCandidate, RelinkVerdict } from "./MapTracker";
+import type { RelinkCandidate, RelinkKeyframeChoice, RelinkVerdict } from "./MapTracker";
 import { poseDelta } from "./PoseValidation";
 import { emptyLkStatusCounts, type LkFailureReason, lkFailureReason, type LkStatusCounts, type RelocalizationSearchStage } from "./RelocalizationSchedule";
 import type { Track } from "./types";
@@ -793,9 +793,17 @@ export class Relocalizer {
    * keyframe-consistent position; `rejected` when LK fails or lands farther
    * away (a neighbouring corner, a changed scene); `unverified` when no
    * stored keyframe observes the landmark. Candidates are grouped by
-   * keyframe so each keyframe pyramid is tracked once.
+   * keyframe so each keyframe pyramid is tracked once. `choice` picks the
+   * keyframe when several observe a landmark: nearest in rotation (the
+   * relink check) or the oldest (the v24 re-anchor probe).
    */
-  verifyRelinks(candidates: RelinkCandidate[], current: ImagePyramid, pose: RigidTransform, radiusPx: number): RelinkVerdict[] {
+  verifyRelinks(
+    candidates: RelinkCandidate[],
+    current: ImagePyramid,
+    pose: RigidTransform,
+    radiusPx: number,
+    choice: RelinkKeyframeChoice = "nearest",
+  ): RelinkVerdict[] {
     const verdicts: RelinkVerdict[] = candidates.map((c) => ({ status: "unverified", x: c.x, y: c.y }));
     if (this.keyframes.length === 0 || candidates.length === 0) return verdicts;
     const groups = new Map<Keyframe, { index: number; kx: number; ky: number }[]>();
@@ -804,12 +812,16 @@ export class Relocalizer {
       if (!obs || obs.length === 0) continue;
       let best = obs[0];
       if (obs.length > 1) {
-        let bestD = Infinity;
-        for (const o of obs) {
-          const d = rotationDistance(o.kf.pose.rotation, pose.rotation);
-          if (d < bestD) {
-            bestD = d;
-            best = o;
+        if (choice === "oldest") {
+          for (const o of obs) if (o.kf.frameId < best.kf.frameId) best = o;
+        } else {
+          let bestD = Infinity;
+          for (const o of obs) {
+            const d = rotationDistance(o.kf.pose.rotation, pose.rotation);
+            if (d < bestD) {
+              bestD = d;
+              best = o;
+            }
           }
         }
       }
@@ -834,6 +846,7 @@ export class Relocalizer {
       const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, radiusPx * 4);
       for (let j = 0; j < n; j++) {
         const v = verdicts[list[j].index];
+        v.keyframeFrameId = kf.frameId;
         const st = res.status[j];
         if (st === TrackStatus.OK || st === TrackStatus.TOO_FAR) {
           const lx = res.positions[j * 2], ly = res.positions[j * 2 + 1];

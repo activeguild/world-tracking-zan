@@ -155,6 +155,8 @@ export interface MapPoseOutput {
   reassociated: number;
   /** What the keyframe check made of this frame's re-association candidates (v20). */
   relink: RelinkStats;
+  /** Last re-anchor probe on this map (v24 diagnostics; null until one ran). */
+  reanchor: ReanchorStats | null;
   /** Inliers of the landmark-PnP candidate / the plane candidate this frame (0 when absent). */
   mapInlierCount: number;
   planeInlierCount: number;
@@ -448,6 +450,53 @@ export interface RelinkStats {
 
 export function emptyRelinkStats(): RelinkStats {
   return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0, rejectedTooFar: 0, rejectedLk: 0, meanFarPx: 0, purged: 0, purgedTotal: 0 };
+}
+
+/**
+ * v24 re-anchor probe (diagnostics only, Android recording 35): is the 2–3 px
+ * PnP residual on the live tracks or between the map and the corners
+ * themselves? A sample of this frame's PnP inliers is re-observed by LK from
+ * the *oldest* stored keyframe observation of their landmark into the current
+ * frame (the same forward-backward checked tracker as the relink check,
+ * started at the live track). The residual of the live track and the
+ * residual of where the keyframe patch landed are compared against the same
+ * projections, and PnP is re-solved on the sample with either set of
+ * observations. Nothing is written back to the tracks or the map.
+ *
+ *   landed ≪ track (ratio well under 1, snap of 1–3 px): the live tracks
+ *     have slid off the corners the map was built from (LK lock / drift) —
+ *     periodic re-anchoring of tracks to keyframe patches is the fix;
+ *   landed ≈ track: the tracks sit where the keyframe patches do, so the
+ *     residual is between the map / pose and the corner as it looks from
+ *     this view (view-dependent corner appearance, or map error).
+ */
+export interface ReanchorStats {
+  /** Frame the probe ran in (the stats are held until the next probe). */
+  frameId: number;
+  /** Inliers sampled, and how the keyframe patch LK ended for them. */
+  sampled: number;
+  landed: number;
+  lkFailed: number;
+  tooFar: number;
+  noKeyframe: number;
+  /** RMS residual (px) of the live tracks and of the landed positions over the landed sample, against this frame's projections. */
+  trackRmsPx: number;
+  landedRmsPx: number;
+  /** Mean / median distance (px) between the live track and where its keyframe patch landed. */
+  meanSnapPx: number;
+  medianSnapPx: number;
+  /** Landed samples whose residual is smaller than the live track's. */
+  improved: number;
+  /** Median age (frames) of the keyframe observations used. */
+  keyframeAgeMedianFrames: number;
+  /** PnP re-solved on the landed sample with the live-track observations vs the landed observations (mean inlier error px, inliers). */
+  trackPnpErrorPx: number;
+  trackPnpInliers: number;
+  landedPnpErrorPx: number;
+  landedPnpInliers: number;
+  /** How far the landed-observation PnP pose is from the track-observation one (map units / deg). */
+  landedPoseDeltaTranslation: number;
+  landedPoseDeltaDeg: number;
 }
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */

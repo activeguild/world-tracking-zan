@@ -290,6 +290,27 @@ export interface HudStats {
     relinked: number;
     /** Keyframe check of this frame's re-association candidates (v20). */
     relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number; rejectedTooFar: number; rejectedLk: number; meanFarPx: number; purged: number; purgedTotal: number };
+    /** Last re-anchor probe (v24 diagnostics). */
+    reanchor?: {
+      frameId: number;
+      sampled: number;
+      landed: number;
+      lkFailed: number;
+      tooFar: number;
+      noKeyframe: number;
+      trackRmsPx: number;
+      landedRmsPx: number;
+      meanSnapPx: number;
+      medianSnapPx: number;
+      improved: number;
+      keyframeAgeMedianFrames: number;
+      trackPnpErrorPx: number;
+      trackPnpInliers: number;
+      landedPnpErrorPx: number;
+      landedPnpInliers: number;
+      landedPoseDeltaTranslation: number;
+      landedPoseDeltaDeg: number;
+    } | null;
     /** Pose re-seeded by a relocalization (this frame or its monitoring window). */
     relocalized: boolean;
     /** Map PnP recovery status (v6 §10). */
@@ -643,6 +664,25 @@ export class DebugOverlay {
               ),
             );
           }
+        }
+        // v24: the re-anchor probe. `trk` = RMS residual of the live tracks,
+        // `kf` = of where the oldest keyframe patch landed, over the same
+        // sample and projections; `PnP` = the error PnP reaches on the sample
+        // with either set. Orange when re-anchoring halves the residual: the
+        // live tracks slid off the corners the map was built from.
+        const ra = m.reanchor;
+        if (ra && ra.sampled > 0) {
+          const ratio = ra.landed && ra.trackRmsPx > 0 ? ra.landedRmsPx / ra.trackRmsPx : 0;
+          const fails = `${ra.lkFailed ? ` lk ${ra.lkFailed}` : ""}${ra.tooFar ? ` far ${ra.tooFar}` : ""}${ra.noKeyframe ? ` nokf ${ra.noKeyframe}` : ""}`;
+          rows.push(
+            row(
+              "Reanc",
+              ra.landed
+                ? `trk ${ra.trackRmsPx.toFixed(2)} → kf ${ra.landedRmsPx.toFixed(2)}px ×${ratio.toFixed(2)} (n ${ra.landed}/${ra.sampled}${fails})  snap ${ra.meanSnapPx.toFixed(1)}px med ${ra.medianSnapPx.toFixed(1)}  better ${ra.improved}/${ra.landed}  kf age ${ra.keyframeAgeMedianFrames}f${ra.landedPnpInliers ? `  PnP ${ra.trackPnpErrorPx.toFixed(2)} → ${ra.landedPnpErrorPx.toFixed(2)}px (${ra.trackPnpInliers}/${ra.landedPnpInliers}i, Δ ${ra.landedPoseDeltaDeg.toFixed(2)}°)` : ""}`
+                : `no landing (n 0/${ra.sampled}${fails})`,
+              ra.landed >= 6 && ratio > 0 && ratio <= 0.5 ? "hud-warn" : undefined,
+            ),
+          );
         }
       }
       // Phase 7: what the last bundle adjustment did to the map. The error is

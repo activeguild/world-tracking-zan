@@ -319,6 +319,19 @@ export interface LandmarkConfig {
    * triangulated again from the current poses. `?purge=0` for A/B.
    */
   purgeInconsistent: boolean;
+  /**
+   * v24 re-anchor probe (diagnostics only, Android recording 35: the PnP
+   * residual is isotropic and not a depth error, so it is either on the live
+   * tracks or between the map and the corners as seen now). Every
+   * `reanchorProbeEveryFrames` frames (0 = off) up to `reanchorProbeMaxTracks`
+   * PnP inliers are re-observed by LK from the oldest keyframe observation of
+   * their landmark, and the residual of the live track is compared with the
+   * residual of where the keyframe patch landed (`ReanchorStats`, HUD
+   * `Reanc`). Nothing is written back. Needs `relinkVerify`.
+   * `?reanchor=0` in the demo turns it off.
+   */
+  reanchorProbeEveryFrames: number;
+  reanchorProbeMaxTracks: number;
   /** Also re-associate with the propagated pose while lost for at most this many frames. */
   reassociateMaxLostFrames: number;
   /**
@@ -917,6 +930,9 @@ export const DEFAULT_CONFIG: ARConfig = {
     reassociateRadiusPx: 2.5,
     relinkVerify: true,
     purgeInconsistent: true,
+    // Diagnostics cadence: 40 LK points every 5 frames, well under 1 ms.
+    reanchorProbeEveryFrames: 5,
+    reanchorProbeMaxTracks: 40,
     reassociateMaxLostFrames: 90,
     minRecoveryInliers: 24,
     recoverySeedInliers: 4,

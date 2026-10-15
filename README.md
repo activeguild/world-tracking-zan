@@ -97,7 +97,25 @@ model error, not noise) and `ResG adj (…) none (…) Δ | plane (…) other (�
 (two parts of the map pulling the pose apart). On a planar scene a focal or
 lens error is absorbed by the map while sliding and shows in the field only
 while tilting (synthetic 10 % focal error: `sys` 28 % max, 0.5 px at the edge,
-floor / wall gap 0.8 px).
+floor / wall gap 0.8 px). The random part is further split along / across
+each landmark's parallax direction (v23, `ResP ∥ … ⊥ … ×…`): depth errors
+line the residuals up with that direction (×5 in synthetic tests), isotropic
+noise reads ×1. On device it read ×1.0–1.4 with the across component as
+large as the along one — not a depth error.
+
+The re-anchor probe (v24, diagnostics only, `Reanc` row) then asks whether
+the residual sits on the live tracks: every 5 frames up to 40 PnP inliers
+are re-observed by LK from the *oldest* keyframe observation of their
+landmark (the same forward-backward checked tracker as the relink check,
+started at the live track), and the residual of the live track is compared
+with the residual of where the keyframe patch landed, against the same
+projections; PnP is also re-solved on the sample with either set
+(`Reanc trk 2.3 → kf 1.0px ×0.43 (n 34/40) snap 1.8px … PnP 2.2 → 1.1px`).
+A landed residual well below the track residual with a 1–3 px snap means the
+tracks slid off the corners the map was built from (periodic re-anchoring is
+the fix); equal residuals mean the tracks are where the keyframe patches are
+and the error is between the map and the corner as it looks from this view.
+Nothing is written back. `?reanchor=0` turns it off.
 
 ## Phase 5 — keyframes and relocalization
 
