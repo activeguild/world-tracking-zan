@@ -830,6 +830,22 @@ export class ARSession {
         );
       }
     }
+    // v25: an accepted multi-view init stage re-constrained the init map;
+    // the world anchor follows its correction the same way (once, this frame).
+    const st = r.initRefinement?.lastStage;
+    if (st && st.applied && st.frameId === r.frameId) {
+      let anchorMoved = false;
+      if (this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
+        if (anchorMoved) this.worldChangeReason = "init_stage";
+      }
+      if (this.config.debug.log) {
+        const t = st.correctionTranslation;
+        this.logger.info(
+          `INIT STAGE ${st.stage} at frame ${st.frameId}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / dir ${st.directionDeg.toFixed(2)}°, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
+    }
     this.worldEstablished = r.worldEstablished;
     // v16 guidance: how long the plane search has been stuck at one stage
     // (e.g. `extent` for 7 s on device while the user held the phone still).

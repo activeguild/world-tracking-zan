@@ -62,6 +62,9 @@ const bundleAdjustmentParam = params.get("ba");
 const relinkVerify = params.get("relinkverify") !== "0";
 // 指示書「空間固定性」§7: two-view BA refinement of the initialization; `?initba=0` for A/B.
 const initRefineWithBA = params.get("initba") !== "0";
+// v25: multi-view stages of the init refinement; `?initstages=0` keeps the two-view one only.
+const initStagesParam = params.get("initstages");
+const initRefineStages = initStagesParam !== null && Number.isFinite(Number(initStagesParam)) ? Math.max(0, Number(initStagesParam)) : null;
 // v21: removal of landmarks a keyframe contradicts, off with ?purge=0 for A/B.
 const purgeInconsistent = params.get("purge") !== "0";
 // v24: the re-anchor probe (diagnostics), off with ?reanchor=0.
@@ -110,6 +113,7 @@ const session = new ARSession({
       relinkVerify,
       purgeInconsistent,
       initRefineWithBA,
+      ...(initRefineStages !== null ? { initRefineStages } : {}),
       ...(reanchorProbe ? {} : { reanchorProbeEveryFrames: 0 }),
     },
     bundleAdjustment: {
@@ -391,7 +395,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {

@@ -13,7 +13,7 @@ import {
   type PoseSource,
   type PoseValidationLimits,
 } from "./PoseValidation";
-import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
+import { triangulateMultiView, triangulatePoint, type MultiViewTriangulation, type TriangulationResult, type TriangulationView } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
 import { RESIDUAL_GROUP_ADJUSTED, RESIDUAL_GROUP_PLANE, fitResidualField } from "./ResidualField";
@@ -21,6 +21,7 @@ import {
   emptyRelinkStats,
   emptyReprojectionBreakdown,
   type InitRefinementOutput,
+  type InitStageOutput,
   type PoseCandidateReport,
   type ReanchorStats,
   type RelinkStats,
@@ -57,6 +58,18 @@ export interface RelinkVerdict {
  * view the landmark was built from, before any later drift of the track).
  */
 export type RelinkKeyframeChoice = "nearest" | "oldest";
+
+/** What a multi-view init stage did, for the engine to finish (v25). */
+export interface InitStageRun {
+  output: InitStageOutput;
+  /** Init landmarks in the solve, their positions before / after (x,y,z interleaved). */
+  ids: number[];
+  before: Float64Array;
+  after: Float64Array;
+  /** Canonical pose before the stage and after (the same object when not applied). */
+  poseBefore: RigidTransform;
+  poseAfter: RigidTransform;
+}
 
 /**
  * Checks re-association candidates against stored keyframe observations
@@ -243,6 +256,9 @@ export class MapTracker {
    * refinement off.
    */
   lastInitRefinement: InitRefinementOutput | null = null;
+  /** Ids of the landmarks triangulated in the initialization (v25 multi-view stages). */
+  private readonly initLandmarkIds = new Set<number>();
+  private initStagesDone = 0;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -354,6 +370,9 @@ export class MapTracker {
     this.velocity.fill(0);
     this.lastDepth = 0;
     this.referenceKeyframeId = -1;
+    this.lastInitRefinement = null;
+    this.initLandmarkIds.clear();
+    this.initStagesDone = 0;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -437,6 +456,12 @@ export class MapTracker {
         rotationDeg: (rotationDistance(pose.rotation, refined.rotation) * 180) / Math.PI,
         directionDeg,
         applied,
+        stages: 0,
+        maxStages: Math.max(0, cfg.initRefineStages),
+        currentParallaxPx: rel.parallaxPx,
+        trackedInitLandmarks: nL,
+        nextStageParallaxPx: cfg.initMinParallaxPx * Math.pow(cfg.initRefineParallaxFactor, 1),
+        lastStage: null,
       };
       if (applied) {
         pose.rotation.set(refined.rotation);
@@ -452,6 +477,8 @@ export class MapTracker {
     this._mapFrameId = refFrameId;
     this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
     this._framesSinceTracked = 0;
+    this.initLandmarkIds.clear();
+    this.initStagesDone = 0;
     const refPose = identity();
     for (const { track, p } of created) {
       const lm = this.map.add(p, track.id, frameId);
@@ -462,6 +489,7 @@ export class MapTracker {
       lm.parallax = this.tri.parallax; // last computed; refined below
       track.landmarkId = lm.id;
       track.linkSource = "native";
+      this.initLandmarkIds.add(lm.id);
     }
     // Record each landmark's own parallax (the loop above reused the scratch).
     for (const { track, p } of created) {
@@ -1103,6 +1131,13 @@ export class MapTracker {
    * number removed; counted in `RelinkStats.purgedTotal`.
    */
   purgeLandmarks(ids: Iterable<number>, tracks: readonly Track[]): number {
+    const removed = this.dropLandmarks(ids, tracks);
+    this.purgedTotal += removed;
+    return removed;
+  }
+
+  /** Remove landmarks and unlink / un-anchor the tracks observing them. */
+  private dropLandmarks(ids: Iterable<number>, tracks: readonly Track[]): number {
     let removed = 0;
     const gone = new Set<number>();
     for (const id of ids) {
@@ -1118,8 +1153,177 @@ export class MapTracker {
       t.anchorFrame = -1;
       t.anchorPose = null;
     }
-    this.purgedTotal += removed;
     return removed;
+  }
+
+  /**
+   * v25: multi-view refinement stage of the initial map. Called by the
+   * engine on tracked frames before the world is established. Measures the
+   * median parallax of the still-tracked init landmarks from the reference
+   * view; when it reaches the next stage's threshold
+   * (`initMinParallaxPx × initRefineParallaxFactor^stage`) the init
+   * landmarks and the current pose are re-solved jointly against the fixed
+   * reference view (reference observation = the landmark's anchor pixel,
+   * current observation = its track). The two-view initialization is
+   * direction-degenerate on a floor with a 30 px baseline; a 60–240 px
+   * baseline from the same reference constrains what it could not. On
+   * acceptance (finite, error lowered) the landmarks are written back and
+   * the canonical pose replaced by the solved one; the engine then re-poses
+   * the keyframes, rebuilds the later landmarks and moves the world anchor
+   * (`InitStageRun` carries what it needs). A stage that is not accepted is
+   * still consumed (the next waits for the next threshold). Returns the run
+   * when a stage ran, null otherwise.
+   */
+  refineInitStage(tracks: readonly Track[], k: CameraIntrinsics, frameId: number): InitStageRun | null {
+    const cfg = this.config;
+    const out = this.lastInitRefinement;
+    if (!out || !this._initialized || this._framesSinceTracked > 0) return null;
+    if (this.initStagesDone >= cfg.initRefineStages) return null;
+    const pairs: { lm: Landmark; t: Track; par: number }[] = [];
+    for (const t of tracks) {
+      if (t.landmarkId < 0 || !this.initLandmarkIds.has(t.landmarkId)) continue;
+      const lm = this.map.get(t.landmarkId);
+      if (!lm) continue;
+      pairs.push({ lm, t, par: Math.hypot(t.x - lm.anchorX, t.y - lm.anchorY) });
+    }
+    const threshold = cfg.initMinParallaxPx * Math.pow(cfg.initRefineParallaxFactor, this.initStagesDone + 1);
+    out.nextStageParallaxPx = threshold;
+    out.trackedInitLandmarks = pairs.length;
+    if (pairs.length === 0) {
+      out.currentParallaxPx = 0;
+      return null;
+    }
+    const sorted = pairs.map((p) => p.par).sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    out.currentParallaxPx = median;
+    if (pairs.length < cfg.initMinLandmarks || median < threshold) return null;
+
+    const f = (k.fx + k.fy) / 2;
+    const nL = pairs.length;
+    const landmarks = new Float64Array(nL * 3);
+    const before = new Float64Array(nL * 3);
+    const observations: BAObservation[] = [];
+    for (let i = 0; i < nL; i++) {
+      const { lm, t } = pairs[i];
+      landmarks.set(lm.position, i * 3);
+      observations.push({ keyframe: 0, landmark: i, x: (lm.anchorX - k.cx) / k.fx, y: (lm.anchorY - k.cy) / k.fy });
+      observations.push({ keyframe: 1, landmark: i, x: (t.x - k.cx) / k.fx, y: (t.y - k.cy) / k.fy });
+    }
+    before.set(landmarks);
+    const refined: RigidTransform = { rotation: Float64Array.from(this._pose.rotation), translation: Float64Array.from(this._pose.translation) };
+    const res = bundleAdjust(
+      { keyframes: [{ pose: identity(), fixed: true }, { pose: refined, fixed: false }], landmarks, landmarkCount: nL, observations },
+      { huber: cfg.pnpHuberPx / f, maxIterations: 20, epsilon: 1e-9, minRelativeGain: 1e-4 },
+    );
+    let finite = Number.isFinite(res.errorAfter);
+    for (let i = 0; finite && i < landmarks.length; i++) if (!Number.isFinite(landmarks[i])) finite = false;
+    for (let i = 0; finite && i < 9; i++) if (!Number.isFinite(refined.rotation[i])) finite = false;
+    for (let i = 0; finite && i < 3; i++) if (!Number.isFinite(refined.translation[i])) finite = false;
+    const c0 = cameraCenterOf(this._pose), c1 = cameraCenterOf(refined);
+    const n0 = Math.hypot(c0[0], c0[1], c0[2]), n1 = Math.hypot(c1[0], c1[1], c1[2]);
+    const directionDeg = n0 > 1e-12 && n1 > 1e-12 ? (Math.acos(Math.max(-1, Math.min(1, (c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2]) / (n0 * n1)))) * 180) / Math.PI : 0;
+    let maxShift = 0;
+    for (let i = 0; i < nL; i++) {
+      const d = Math.hypot(landmarks[i * 3] - before[i * 3], landmarks[i * 3 + 1] - before[i * 3 + 1], landmarks[i * 3 + 2] - before[i * 3 + 2]);
+      if (d > maxShift) maxShift = d;
+    }
+    const applied = finite && res.errorAfter < res.errorBefore;
+    const rotationDeg = (rotationDistance(this._pose.rotation, refined.rotation) * 180) / Math.PI;
+    const poseBefore = this._pose;
+    if (applied) {
+      for (let i = 0; i < nL; i++) {
+        const { lm } = pairs[i];
+        lm.position[0] = landmarks[i * 3];
+        lm.position[1] = landmarks[i * 3 + 1];
+        lm.position[2] = landmarks[i * 3 + 2];
+        // Ray parallax between the reference view (origin) and the current camera.
+        const ax = lm.position[0], ay = lm.position[1], az = lm.position[2];
+        const bx = ax - c1[0], by = ay - c1[1], bz = az - c1[2];
+        const na = Math.hypot(ax, ay, az), nb = Math.hypot(bx, by, bz);
+        if (na > 1e-12 && nb > 1e-12) lm.parallax = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by + az * bz) / (na * nb))));
+      }
+      this._pose = { rotation: Float64Array.from(refined.rotation), translation: Float64Array.from(refined.translation) };
+    }
+    this.initStagesDone++;
+    const stage: InitStageOutput = {
+      stage: this.initStagesDone,
+      frameId,
+      parallaxPx: median,
+      landmarks: nL,
+      errorBeforePx: res.errorBefore * f,
+      errorAfterPx: res.errorAfter * f,
+      iterations: res.iterations,
+      converged: res.converged,
+      rotationDeg,
+      directionDeg,
+      maxLandmarkShift: maxShift,
+      applied,
+      rebuilt: 0,
+      removed: 0,
+      keyframesReposed: 0,
+      correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+      correctionTranslation: new Float64Array(3),
+      anchorFitLandmarks: 0,
+    };
+    out.stages = this.initStagesDone;
+    out.lastStage = stage;
+    out.nextStageParallaxPx = cfg.initMinParallaxPx * Math.pow(cfg.initRefineParallaxFactor, this.initStagesDone + 1);
+    return { output: stage, ids: pairs.map((p) => p.lm.id), before, after: landmarks, poseBefore, poseAfter: this._pose };
+  }
+
+  /** Landmarks triangulated in the initialization (v25). */
+  isInitLandmark(id: number): boolean {
+    return this.initLandmarkIds.has(id);
+  }
+
+  /**
+   * v25: after an accepted stage, rebuild every landmark the stage did not
+   * solve in the refined map: the landmarks triangulated after the
+   * initialization (built between poses of the old map) and the init
+   * landmarks whose track had died (not in the solve, still at their old
+   * depth). Each is re-triangulated linearly from all of its views
+   * (`views(lm)`: the reference view for init landmarks, the re-posed
+   * keyframe observations, the current track); one that has fewer than two
+   * views, lies behind a camera, reprojects beyond `maxTriangulationErrorPx`
+   * in any view or has too narrow a widest ray angle is removed (its corner
+   * re-anchors at the refined pose and is triangulated again later).
+   * Returns the counts.
+   */
+  rebuildUnsolvedLandmarks(
+    tracks: readonly Track[],
+    k: CameraIntrinsics,
+    solved: ReadonlySet<number>,
+    views: (lm: Landmark) => { pose: RigidTransform; x: number; y: number }[],
+  ): { rebuilt: number; removed: number } {
+    const cfg = this.config;
+    const f = (k.fx + k.fy) / 2;
+    const maxErr = cfg.maxTriangulationErrorPx / f;
+    const minAngle = (cfg.minTriangulationAngleDeg * Math.PI) / 180;
+    const drop: number[] = [];
+    let rebuilt = 0;
+    const mv: MultiViewTriangulation = { point: new Float64Array(3), minDepth: 0, maxError: Number.POSITIVE_INFINITY, parallax: 0 };
+    const norm: TriangulationView[] = [];
+    for (const lm of this.map.values()) {
+      if (solved.has(lm.id)) continue;
+      const v = views(lm);
+      norm.length = 0;
+      for (const o of v) norm.push({ pose: o.pose, x: (o.x - k.cx) / k.fx, y: (o.y - k.cy) / k.fy });
+      const res = triangulateMultiView(norm, mv);
+      if (!res || !(res.minDepth > 0) || !(res.maxError <= maxErr) || res.parallax < minAngle) {
+        drop.push(lm.id);
+        continue;
+      }
+      lm.position.set(res.point);
+      const a = v[0];
+      lm.anchorPose = { rotation: Float64Array.from(a.pose.rotation), translation: Float64Array.from(a.pose.translation) };
+      lm.anchorX = a.x;
+      lm.anchorY = a.y;
+      lm.parallax = res.parallax;
+      rebuilt++;
+    }
+    const removed = this.dropLandmarks(drop, tracks);
+    this.resetAnchors(tracks);
+    return { rebuilt, removed };
   }
 
   /**

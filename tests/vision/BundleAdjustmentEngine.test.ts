@@ -116,7 +116,12 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     );
     expect(corrupted).toBeGreaterThan(baseline + 1.0);
     expect(ba.errorAfterPx).toBeLessThan(ba.errorBeforePx / 2);
-    expect(repaired).toBeLessThan(baseline + 0.4);
+    // v25: the multi-view init stages lowered the clean baseline from 0.51 to
+    // 0.16 px; the repair (one BA on the keyframe observations, ~70
+    // landmarks purged) lands at ~0.6 px either way, so the margin is
+    // absolute rather than relative to the (now small) baseline.
+    expect(repaired).toBeLessThan(baseline + 0.6);
+    expect(repaired).toBeLessThan(0.8);
     expect(repaired).toBeLessThan(corrupted / 2);
     // Tracking continued through the corruption and the repair (no reset).
     expect(new Set(outs.filter((o) => o.mapPose).map((o) => o.mapPose!.mapFrameId)).size).toBe(1);

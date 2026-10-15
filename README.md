@@ -136,6 +136,20 @@ conserved within 0.3 %, placed points within 1 px through the whole scenario.
 `?initba=0` turns it off for A/B. The BA also rejects any run that produces a
 non-finite value (`invalid`) instead of silently doing nothing.
 
+On device the two-view problem is degenerate in the translation direction
+(floor-dominant view, 30 px baseline: the refinement moved the direction 3.5°
+without changing the residual), and the fresh map jumped from 0.5 to ~2 px as
+soon as a third viewpoint arrived. v25 adds multi-view stages: when the median
+parallax of the tracked init landmarks from the reference view reaches 60 /
+120 / 240 px, the init landmarks and the current pose are re-solved against
+the fixed reference view; the stored keyframes are re-posed, the landmarks
+built in the meantime are re-triangulated from all their views, and the world
+anchor follows the stage's correction (`init_stage`). `?initstages=0` keeps
+the two-view refinement only. On the synthetic scene a laterally graded ±3 %
+depth distortion injected after the initialization is removed by the stages
+(direction error 0.58° → 0.13°), and the clean map's PnP error drops from
+0.51 to 0.16 px.
+
 ## Phase 5 — keyframes and relocalization
 
 ```

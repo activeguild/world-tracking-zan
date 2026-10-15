@@ -87,7 +87,9 @@ describe("purge of inconsistent landmarks (v21)", () => {
         const o = engine.process(input(f));
         outs.push(o);
         if (!o.mapPose || o.mapPose.framesSinceTracked !== 0) lost++;
-        if (f === 100) reanchored = engine.tracksForTests().filter((t) => trackIds.includes(t.id) && ((t.landmarkId < 0 && t.anchorFrame === f) || (t.landmarkId >= 0 && !corrupted.includes(t.landmarkId)))).length;
+        // Within the next frames (a v25 init stage in one of them resets the
+        // anchors of unlinked tracks again, so the first frame alone may read 0).
+        if (f >= 100 && f < 103) reanchored = Math.max(reanchored, engine.tracksForTests().filter((t) => trackIds.includes(t.id) && ((t.landmarkId < 0 && t.anchorFrame === f) || (t.landmarkId >= 0 && !corrupted.includes(t.landmarkId)))).length);
       }
       const after = meanErr(outs, 110, 140);
       return { clean, ba, remaining, linkedAfter, sizeBefore, sizeAfter, reanchored, lost, baseline, after, mapIds: new Set(outs.filter((o) => o.mapPose).map((o) => o.mapPose!.mapFrameId)).size };

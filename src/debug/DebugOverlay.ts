@@ -391,7 +391,39 @@ export interface HudStats {
     baRejectReason: string;
   } | null;
   /** 指示書「空間固定性」§7: two-view refinement of the map initialization. */
-  initRefine?: { errorBeforePx: number; errorAfterPx: number; iterations: number; converged: boolean; rotationDeg: number; directionDeg: number; applied: boolean } | null;
+  initRefine?: {
+    errorBeforePx: number;
+    errorAfterPx: number;
+    iterations: number;
+    converged: boolean;
+    rotationDeg: number;
+    directionDeg: number;
+    applied: boolean;
+    /** v25 multi-view stages. */
+    stages?: number;
+    maxStages?: number;
+    currentParallaxPx?: number;
+    trackedInitLandmarks?: number;
+    nextStageParallaxPx?: number;
+    lastStage?: {
+      stage: number;
+      parallaxPx: number;
+      landmarks: number;
+      errorBeforePx: number;
+      errorAfterPx: number;
+      iterations: number;
+      converged: boolean;
+      rotationDeg: number;
+      directionDeg: number;
+      maxLandmarkShift: number;
+      applied: boolean;
+      rebuilt: number;
+      removed: number;
+      keyframesReposed: number;
+      correctionTranslation: Float64Array;
+      anchorFitLandmarks: number;
+    } | null;
+  } | null;
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
   /** Camera world position (m) once the world exists. */
@@ -544,6 +576,21 @@ export class DebugOverlay {
           ir.applied ? undefined : "hud-warn",
         ),
       );
+      // v25: multi-view stages of the initial map (reference view fixed,
+      // current pose free) as the parallax from the reference grows.
+      if (ir.maxStages !== undefined && ir.maxStages > 0) {
+        const st = ir.lastStage;
+        const progress = `${ir.stages ?? 0}/${ir.maxStages}  par ${(ir.currentParallaxPx ?? 0).toFixed(0)}/${(ir.nextStageParallaxPx ?? 0).toFixed(0)}px (n ${ir.trackedInitLandmarks ?? 0})`;
+        rows.push(
+          row(
+            "InitMV",
+            st
+              ? `${progress}  last @${st.parallaxPx.toFixed(0)}px ${st.landmarks}lm ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)}px it ${st.iterations}${st.converged ? "" : "!"} moved ${st.rotationDeg.toFixed(2)}° / dir ${st.directionDeg.toFixed(2)}° Δlm ${st.maxLandmarkShift.toFixed(3)}u ${st.applied ? `applied rebuilt ${st.rebuilt} −${st.removed}lm kf ${st.keyframesReposed} corr ${Math.hypot(st.correctionTranslation[0], st.correctionTranslation[1], st.correctionTranslation[2]).toFixed(3)}u${st.anchorFitLandmarks ? ` (n${st.anchorFitLandmarks})` : " (pose)"}` : "NOT applied"}`
+              : progress,
+            st && !st.applied ? "hud-warn" : undefined,
+          ),
+        );
+      }
     }
     // v18: the processing size / grabber / flags were only in the TIMING
     // section, below the fold of the iPhone recording — repeat them here.

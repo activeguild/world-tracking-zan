@@ -515,6 +515,63 @@ export interface InitRefinementOutput {
   rotationDeg: number;
   directionDeg: number;
   applied: boolean;
+  /**
+   * Multi-view stages (v25): how many ran so far, how many are configured,
+   * the median parallax (px, from the reference view) of the tracked init
+   * landmarks at the last check, how many of them are still tracked, the
+   * parallax the next stage waits for, and what the last stage did.
+   */
+  stages: number;
+  maxStages: number;
+  currentParallaxPx: number;
+  trackedInitLandmarks: number;
+  nextStageParallaxPx: number;
+  lastStage: InitStageOutput | null;
+}
+
+/**
+ * One multi-view refinement stage of the initial map (v25, Android
+ * recordings 39/40): the two-view initialization is degenerate in the
+ * translation direction on a floor-dominant view with a short baseline (the
+ * refinement moved the direction 3.5° without changing the residual), so
+ * the depth structure of the first map is re-constrained once the camera
+ * has moved on — reference view fixed, current pose free, the init
+ * landmarks and their reference / current observations.
+ */
+export interface InitStageOutput {
+  /** 1-based stage index. */
+  stage: number;
+  frameId: number;
+  /** Median parallax (px) of the init landmarks from the reference view when the stage ran. */
+  parallaxPx: number;
+  /** Init landmarks in the solve. */
+  landmarks: number;
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  /** How far the stage moved the current pose (rotation / camera-centre direction from the origin, deg). */
+  rotationDeg: number;
+  directionDeg: number;
+  /** Largest landmark move (map units). */
+  maxLandmarkShift: number;
+  applied: boolean;
+  /** Landmarks not in the solve (triangulated after the initialization, or init landmarks without a track): re-triangulated from re-posed views / dropped (fewer than two views or failed gates). */
+  rebuilt: number;
+  removed: number;
+  /** Stored keyframes whose pose was re-solved against the refined map. */
+  keyframesReposed: number;
+  /**
+   * Rigid transform old map → new map near the placed objects (rotation
+   * from the current pose's correction, translation from the init landmarks
+   * around the anchor points when enough, else the pose correction), which
+   * the session applies to the world anchor like a BA correction. Identity
+   * when not applied or no world. `anchorFitLandmarks` = landmarks the
+   * local translation fit used (0 = pose correction).
+   */
+  correctionRotation: Float64Array;
+  correctionTranslation: Float64Array;
+  anchorFitLandmarks: number;
 }
 
 /**

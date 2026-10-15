@@ -13,13 +13,14 @@ import type { BundleAdjustmentOutput, BundleAdjustmentRejectReason, MapPoseOutpu
  * per frame); the HUD formats them only when it is shown and the log line
  * is written only when the world transform changed and logging is on.
  *
- * The world transform may change for exactly three reasons: it is created
+ * The world transform may change for exactly four reasons: it is created
  * on the first found plane, it follows an accepted bundle-adjustment
- * correction (the map moved under the camera, v18 / Phase 2), or it is
- * dropped with the map. Any other change is a bug; the anchor-invariance
- * test asserts `worldTransformChanged ⇒ reason ≠ "none"`.
+ * correction (the map moved under the camera, v18 / Phase 2), it follows an
+ * accepted multi-view init stage (v25, the init map re-constrained from a
+ * wider baseline), or it is dropped with the map. Any other change is a
+ * bug; the anchor-invariance test asserts `worldTransformChanged ⇒ reason ≠ "none"`.
  */
-export type WorldTransformChangeReason = "none" | "created" | "ba_correction" | "map_reset";
+export type WorldTransformChangeReason = "none" | "created" | "ba_correction" | "init_stage" | "map_reset";
 
 export interface WorldTrackingDiagnostics {
   frameId: number;
