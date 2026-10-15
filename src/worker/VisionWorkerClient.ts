@@ -11,6 +11,7 @@ import type {
   PlaneSearchOutput,
   PoseOutput,
   BundleAdjustmentOutput,
+  InitRefinementOutput,
   MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
@@ -32,6 +33,7 @@ export interface VisionResult {
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
   bundleAdjustment: BundleAdjustmentOutput;
+  initRefinement: InitRefinementOutput | null;
   worldEstablished: boolean;
   planeRecovery: PlaneRecoveryDiagnostics;
   landmarks: Float32Array;
@@ -119,6 +121,7 @@ export class VisionWorkerClient implements VisionBackend {
               relocalization: msg.relocalization,
               motion: msg.motion,
               bundleAdjustment: msg.bundleAdjustment,
+              initRefinement: msg.initRefinement,
               worldEstablished: msg.worldEstablished,
               planeRecovery: msg.planeRecovery,
               landmarks: new Float32Array(msg.landmarks),
@@ -223,6 +226,7 @@ export class MainThreadVisionBackend implements VisionBackend {
         relocalization: out.relocalization,
         motion: out.motion,
         bundleAdjustment: out.bundleAdjustment,
+        initRefinement: out.initRefinement,
         worldEstablished: out.worldEstablished,
         planeRecovery: out.planeRecovery,
         landmarks: out.landmarks,

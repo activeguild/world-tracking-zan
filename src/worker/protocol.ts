@@ -11,6 +11,7 @@ import type {
   PlaneSearchOutput,
   PoseOutput,
   BundleAdjustmentOutput,
+  InitRefinementOutput,
   MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
@@ -89,6 +90,7 @@ export interface ResultResponse {
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
   bundleAdjustment: BundleAdjustmentOutput;
+  initRefinement: InitRefinementOutput | null;
   worldEstablished: boolean;
   planeRecovery: PlaneRecoveryDiagnostics;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */

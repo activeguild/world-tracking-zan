@@ -501,6 +501,23 @@ export interface ReanchorStats {
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
 /**
+ * What the two-view bundle adjustment of the last map initialization did
+ * (指示書「空間固定性」§7): mean reprojection error of the init
+ * correspondences before / after (px), how far it moved the init pose from
+ * the essential-matrix estimate (rotation / translation direction, deg), and
+ * whether the refined result replaced it.
+ */
+export interface InitRefinementOutput {
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  rotationDeg: number;
+  directionDeg: number;
+  applied: boolean;
+}
+
+/**
  * `invalid` (指示書 §5.2): the solve produced a non-finite landmark, pose or
  * error (a NaN / Infinity reached the problem); nothing is written back.
  */
@@ -884,6 +901,8 @@ export interface VisionOutput {
   motion: MotionDiagnostics;
   /** Last local bundle adjustment (Phase 7); `runs` 0 before the first. */
   bundleAdjustment: BundleAdjustmentOutput;
+  /** Two-view refinement of the current map's initialization (指示書「空間固定性」§7); null before a map exists or with it off. */
+  initRefinement: InitRefinementOutput | null;
   /**
    * World tracking established for the current map (v10 §5–§7): a plane was
    * found and the world anchored to it. Only then does a lost map lead to

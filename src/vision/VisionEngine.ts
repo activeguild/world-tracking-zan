@@ -864,6 +864,7 @@ export class VisionEngine {
       relocalization: this.relocStatus,
       motion: this.lastMotion,
       bundleAdjustment: this.lastBundleAdjustment,
+      initRefinement: this.mapTracker.initialized ? this.mapTracker.lastInitRefinement : null,
       worldEstablished: this.worldEstablished,
       planeRecovery: this.lastPlaneRecovery,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),

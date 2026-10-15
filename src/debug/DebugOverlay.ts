@@ -390,6 +390,8 @@ export interface HudStats {
     baAccepted: boolean;
     baRejectReason: string;
   } | null;
+  /** 指示書「空間固定性」§7: two-view refinement of the map initialization. */
+  initRefine?: { errorBeforePx: number; errorAfterPx: number; iterations: number; converged: boolean; rotationDeg: number; directionDeg: number; applied: boolean } | null;
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
   /** Camera world position (m) once the world exists. */
@@ -517,6 +519,32 @@ export class DebugOverlay {
       rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
     }
     if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
+    // 指示書「空間固定性」§8: did the world transform change this frame, and
+    // why. Any change outside created / ba_correction / map_reset is a bug
+    // (orange). Up here because the WORLD section is below the fold once the
+    // TRACK section is long (Android recording 38).
+    if (s.worldDiag && s.world?.ready) {
+      const d = s.worldDiag;
+      const unexplained = d.worldTransformChanged && d.worldTransformChangeReason === "none";
+      rows.push(
+        row(
+          "Wdiag",
+          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}`,
+          unexplained ? "hud-warn" : undefined,
+        ),
+      );
+    }
+    // 指示書「空間固定性」§7: what the two-view refinement did to this map's initialization.
+    if (s.initRefine) {
+      const ir = s.initRefine;
+      rows.push(
+        row(
+          "Init",
+          `${ir.errorBeforePx.toFixed(2)} → ${ir.errorAfterPx.toFixed(2)}px  it ${ir.iterations}${ir.converged ? "" : "!"}  moved ${ir.rotationDeg.toFixed(2)}° / dir ${ir.directionDeg.toFixed(2)}°  ${ir.applied ? "applied" : "NOT applied"}`,
+          ir.applied ? undefined : "hud-warn",
+        ),
+      );
+    }
     // v18: the processing size / grabber / flags were only in the TIMING
     // section, below the fold of the iPhone recording — repeat them here.
     rows.push(
@@ -977,19 +1005,6 @@ export class DebugOverlay {
     // ---- WORLD ----
     rows.push(section("WORLD"));
     rows.push(row("World", s.world?.ready ? `ready  ${s.world.scale.toFixed(3)} m/u  obj ${s.world.placed}` : "—"));
-    if (s.worldDiag && s.world?.ready) {
-      // 指示書 §8: did the world transform change this frame, and why. Any
-      // change outside created / ba_correction / map_reset is a bug (orange).
-      const d = s.worldDiag;
-      const unexplained = d.worldTransformChanged && d.worldTransformChangeReason === "none";
-      rows.push(
-        row(
-          "Wdiag",
-          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}`,
-          unexplained ? "hud-warn" : undefined,
-        ),
-      );
-    }
     if (s.cameraWorld) rows.push(row("Cam", xyz(s.cameraWorld)));
     if (m) {
       rows.push(row("mapC", xyz(m.cameraCenter)));

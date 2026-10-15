@@ -487,6 +487,7 @@ function refreshHud(): void {
     triangulation: s.mapPose?.triangulation ?? null,
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
     worldDiag: s.worldDiagnostics,
+    initRefine: s.initRefinement,
     planePose: s.planePose
       ? {
           tracked: s.planePose.tracked,

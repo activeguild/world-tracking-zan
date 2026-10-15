@@ -20,6 +20,7 @@ import { RESIDUAL_GROUP_ADJUSTED, RESIDUAL_GROUP_PLANE, fitResidualField } from 
 import {
   emptyRelinkStats,
   emptyReprojectionBreakdown,
+  type InitRefinementOutput,
   type PoseCandidateReport,
   type ReanchorStats,
   type RelinkStats,
@@ -241,7 +242,7 @@ export class MapTracker {
    * result was used. Null until a map was initialized or with the
    * refinement off.
    */
-  lastInitRefinement: { errorBeforePx: number; errorAfterPx: number; iterations: number; converged: boolean; rotationDeg: number; directionDeg: number; applied: boolean } | null = null;
+  lastInitRefinement: InitRefinementOutput | null = null;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */

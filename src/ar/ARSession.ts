@@ -25,6 +25,7 @@ import type {
   RelocalizationOutput,
   MotionDiagnostics,
   BundleAdjustmentOutput,
+  InitRefinementOutput,
 } from "../vision/types";
 import type { PoseRejectCode } from "../vision/PoseValidation";
 import { wallNow, type EngineTiming } from "../worker/protocol";
@@ -170,6 +171,8 @@ export interface ARStats {
    * Null before the first frame.
    */
   worldDiagnostics: WorldTrackingDiagnostics | null;
+  /** Two-view refinement of the current map's initialization (指示書「空間固定性」§7); null without a map. */
+  initRefinement: InitRefinementOutput | null;
 }
 
 /**
@@ -263,6 +266,7 @@ export class ARSession {
   private bundleAdjustment: BundleAdjustmentOutput | null = null;
   private worldEstablished = false;
   private worldDiagnostics: WorldTrackingDiagnostics | null = null;
+  private initRefinement: InitRefinementOutput | null = null;
   /** World frame object of the previous frame: the anchor replaces it on every change, so identity says "changed". */
   private prevWorldFrame: WorldFrame | null = null;
   private prevPlaneNormal: number[] | null = null;
@@ -550,6 +554,7 @@ export class ARSession {
       lostMs: this.world.lostDurationMs(performance.now()),
       objectVisibility: this.objectVisibility,
       worldDiagnostics: this.worldDiagnostics,
+      initRefinement: this.initRefinement,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
@@ -802,6 +807,7 @@ export class ARSession {
     this.relocalization = r.relocalization;
     this.motion = r.motion;
     this.bundleAdjustment = r.bundleAdjustment;
+    this.initRefinement = r.initRefinement;
     this.worldChangeReason = "none";
     if (r.bundleAdjustment.ranThisFrame) {
       const b = r.bundleAdjustment;
