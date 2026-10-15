@@ -88,6 +88,17 @@ observing a purged landmark re-anchors and the corner is triangulated again
 from current poses. HUD: `purge N` on the BA and PnP rows, `LM … purged N`
 cumulative; `?purge=0` for A/B.
 
+The PnP residual *vectors* are fitted with an affine field each frame (v22,
+`ResidualField.ts`, diagnostics only): a common shift (pose bias), a radial
+scale and shear (focal length, fx ≠ fy, principal point), a rotation (roll)
+and the random remainder (LK precision). HUD `Res mean (…)px scale …% rot …°
+rms … rand … sys …%` (`sys` = share the field explains; above half it is a
+model error, not noise) and `ResG adj (…) none (…) Δ | plane (…) other (…) Δ`
+(two parts of the map pulling the pose apart). On a planar scene a focal or
+lens error is absorbed by the map while sliding and shows in the field only
+while tilting (synthetic 10 % focal error: `sys` 28 % max, 0.5 px at the edge,
+floor / wall gap 0.8 px).
+
 ## Phase 5 — keyframes and relocalization
 
 ```

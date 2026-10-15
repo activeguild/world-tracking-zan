@@ -15,6 +15,7 @@ import {
 import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
+import { RESIDUAL_GROUP_ADJUSTED, RESIDUAL_GROUP_PLANE, fitResidualField } from "./ResidualField";
 import {
   emptyRelinkStats,
   emptyReprojectionBreakdown,
@@ -950,6 +951,11 @@ export class MapTracker {
     const halfDiag = Math.hypot(k.width, k.height) / 2;
     const centerR = out.centerRadius * halfDiag;
     const f = (k.fx + k.fy) / 2;
+    // v22: the residual vectors (observed − projected, px) and the inlier
+    // positions for the affine field fit.
+    const fx = new Float64Array(n), fy = new Float64Array(n), fdx = new Float64Array(n), fdy = new Float64Array(n);
+    const fgroup = new Uint8Array(n);
+    let fn = 0;
     for (let i = 0; i < n; i++) {
       if (!inliers[i]) continue;
       const X = this.pts3[i * 3], Y = this.pts3[i * 3 + 1], Z = this.pts3[i * 3 + 2];
@@ -960,6 +966,10 @@ export class MapTracker {
       const errPx = Math.hypot(u - this.obsX[i], v - this.obsY[i]) * f;
       const tr = obsTracks[i];
       const radius = Math.hypot(tr.x - k.cx, tr.y - k.cy);
+      fx[fn] = tr.x - k.cx;
+      fy[fn] = tr.y - k.cy;
+      fdx[fn] = (this.obsX[i] - u) * k.fx;
+      fdy[fn] = (this.obsY[i] - v) * k.fy;
       if (radius <= centerR) {
         out.centerCount++;
         out.centerErrorPx += errPx;
@@ -975,6 +985,8 @@ export class MapTracker {
         out.otherCount++;
         out.otherErrorPx += errPx;
       }
+      fgroup[fn] = (lm?.planeInlier ? RESIDUAL_GROUP_PLANE : 0) | (lm?.baMode === "adjusted" ? RESIDUAL_GROUP_ADJUSTED : 0);
+      fn++;
       // By the landmark's own triangulation parallax (ray angle, radians).
       const parDeg = lm ? (lm.parallax * 180) / Math.PI : 0;
       if (parDeg < out.parallaxLowDeg) {
@@ -1059,6 +1071,7 @@ export class MapTracker {
     if (out.youngLandmarkCount) out.youngLandmarkErrorPx /= out.youngLandmarkCount;
     if (out.midLandmarkCount) out.midLandmarkErrorPx /= out.midLandmarkCount;
     if (out.oldLandmarkCount) out.oldLandmarkErrorPx /= out.oldLandmarkCount;
+    out.field = fitResidualField(fx, fy, fdx, fdy, fgroup, fn, halfDiag);
     return out;
   }
 

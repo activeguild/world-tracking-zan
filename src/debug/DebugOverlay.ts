@@ -228,6 +228,31 @@ export interface HudStats {
       relinkRawErrorPx: number;
       relocCount: number;
       relocErrorPx: number;
+      field: {
+        count: number;
+        meanX: number;
+        meanY: number;
+        scale: number;
+        scaleEdgePx: number;
+        rotationDeg: number;
+        shearX: number;
+        shearY: number;
+        rmsPx: number;
+        randomPx: number;
+        systematic: number;
+        adjustedCount: number;
+        adjustedX: number;
+        adjustedY: number;
+        untouchedCount: number;
+        untouchedX: number;
+        untouchedY: number;
+        planeCount: number;
+        planeX: number;
+        planeY: number;
+        otherCount: number;
+        otherX: number;
+        otherY: number;
+      };
     } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
@@ -568,6 +593,31 @@ export class DebugOverlay {
               "BAlm",
               `adj ${rb.adjustedErrorPx.toFixed(2)}px (${rb.adjustedCount})  prop ${rb.propagatedErrorPx.toFixed(2)} (${rb.propagatedCount})  none ${rb.untouchedErrorPx.toFixed(2)} (${rb.untouchedCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
               ratio >= 1.5 || (ratio > 0 && ratio <= 1 / 1.5) ? "hud-warn" : undefined,
+            ),
+          );
+        }
+        // v22: the direction of the residuals. `sys` = share of the residual
+        // energy an affine field (shift / scale / rotation / shear) explains;
+        // the rest is random (LK precision). A systematic share above half
+        // is orange: a model error, not noise. The group means tell whether
+        // two parts of the map pull the pose apart.
+        const rf = rb.field;
+        if (rf.count >= 6) {
+          const vec = (x: number, y: number) => `(${x >= 0 ? "+" : ""}${x.toFixed(1)},${y >= 0 ? "+" : ""}${y.toFixed(1)})`;
+          rows.push(
+            row(
+              "Res",
+              `mean ${vec(rf.meanX, rf.meanY)}px  scale ${(rf.scale * 100).toFixed(2)}% (${rf.scaleEdgePx >= 0 ? "+" : ""}${rf.scaleEdgePx.toFixed(1)}px@edge)  rot ${rf.rotationDeg.toFixed(2)}°  shear ${(rf.shearX * 100).toFixed(2)}/${(rf.shearY * 100).toFixed(2)}%  rms ${rf.rmsPx.toFixed(2)} rand ${rf.randomPx.toFixed(2)}px  sys ${(rf.systematic * 100).toFixed(0)}%`,
+              rf.systematic >= 0.5 ? "hud-warn" : undefined,
+            ),
+          );
+          const gap = rf.adjustedCount && rf.untouchedCount ? Math.hypot(rf.adjustedX - rf.untouchedX, rf.adjustedY - rf.untouchedY) : 0;
+          const pgap = rf.planeCount && rf.otherCount ? Math.hypot(rf.planeX - rf.otherX, rf.planeY - rf.otherY) : 0;
+          rows.push(
+            row(
+              "ResG",
+              `adj ${vec(rf.adjustedX, rf.adjustedY)} (${rf.adjustedCount})  none ${vec(rf.untouchedX, rf.untouchedY)} (${rf.untouchedCount})${gap ? ` Δ${gap.toFixed(1)}` : ""}  |  plane ${vec(rf.planeX, rf.planeY)} (${rf.planeCount})  other ${vec(rf.otherX, rf.otherY)} (${rf.otherCount})${pgap ? ` Δ${pgap.toFixed(1)}` : ""}`,
+              gap >= 1 || pgap >= 1 ? "hud-warn" : undefined,
             ),
           );
         }

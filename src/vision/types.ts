@@ -4,6 +4,7 @@ import type { TrackingQuality } from "./TrackingQuality";
 import type { PoseRejection } from "./PoseValidation";
 import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
 import type { RelocalizationSearchStage, RelocalizationTimeline } from "./RelocalizationSchedule";
+import { emptyResidualField, type ResidualField } from "./ResidualField";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -405,6 +406,13 @@ export interface ReprojectionBreakdown {
   relinkRawErrorPx: number;
   relocCount: number;
   relocErrorPx: number;
+  /**
+   * v22: the residual vectors themselves (observed − projected) fitted with
+   * an affine model over the image: common shift, radial scale, rotation,
+   * shear, and the random part left over. Direction, where every split
+   * above is magnitude only.
+   */
+  field: ResidualField;
 }
 
 /**
@@ -610,6 +618,7 @@ export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
     relinkRawErrorPx: 0,
     relocCount: 0,
     relocErrorPx: 0,
+    field: emptyResidualField(),
   };
 }
 
