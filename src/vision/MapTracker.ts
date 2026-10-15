@@ -2,7 +2,7 @@ import type { LandmarkConfig } from "../ar/ARConfig";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
 import { refinePosePnP } from "../math/PnP";
-import { composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
+import { cameraCenterOf, composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
 import {
   isJumpRejection,
   poseDelta,
@@ -955,6 +955,12 @@ export class MapTracker {
     // positions for the affine field fit.
     const fx = new Float64Array(n), fy = new Float64Array(n), fdx = new Float64Array(n), fdy = new Float64Array(n);
     const fgroup = new Uint8Array(n);
+    // v23: the parallax direction of each landmark in this view — where its
+    // projection moves when its depth changes — and the sensitivity (px per
+    // 100 % depth change). The depth was fixed from the anchor view (the
+    // initialization view, the map origin, when there is no anchor).
+    const pex = new Float64Array(n), pey = new Float64Array(n), psens = new Float64Array(n);
+    const refCenter = new Float64Array(3);
     let fn = 0;
     for (let i = 0; i < n; i++) {
       if (!inliers[i]) continue;
@@ -986,6 +992,23 @@ export class MapTracker {
         out.otherErrorPx += errPx;
       }
       fgroup[fn] = (lm?.planeInlier ? RESIDUAL_GROUP_PLANE : 0) | (lm?.baMode === "adjusted" ? RESIDUAL_GROUP_ADJUSTED : 0);
+      {
+        // Reference camera centre in the current camera frame, then the
+        // derivative of the projection along the reference ray through X.
+        if (lm?.anchorPose) cameraCenterOf(lm.anchorPose, refCenter);
+        else refCenter.fill(0);
+        const cx = r[0] * refCenter[0] + r[1] * refCenter[1] + r[2] * refCenter[2] + t[0];
+        const cy = r[3] * refCenter[0] + r[4] * refCenter[1] + r[5] * refCenter[2] + t[1];
+        const cz = r[6] * refCenter[0] + r[7] * refCenter[1] + r[8] * refCenter[2] + t[2];
+        const xc = u * z, yc = v * z;
+        const dxr = xc - cx, dyr = yc - cy, dzr = z - cz;
+        const du = ((dxr * z - xc * dzr) / (z * z)) * k.fx;
+        const dv = ((dyr * z - yc * dzr) / (z * z)) * k.fy;
+        const s = Math.hypot(du, dv);
+        psens[fn] = s;
+        pex[fn] = s > 1e-9 ? du / s : 0;
+        pey[fn] = s > 1e-9 ? dv / s : 0;
+      }
       fn++;
       // By the landmark's own triangulation parallax (ray angle, radians).
       const parDeg = lm ? (lm.parallax * 180) / Math.PI : 0;
@@ -1071,7 +1094,7 @@ export class MapTracker {
     if (out.youngLandmarkCount) out.youngLandmarkErrorPx /= out.youngLandmarkCount;
     if (out.midLandmarkCount) out.midLandmarkErrorPx /= out.midLandmarkCount;
     if (out.oldLandmarkCount) out.oldLandmarkErrorPx /= out.oldLandmarkCount;
-    out.field = fitResidualField(fx, fy, fdx, fdy, fgroup, fn, halfDiag);
+    out.field = fitResidualField(fx, fy, fdx, fdy, fgroup, fn, halfDiag, { ex: pex, ey: pey, sensitivity: psens });
     return out;
   }
 

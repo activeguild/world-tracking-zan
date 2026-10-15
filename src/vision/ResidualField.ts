@@ -41,6 +41,27 @@ export interface ResidualField {
   randomPx: number;
   /** Share of the residual energy the affine model explains, 0–1. */
   systematic: number;
+  /**
+   * v23: the random part split along / across each landmark's parallax
+   * direction (where its projection moves when its depth changes, i.e. the
+   * epipolar direction from the view that fixed the depth). Isotropic noise
+   * gives `parallaxRatio` ≈ 1; depth errors put the residual along the
+   * parallax direction, ratio ≫ 1. Over the landmarks with enough depth
+   * sensitivity (≥ `PARALLAX_MIN_SENSITIVITY_PX`): `depthErrorMedian` =
+   * median |implied relative depth error|, `depthErrorBias` = its signed mean
+   * (positive = the map puts the landmark too close), per group as well.
+   */
+  parallelRmsPx: number;
+  perpRmsPx: number;
+  parallaxRatio: number;
+  /** Landmarks with a usable parallax direction (sensitivity ≥ the minimum). */
+  parallaxCount: number;
+  /** Median projection sensitivity to a 100 % depth change (px). */
+  depthSensitivityMedianPx: number;
+  depthErrorMedian: number;
+  depthErrorBias: number;
+  planeDepthBias: number;
+  otherDepthBias: number;
   /** Mean residual vectors of the landmark groups (px), count 0 when absent. */
   adjustedCount: number;
   adjustedX: number;
@@ -69,6 +90,15 @@ export function emptyResidualField(): ResidualField {
     rmsPx: 0,
     randomPx: 0,
     systematic: 0,
+    parallelRmsPx: 0,
+    perpRmsPx: 0,
+    parallaxRatio: 0,
+    parallaxCount: 0,
+    depthSensitivityMedianPx: 0,
+    depthErrorMedian: 0,
+    depthErrorBias: 0,
+    planeDepthBias: 0,
+    otherDepthBias: 0,
     adjustedCount: 0,
     adjustedX: 0,
     adjustedY: 0,
@@ -89,6 +119,22 @@ export const RESIDUAL_GROUP_ADJUSTED = 1;
 export const RESIDUAL_GROUP_PLANE = 2;
 
 /**
+ * Minimum depth sensitivity (px per 100 % depth change) for a landmark to
+ * enter the depth-error statistics: below it the current view is too close
+ * to the view that fixed the depth and the direction says nothing.
+ */
+export const PARALLAX_MIN_SENSITIVITY_PX = 5;
+
+/** Optional per-inlier parallax geometry for the v23 split. */
+export interface ParallaxInput {
+  /** Unit parallax direction per inlier (px space), zero when undefined. */
+  ex: ArrayLike<number>;
+  ey: ArrayLike<number>;
+  /** Projection displacement for a 100 % depth change (px). */
+  sensitivity: ArrayLike<number>;
+}
+
+/**
  * Fit the affine residual model to `n` inliers. `px/py` are positions
  * relative to the principal point (px), `dx/dy` the residuals observed −
  * projected (px), `groups` the flags above per inlier.
@@ -102,6 +148,7 @@ export function fitResidualField(
   n: number,
   /** Half the image diagonal (px), for `scaleEdgePx`. */
   halfDiagonalPx = 0,
+  parallax: ParallaxInput | null = null,
 ): ResidualField {
   const out = emptyResidualField();
   out.count = n;
@@ -154,6 +201,7 @@ export function fitResidualField(
   if (n < 6) {
     // Too few for six parameters: report the shift only.
     out.randomPx = out.rmsPx;
+    if (parallax) splitParallax(out, dx, dy, groups, n, parallax, null);
     return out;
   }
   // Normal equations of d = a + B p, one 3-parameter system per component
@@ -190,14 +238,63 @@ export function fitResidualField(
   out.shearX = (b11 - b22) / 2;
   out.shearY = (b12 + b21) / 2;
   let sr = 0;
+  const rx = new Float64Array(n), ry = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const ex = dx[i] - (cx[0] + b11 * px[i] + b12 * py[i]);
-    const ey = dy[i] - (cy[0] + b21 * px[i] + b22 * py[i]);
-    sr += ex * ex + ey * ey;
+    rx[i] = dx[i] - (cx[0] + b11 * px[i] + b12 * py[i]);
+    ry[i] = dy[i] - (cy[0] + b21 * px[i] + b22 * py[i]);
+    sr += rx[i] * rx[i] + ry[i] * ry[i];
   }
   out.randomPx = Math.sqrt(sr / n);
   out.systematic = ss > 0 ? Math.max(0, 1 - sr / ss) : 0;
+  // v23: the random part along / across the parallax directions.
+  if (parallax) splitParallax(out, rx, ry, groups, n, parallax, null);
   return out;
+}
+
+/**
+ * Split the (affine-removed) residuals into the component along each
+ * landmark's parallax direction and the one across it, and read the implied
+ * relative depth error `(r · e) / sensitivity` off the landmarks whose
+ * sensitivity is large enough.
+ */
+function splitParallax(out: ResidualField, rx: ArrayLike<number>, ry: ArrayLike<number>, groups: ArrayLike<number>, n: number, p: ParallaxInput, _unused: null): void {
+  let sPar = 0, sPerp = 0, m = 0;
+  const errs: number[] = [];
+  const sens: number[] = [];
+  let bias = 0, planeBias = 0, planeN = 0, otherBias = 0, otherN = 0;
+  for (let i = 0; i < n; i++) {
+    const s = p.sensitivity[i];
+    if (!(s >= PARALLAX_MIN_SENSITIVITY_PX)) continue;
+    const ex = p.ex[i], ey = p.ey[i];
+    const along = rx[i] * ex + ry[i] * ey;
+    const across = -rx[i] * ey + ry[i] * ex;
+    sPar += along * along;
+    sPerp += across * across;
+    const depthErr = along / s;
+    errs.push(Math.abs(depthErr));
+    sens.push(s);
+    bias += depthErr;
+    if (groups[i] & RESIDUAL_GROUP_PLANE) {
+      planeBias += depthErr;
+      planeN++;
+    } else {
+      otherBias += depthErr;
+      otherN++;
+    }
+    m++;
+  }
+  out.parallaxCount = m;
+  if (m === 0) return;
+  out.parallelRmsPx = Math.sqrt(sPar / m);
+  out.perpRmsPx = Math.sqrt(sPerp / m);
+  out.parallaxRatio = out.perpRmsPx > 1e-9 ? out.parallelRmsPx / out.perpRmsPx : 0;
+  errs.sort((a, b) => a - b);
+  sens.sort((a, b) => a - b);
+  out.depthErrorMedian = errs[m >> 1];
+  out.depthSensitivityMedianPx = sens[m >> 1];
+  out.depthErrorBias = bias / m;
+  out.planeDepthBias = planeN ? planeBias / planeN : 0;
+  out.otherDepthBias = otherN ? otherBias / otherN : 0;
 }
 
 function invert3(m: number[]): number[] | null {

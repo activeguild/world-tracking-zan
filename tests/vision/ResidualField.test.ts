@@ -4,6 +4,7 @@ import { approximateIntrinsics } from "../../src/camera/CameraIntrinsics";
 import { type Mat3, mat3Invert, mat3Multiply, mat3TransformPoint } from "../../src/math/Matrix";
 import { createRng } from "../../src/vision/OutlierRejection";
 import { RESIDUAL_GROUP_ADJUSTED, RESIDUAL_GROUP_PLANE, fitResidualField, type ResidualField } from "../../src/vision/ResidualField";
+import { cameraCenterOf } from "../../src/math/Pose";
 import type { VisionInput, VisionOutput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
 import { makeTexture, sampleBilinear } from "../helpers/synthetic";
@@ -108,6 +109,55 @@ describe("residual vector field (v22 diagnostics)", () => {
     // The split is not an affine pattern: it reads as "random" to the field fit.
     expect(r.systematic).toBeLessThan(0.1);
     expect(r.randomPx).toBeGreaterThan(1.4);
+  });
+
+  it("v23: depth errors line the residuals up with the parallax direction; isotropic noise does not", () => {
+    // Random parallax directions with 40–80 px sensitivity; residual = ±3 %
+    // depth error × sensitivity along the direction, plus 0.3 px noise.
+    const rng = createRng(8);
+    const n = 300;
+    const px = new Float64Array(n), py = new Float64Array(n), dx = new Float64Array(n), dy = new Float64Array(n);
+    const ex = new Float64Array(n), ey = new Float64Array(n), sens = new Float64Array(n);
+    const g = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      px[i] = (rng() - 0.5) * W;
+      py[i] = (rng() - 0.5) * H;
+      const a = rng() * Math.PI * 2;
+      ex[i] = Math.cos(a);
+      ey[i] = Math.sin(a);
+      sens[i] = 40 + rng() * 40;
+      g[i] = i % 3 === 0 ? RESIDUAL_GROUP_PLANE : 0;
+      const depthErr = (i % 3 === 0 ? 0.03 : -0.03) + 0.005 * gauss(rng); // floor too close, the rest too far
+      dx[i] = depthErr * sens[i] * ex[i] + 0.3 * gauss(rng);
+      dy[i] = depthErr * sens[i] * ey[i] + 0.3 * gauss(rng);
+    }
+    const r = fitResidualField(px, py, dx, dy, g, n, HALF_DIAG, { ex, ey, sensitivity: sens });
+    console.log(
+      `[resfield] depth errors: ${fmt(r)} | ∥ ${r.parallelRmsPx.toFixed(2)} ⊥ ${r.perpRmsPx.toFixed(2)} ×${r.parallaxRatio.toFixed(1)} depth err med ${(r.depthErrorMedian * 100).toFixed(1)}% bias ${(r.depthErrorBias * 100).toFixed(1)}% plane ${(r.planeDepthBias * 100).toFixed(1)}% other ${(r.otherDepthBias * 100).toFixed(1)}% (n ${r.parallaxCount}, sens ${r.depthSensitivityMedianPx.toFixed(0)} px)`,
+    );
+    // Random directions: the affine field explains nothing, the parallax split everything.
+    expect(r.systematic).toBeLessThan(0.1);
+    expect(r.parallaxRatio).toBeGreaterThan(3);
+    expect(r.depthErrorMedian).toBeCloseTo(0.03, 2);
+    expect(r.planeDepthBias).toBeCloseTo(0.03, 2);
+    expect(r.otherDepthBias).toBeCloseTo(-0.03, 2);
+    expect(r.parallaxCount).toBe(n);
+    // Isotropic noise with the same geometry: ratio ≈ 1, no bias, small implied error.
+    const nx = new Float64Array(n), ny = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      nx[i] = 2 * gauss(rng);
+      ny[i] = 2 * gauss(rng);
+    }
+    const noise = fitResidualField(px, py, nx, ny, g, n, HALF_DIAG, { ex, ey, sensitivity: sens });
+    console.log(`[resfield] noise, parallax split: ∥ ${noise.parallelRmsPx.toFixed(2)} ⊥ ${noise.perpRmsPx.toFixed(2)} ×${noise.parallaxRatio.toFixed(2)} depth err med ${(noise.depthErrorMedian * 100).toFixed(1)}% bias ${(noise.depthErrorBias * 100).toFixed(2)}%`);
+    expect(noise.parallaxRatio).toBeGreaterThan(0.8);
+    expect(noise.parallaxRatio).toBeLessThan(1.25);
+    expect(Math.abs(noise.depthErrorBias)).toBeLessThan(0.01);
+    // Landmarks below the sensitivity floor are left out.
+    const weak = Float64Array.from(sens);
+    for (let i = 0; i < n; i += 2) weak[i] = 1;
+    const half = fitResidualField(px, py, dx, dy, g, n, HALF_DIAG, { ex, ey, sensitivity: weak });
+    expect(half.parallaxCount).toBe(n / 2);
   });
 
   it("fewer than six inliers: mean only", () => {
@@ -233,5 +283,70 @@ describe("residual vector field in the engine", () => {
     // Wrong model: the field carries the error while tilting, more than with the right model.
     expect(wrong.tilt.systematic).toBeGreaterThan(right.tilt.systematic * 1.5);
     expect(wrong.tilt.rmsPx).toBeGreaterThan(right.tilt.rmsPx * 1.5);
+  });
+
+  it("v23: landmark depths perturbed by ±3 % along their anchor rays read as parallax-aligned residuals with the right depth error", () => {
+    // Floor + wall, 110 frames of slide (so the current view has a baseline
+    // to the anchor views), BA off so nothing repairs the map.
+    const FRAMES = 140;
+    const poseAt = (f: number) => tpPose([0.005 * f, 0.001 * f, 0.002 * f], 0.0015 * f, 0);
+    const seq: Uint8Array[] = [];
+    for (let f = 0; f < FRAMES; f++) seq.push(tpRender(poseAt(f)));
+    const run = (perturb: number) => {
+      const engine = new VisionEngine(TP_W, TP_H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(11));
+      const before: ResidualField[] = [], after: ResidualField[] = [];
+      for (let f = 0; f < FRAMES; f++) {
+        const mp = engine.process({ frameId: f, timestamp: f * 33.3, width: TP_W, height: TP_H, gray: seq[f], intrinsics: approximateIntrinsics(TP_W, TP_H, TP_FOV), gravity: tpGravity }).mapPose;
+        if (f === 100 && perturb > 0) {
+          // Move every anchored landmark along the ray from its anchor camera.
+          const rng = createRng(77);
+          let moved = 0;
+          for (const lm of engine.landmarkMap.values()) {
+            if (!lm.anchorPose) continue;
+            const c = cameraCenterOf(lm.anchorPose);
+            const s = 1 + (rng() < 0.5 ? -perturb : perturb);
+            for (let a = 0; a < 3; a++) lm.position[a] = c[a] + (lm.position[a] - c[a]) * s;
+            moved++;
+          }
+          expect(moved).toBeGreaterThan(100);
+        }
+        if (!mp || mp.framesSinceTracked !== 0) continue;
+        (f < 100 ? before : after).push(mp.reprojection.field);
+      }
+      const summarize = (fs: ResidualField[]) => ({
+        n: fs.length,
+        ratio: fs.reduce((a, r) => a + r.parallaxRatio, 0) / fs.length,
+        depthErr: fs.reduce((a, r) => a + r.depthErrorMedian, 0) / fs.length,
+        count: fs.reduce((a, r) => a + r.parallaxCount, 0) / fs.length,
+        sens: fs.reduce((a, r) => a + r.depthSensitivityMedianPx, 0) / fs.length,
+        rms: fs.reduce((a, r) => a + r.rmsPx, 0) / fs.length,
+        systematic: fs.reduce((a, r) => a + r.systematic, 0) / fs.length,
+      });
+      return { before: summarize(before.slice(60)), after: summarize(after.slice(2)) };
+    };
+    const clean = run(0);
+    const bad = run(0.03);
+    const f = (s: ReturnType<typeof run>["before"]) => `n ${s.n} rms ${s.rms.toFixed(2)} px sys ${(s.systematic * 100).toFixed(0)}% ∥/⊥ ×${s.ratio.toFixed(2)} depth err med ${(s.depthErr * 100).toFixed(2)}% (${s.count.toFixed(0)} landmarks with sens ${s.sens.toFixed(0)} px)`;
+    console.log(`[resfield] clean before: ${f(clean.before)}\n[resfield] clean after:  ${f(clean.after)}\n[resfield] ±3% before:   ${f(bad.before)}\n[resfield] ±3% after:    ${f(bad.after)}`);
+    expect(bad.after.n).toBeGreaterThan(20);
+    expect(clean.after.count).toBeGreaterThan(30);
+    // Clean map: even a correct synthetic map carries its small triangulation
+    // error mostly in depth (×1.7–1.8 along the parallax direction, 0.2–0.3 %
+    // implied), so ×1 is the signature of pure observation noise, not of a
+    // healthy map.
+    expect(clean.after.ratio).toBeLessThan(2.2);
+    expect(clean.after.depthErr).toBeLessThan(0.005);
+    // Perturbed map: the residual lines up with the parallax direction and the
+    // implied depth error rises several-fold. It reads below the injected 3 %
+    // because only PnP inliers (gate 6 px, sensitivity ~170 px → the worst
+    // landmarks fall out) enter the statistic and the compromise pose absorbs
+    // part of it.
+    expect(bad.after.ratio).toBeGreaterThan(2.5);
+    expect(bad.after.ratio).toBeGreaterThan(clean.after.ratio * 2);
+    expect(bad.after.depthErr).toBeGreaterThan(clean.after.depthErr * 3);
+    expect(bad.after.depthErr).toBeGreaterThan(0.01);
+    expect(bad.after.depthErr).toBeLessThan(0.045);
+    // Before the perturbation both runs agree (same engine, same seed).
+    expect(Math.abs(bad.before.rms - clean.before.rms)).toBeLessThan(1e-9);
   });
 });

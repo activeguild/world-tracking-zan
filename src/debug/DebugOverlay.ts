@@ -240,6 +240,15 @@ export interface HudStats {
         rmsPx: number;
         randomPx: number;
         systematic: number;
+        parallelRmsPx: number;
+        perpRmsPx: number;
+        parallaxRatio: number;
+        parallaxCount: number;
+        depthSensitivityMedianPx: number;
+        depthErrorMedian: number;
+        depthErrorBias: number;
+        planeDepthBias: number;
+        otherDepthBias: number;
         adjustedCount: number;
         adjustedX: number;
         adjustedY: number;
@@ -620,6 +629,20 @@ export class DebugOverlay {
               gap >= 1 || pgap >= 1 ? "hud-warn" : undefined,
             ),
           );
+          // v23: the random part along vs across the parallax directions.
+          // Isotropic noise reads ×1.0; depth errors line the residuals up
+          // with the parallax direction (orange from ×1.5) and the implied
+          // relative depth error is read off the sensitive landmarks.
+          if (rf.parallaxCount > 0) {
+            const pct = (v: number) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
+            rows.push(
+              row(
+                "ResP",
+                `∥ ${rf.parallelRmsPx.toFixed(2)}px ⊥ ${rf.perpRmsPx.toFixed(2)}px ×${rf.parallaxRatio.toFixed(1)}  depth err med ${(rf.depthErrorMedian * 100).toFixed(1)}% bias ${pct(rf.depthErrorBias)} (n ${rf.parallaxCount}/${rf.count}, sens ${rf.depthSensitivityMedianPx.toFixed(0)}px)  plane ${pct(rf.planeDepthBias)} other ${pct(rf.otherDepthBias)}`,
+                rf.parallaxRatio >= 1.5 ? "hud-warn" : undefined,
+              ),
+            );
+          }
         }
       }
       // Phase 7: what the last bundle adjustment did to the map. The error is
