@@ -554,6 +554,27 @@ export class DebugOverlay {
         : m.relinked ? `  relink ${m.relinked}` : "";
       const flags = `${relinkText}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));
+      // v24: the re-anchor probe, right under the PnP row (at the end of the
+      // breakdown it was below the fold of Android recording 36). `trk` = RMS
+      // residual of the live tracks,
+      // `kf` = of where the oldest keyframe patch landed, over the same
+      // sample and projections; `PnP` = the error PnP reaches on the sample
+      // with either set. Orange when re-anchoring halves the residual: the
+      // live tracks slid off the corners the map was built from.
+      const ra = m.reanchor;
+      if (ra && ra.sampled > 0) {
+        const ratio = ra.landed && ra.trackRmsPx > 0 ? ra.landedRmsPx / ra.trackRmsPx : 0;
+        const fails = `${ra.lkFailed ? ` lk ${ra.lkFailed}` : ""}${ra.tooFar ? ` far ${ra.tooFar}` : ""}${ra.noKeyframe ? ` nokf ${ra.noKeyframe}` : ""}`;
+        rows.push(
+          row(
+            "Reanc",
+            ra.landed
+              ? `trk ${ra.trackRmsPx.toFixed(2)} → kf ${ra.landedRmsPx.toFixed(2)}px ×${ratio.toFixed(2)} (n ${ra.landed}/${ra.sampled}${fails})  snap ${ra.meanSnapPx.toFixed(1)}px med ${ra.medianSnapPx.toFixed(1)}  better ${ra.improved}/${ra.landed}  kf age ${ra.keyframeAgeMedianFrames}f${ra.landedPnpInliers ? `  PnP ${ra.trackPnpErrorPx.toFixed(2)} → ${ra.landedPnpErrorPx.toFixed(2)}px (${ra.trackPnpInliers}/${ra.landedPnpInliers}i, Δ ${ra.landedPoseDeltaDeg.toFixed(2)}°)` : ""}`
+              : `no landing (n 0/${ra.sampled}${fails})`,
+            ra.landed >= 6 && ratio > 0 && ratio <= 0.5 ? "hud-warn" : undefined,
+          ),
+        );
+      }
       // v16: where the error sits. Edge ≫ center → focal length / lens
       // distortion (objects shift while tilting and come back); plane ≠
       // other → biased landmark depths.
@@ -664,25 +685,6 @@ export class DebugOverlay {
               ),
             );
           }
-        }
-        // v24: the re-anchor probe. `trk` = RMS residual of the live tracks,
-        // `kf` = of where the oldest keyframe patch landed, over the same
-        // sample and projections; `PnP` = the error PnP reaches on the sample
-        // with either set. Orange when re-anchoring halves the residual: the
-        // live tracks slid off the corners the map was built from.
-        const ra = m.reanchor;
-        if (ra && ra.sampled > 0) {
-          const ratio = ra.landed && ra.trackRmsPx > 0 ? ra.landedRmsPx / ra.trackRmsPx : 0;
-          const fails = `${ra.lkFailed ? ` lk ${ra.lkFailed}` : ""}${ra.tooFar ? ` far ${ra.tooFar}` : ""}${ra.noKeyframe ? ` nokf ${ra.noKeyframe}` : ""}`;
-          rows.push(
-            row(
-              "Reanc",
-              ra.landed
-                ? `trk ${ra.trackRmsPx.toFixed(2)} → kf ${ra.landedRmsPx.toFixed(2)}px ×${ratio.toFixed(2)} (n ${ra.landed}/${ra.sampled}${fails})  snap ${ra.meanSnapPx.toFixed(1)}px med ${ra.medianSnapPx.toFixed(1)}  better ${ra.improved}/${ra.landed}  kf age ${ra.keyframeAgeMedianFrames}f${ra.landedPnpInliers ? `  PnP ${ra.trackPnpErrorPx.toFixed(2)} → ${ra.landedPnpErrorPx.toFixed(2)}px (${ra.trackPnpInliers}/${ra.landedPnpInliers}i, Δ ${ra.landedPoseDeltaDeg.toFixed(2)}°)` : ""}`
-                : `no landing (n 0/${ra.sampled}${fails})`,
-              ra.landed >= 6 && ratio > 0 && ratio <= 0.5 ? "hud-warn" : undefined,
-            ),
-          );
         }
       }
       // Phase 7: what the last bundle adjustment did to the map. The error is
