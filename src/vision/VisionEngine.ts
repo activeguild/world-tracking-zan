@@ -303,6 +303,11 @@ export class VisionEngine {
     return this.mapTracker.map;
   }
 
+  /** The map tracker itself (tests: initialization refinement report). */
+  mapTrackerForTests(): MapTracker {
+    return this.mapTracker;
+  }
+
   get state(): TrackingState {
     return this.stateMachine.state;
   }
@@ -396,6 +401,10 @@ export class VisionEngine {
     const ids: number[] = [];
     for (const [id, c] of counts) {
       if (c < Math.max(1, cfg.minLandmarkObservations)) continue;
+      // 指示書 §5.2: a non-finite position would poison the whole solve (its
+      // cost is NaN, so no step is ever accepted); keep it out of the problem.
+      const p = map.get(id)!.position;
+      if (!Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) continue;
       index.set(id, ids.length);
       ids.push(id);
     }
@@ -427,7 +436,10 @@ export class VisionEngine {
         const x = (o.x - k.cx) / k.fx, y = (o.y - k.cy) / k.fy;
         const u = (r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z;
         const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
-        if (Math.hypot(u - x, v - y) > maxErr) {
+        const err = Math.hypot(u - x, v - y);
+        // `> maxErr` is false for NaN: a non-finite observation or pose must
+        // not slip into the problem as a "good" one.
+        if (!(err <= maxErr)) {
           outliers++;
           inconsistent.add(o.landmarkId);
           continue;
@@ -487,7 +499,19 @@ export class VisionEngine {
       }
     }
     let rejectReason: BundleAdjustmentRejectReason = "none";
-    if (shifted > cfg.maxShiftedFraction * ids.length) rejectReason = "shift";
+    // 指示書 §5.2: a solve that produced anything non-finite is discarded as
+    // a whole (poses restored below, landmarks never written).
+    let finite = Number.isFinite(res.errorBefore) && Number.isFinite(res.errorAfter);
+    for (let i = 0; finite && i < positions.length; i++) if (!Number.isFinite(positions[i])) finite = false;
+    for (let i = 0; finite && i < kfs.length; i++) {
+      const p = kfs[i].pose;
+      for (let a = 0; a < 9; a++) if (!Number.isFinite(p.rotation[a])) finite = false;
+      for (let a = 0; a < 3; a++) if (!Number.isFinite(p.translation[a])) finite = false;
+    }
+    if (!finite) {
+      rejectReason = "invalid";
+      if (!Number.isFinite(maxShift)) maxShift = 0;
+    } else if (shifted > cfg.maxShiftedFraction * ids.length) rejectReason = "shift";
     else if (cfg.maxPoseJumpPriorRatio > 0 && jumpRatio > cfg.maxPoseJumpPriorRatio) rejectReason = "pose_jump";
     else if (cfg.minGainFraction > 0 && res.errorAfter > res.errorBefore * (1 - cfg.minGainFraction)) rejectReason = "no_gain";
     const rejected = rejectReason !== "none";

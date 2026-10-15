@@ -180,6 +180,19 @@ export interface LandmarkConfig {
   initMinTranslationConfidence: number;
   /** Landmarks that must triangulate well for the initialization to be accepted. */
   initMinLandmarks: number;
+  /**
+   * 修正指示書「空間固定性」§6–§7: refine the two-view initialization by a
+   * bundle adjustment of the two views (reference fixed, init pose free,
+   * all triangulated landmarks) before the map is created. The essential
+   * matrix alone left a 2.3° translation-direction error on a floor-dominant
+   * scene with yaw and forward motion, which bakes a laterally graded depth
+   * distortion (1.4 → 6 % across the image) into the first map; PnP against
+   * such a map reads a different scale from every viewpoint (3–4 % along the
+   * first slide), and every later landmark generation inherits it. The
+   * refinement brings the direction error to the tracking-noise floor.
+   * `?initba=0` in the demo turns it off for A/B.
+   */
+  initRefineWithBA: boolean;
   /** Minimum ray parallax angle (degrees) for a triangulated point. */
   minTriangulationAngleDeg: number;
   /** Maximum reprojection error (px, both views summed) for a triangulated point. */
@@ -888,6 +901,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     initMinParallaxPx: 30,
     initMinTranslationConfidence: 0.5,
     initMinLandmarks: 30,
+    initRefineWithBA: true,
     minTriangulationAngleDeg: 1.0,
     // The map is fixed once built (no depth refinement), so landmarks must
     // be well conditioned when created: 20 px of parallax from the anchor

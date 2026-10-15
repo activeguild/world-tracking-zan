@@ -117,6 +117,25 @@ the fix); equal residuals mean the tracks are where the keyframe patches are
 and the error is between the map and the corner as it looks from this view.
 Nothing is written back. `?reanchor=0` turns it off.
 
+The world-fixity pass (修正指示書「空間固定性」) added a per-frame world
+record (`ARStats.worldDiagnostics`, HUD `Wdiag`): which pose was used and
+whether it passed the gate, whether the world transform changed and why
+(`created` / `ba_correction` / `map_reset` — anything else is a bug), the
+plane normal delta and the BA result of the same frame. The anchor-invariance
+scenario (init → plane → placement → yaw → pitch → return → translation → BA
+→ loss → relocalization) found the first real drift source in the synthetic
+scene: the essential-matrix initialization was 2.3° off in translation
+direction on a floor-dominant view with yaw and forward motion, which bakes a
+laterally graded 1–6 % depth distortion into the first map; PnP then reads a
+different scale from every viewpoint (+4 % along the first slide, with or
+without BA, even with the map frozen) and every later landmark generation
+inherits it. The initialization is now refined by a two-view bundle
+adjustment (reference fixed, init pose and all landmarks free, median depth
+as gauge): direction error 0.3°, depth ratio flat within 0.5 %, scale
+conserved within 0.3 %, placed points within 1 px through the whole scenario.
+`?initba=0` turns it off for A/B. The BA also rejects any run that produces a
+non-finite value (`invalid`) instead of silently doing nothing.
+
 ## Phase 5 — keyframes and relocalization
 
 ```

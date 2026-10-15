@@ -60,6 +60,8 @@ const freezeMap = params.get("freeze") === "1";
 const bundleAdjustmentParam = params.get("ba");
 // v20: keyframe check of re-associations, off with ?relinkverify=0 for A/B.
 const relinkVerify = params.get("relinkverify") !== "0";
+// 指示書「空間固定性」§7: two-view BA refinement of the initialization; `?initba=0` for A/B.
+const initRefineWithBA = params.get("initba") !== "0";
 // v21: removal of landmarks a keyframe contradicts, off with ?purge=0 for A/B.
 const purgeInconsistent = params.get("purge") !== "0";
 // v24: the re-anchor probe (diagnostics), off with ?reanchor=0.
@@ -107,6 +109,7 @@ const session = new ARSession({
       freezeAfterWorld: freezeMap,
       relinkVerify,
       purgeInconsistent,
+      initRefineWithBA,
       ...(reanchorProbe ? {} : { reanchorProbeEveryFrames: 0 }),
     },
     bundleAdjustment: {
@@ -388,7 +391,7 @@ function refreshHud(): void {
     mainTiming: s.mainTiming,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {
@@ -483,6 +486,7 @@ function refreshHud(): void {
       : null,
     triangulation: s.mapPose?.triangulation ?? null,
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
+    worldDiag: s.worldDiagnostics,
     planePose: s.planePose
       ? {
           tracked: s.planePose.tracked,

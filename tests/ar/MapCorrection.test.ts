@@ -313,8 +313,13 @@ describe("accumulated BA corrections through a session (改善指示書 Phase 2)
     const none = runSession("none");
     for (const h of kf.hops) expect(h).toBeLessThan(0.3);
     expect(kf.once.max).toBeLessThan(4.0);
-    // The keyframe mode carries each run's pose error into the object (2.4 px here vs 0.9 px local).
-    expect(kf.once.median).toBeGreaterThan(2.0);
+    // The keyframe mode carries each run's pose error into the object. With
+    // the raw essential-matrix init it was 2.4 px (median) against 0.9 px for
+    // the local fit; the two-view init refinement (指示書「空間固定性」§7)
+    // removed most of that pose error, and the two modes now sit at 1.2 and
+    // 1.1 px. Without any correction the object is off by 14 px once the
+    // drifted map is pulled back.
+    expect(kf.once.median).toBeLessThan(2.0);
     expect(none.once.max).toBeGreaterThan(5);
   });
 });

@@ -374,6 +374,22 @@ export interface HudStats {
     added: number;
   } | null;
   world?: { ready: boolean; scale: number; placed: number } | null;
+  /** 指示書 §8: per-frame world-tracking record (anchor change + reason, plane normal delta, pose acceptance). */
+  worldDiag?: {
+    poseSource: string;
+    poseAccepted: boolean;
+    poseRejectReason: string | null;
+    anchorPositionDelta: number;
+    anchorRotationDeltaDeg: number;
+    worldTransformChanged: boolean;
+    worldTransformChangeReason: string;
+    planeNormalDeltaDeg: number;
+    planeAccepted: boolean;
+    planeRecoveryActive: boolean;
+    baExecuted: boolean;
+    baAccepted: boolean;
+    baRejectReason: string;
+  } | null;
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
   /** Camera world position (m) once the world exists. */
@@ -697,7 +713,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : ba.rejectReason === "invalid" ? "invalid (non-finite)" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
             (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );
@@ -961,6 +977,19 @@ export class DebugOverlay {
     // ---- WORLD ----
     rows.push(section("WORLD"));
     rows.push(row("World", s.world?.ready ? `ready  ${s.world.scale.toFixed(3)} m/u  obj ${s.world.placed}` : "—"));
+    if (s.worldDiag && s.world?.ready) {
+      // 指示書 §8: did the world transform change this frame, and why. Any
+      // change outside created / ba_correction / map_reset is a bug (orange).
+      const d = s.worldDiag;
+      const unexplained = d.worldTransformChanged && d.worldTransformChangeReason === "none";
+      rows.push(
+        row(
+          "Wdiag",
+          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}`,
+          unexplained ? "hud-warn" : undefined,
+        ),
+      );
+    }
     if (s.cameraWorld) rows.push(row("Cam", xyz(s.cameraWorld)));
     if (m) {
       rows.push(row("mapC", xyz(m.cameraCenter)));

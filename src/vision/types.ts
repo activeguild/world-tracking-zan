@@ -500,7 +500,11 @@ export interface ReanchorStats {
 }
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
-export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain" | "pose_jump";
+/**
+ * `invalid` (指示書 §5.2): the solve produced a non-finite landmark, pose or
+ * error (a NaN / Infinity reached the problem); nothing is written back.
+ */
+export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain" | "pose_jump" | "invalid";
 
 /**
  * Local bundle adjustment report (Phase 7): what the last run over the

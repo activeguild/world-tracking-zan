@@ -236,30 +236,27 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(engine.keyframes.length).toBeGreaterThanOrEqual(3);
     const baseline = meanErr(outs, 60, 80);
     const kfs = engine.keyframes;
-    // The free keyframe with the most landmarks that reference it and that no
-    // other keyframe observes.
-    const exclusiveOf = (L: (typeof kfs)[number]) => {
-      const seenElsewhere = new Set<number>();
-      for (const kf of kfs) if (kf !== L) for (const o of kf.observations) seenElsewhere.add(o.landmarkId);
-      return [...engine.landmarkMap.values()].filter((lm) => lm.refKeyframeId === L.id && !seenElsewhere.has(lm.id));
-    };
+    // The free keyframe with the most landmarks that reference it.
+    const referencing = (L: (typeof kfs)[number]) => [...engine.landmarkMap.values()].filter((lm) => lm.refKeyframeId === L.id);
     let L = kfs[1];
-    let refL = exclusiveOf(L);
+    let refL = referencing(L);
     for (let i = 2; i < kfs.length; i++) {
-      const cand = exclusiveOf(kfs[i]);
+      const cand = referencing(kfs[i]);
       if (cand.length > refL.length) {
         L = kfs[i];
         refL = cand;
       }
     }
     expect(refL.length).toBeGreaterThan(8);
-    // Half of them lose their keyframe observation: no keyframe observes them
-    // any more, so the solve cannot touch them — propagation must.
+    // Half of them lose every keyframe observation (orphans): no keyframe
+    // observes them any more, so the solve cannot touch them — propagation
+    // must. (Removing the observations from every keyframe makes the test
+    // independent of which keyframes happened to observe them.)
     const orphan = new Set<number>();
     refL.forEach((lm, i) => {
       if (i % 2 === 0) orphan.add(lm.id);
     });
-    L.observations = L.observations.filter((o) => !orphan.has(o.landmarkId));
+    for (const kf of kfs) kf.observations = kf.observations.filter((o) => !orphan.has(o.landmarkId));
     // Perturb L and, consistently, every landmark that references it: the
     // sub-map built from L is off by ΔT (0.5°, 0.5% of the depth ≈ 5 px, under
     // the 10 px gross-outlier gate so L's other observations still pull it back).

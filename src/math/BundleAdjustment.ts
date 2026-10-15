@@ -259,6 +259,11 @@ export function bundleAdjust(problem: BAProblem, opts: BAOptions): BAResult {
     totalCost(problem, p, l, opts.huber) + priorCost(problem, p, l, startPoses, startLandmarks, prior, rv);
   let lambda = 1e-3;
   let cost = costOf(poses, landmarks);
+  // A non-finite start (a NaN / Infinity landmark, pose or observation) can
+  // never be improved — `newCost < cost` is false for every step — and the
+  // gauge step would divide by it. Leave the problem exactly as it is; the
+  // caller sees `converged: false` with 0 iterations and a non-finite error.
+  if (!Number.isFinite(cost)) return result;
   const h2 = opts.huber * opts.huber;
   let iter = 0;
   for (; iter < opts.maxIterations; iter++) {

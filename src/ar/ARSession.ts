@@ -6,7 +6,7 @@ import { approximateIntrinsics, type CameraIntrinsics } from "../camera/CameraIn
 import { ARLogger } from "../debug/Logger";
 import { FeatureRenderer } from "../debug/FeatureRenderer";
 import { PlaneRenderer } from "../debug/PlaneRenderer";
-import { viewportIntrinsics, worldToMap } from "../math/CoordinateSystem";
+import { viewportIntrinsics, worldToMap, type WorldFrame } from "../math/CoordinateSystem";
 import { ARCamera } from "../rendering/ARCamera";
 import type { ARObject } from "../rendering/ARObject";
 import { ARRenderer } from "../rendering/ARRenderer";
@@ -30,6 +30,7 @@ import type { PoseRejectCode } from "../vision/PoseValidation";
 import { wallNow, type EngineTiming } from "../worker/protocol";
 import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
 import { WorldAnchor } from "./WorldAnchor";
+import { buildWorldDiagnostics, formatWorldChange, type WorldTrackingDiagnostics, type WorldTransformChangeReason } from "./WorldDiagnostics";
 import {
   MainThreadVisionBackend,
   VisionWorkerClient,
@@ -163,6 +164,12 @@ export interface ARStats {
   backend: "worker" | "main";
   /** How the processing frame is read from the video (v16); null before the camera starts. */
   grabber: FrameGrabberKind | null;
+  /**
+   * Per-frame world-tracking record (指示書 §8): pose source / acceptance,
+   * world transform change + reason, plane and BA state of the same frame.
+   * Null before the first frame.
+   */
+  worldDiagnostics: WorldTrackingDiagnostics | null;
 }
 
 /**
@@ -255,6 +262,11 @@ export class ARSession {
   private motion: MotionDiagnostics | null = null;
   private bundleAdjustment: BundleAdjustmentOutput | null = null;
   private worldEstablished = false;
+  private worldDiagnostics: WorldTrackingDiagnostics | null = null;
+  /** World frame object of the previous frame: the anchor replaces it on every change, so identity says "changed". */
+  private prevWorldFrame: WorldFrame | null = null;
+  private prevPlaneNormal: number[] | null = null;
+  private worldChangeReason: WorldTransformChangeReason = "none";
   /** Debug visualization (feature overlay, plane grid) on/off; the engine runs either way (v7 §17–§18). */
   private debugVisualization = true;
   private planeSearch: PlaneSearchOutput | null = null;
@@ -537,6 +549,7 @@ export class ARSession {
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
       lostMs: this.world.lostDurationMs(performance.now()),
       objectVisibility: this.objectVisibility,
+      worldDiagnostics: this.worldDiagnostics,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
@@ -789,6 +802,7 @@ export class ARSession {
     this.relocalization = r.relocalization;
     this.motion = r.motion;
     this.bundleAdjustment = r.bundleAdjustment;
+    this.worldChangeReason = "none";
     if (r.bundleAdjustment.ranThisFrame) {
       const b = r.bundleAdjustment;
       // v18: the map moved under the camera; move the world frame with it so
@@ -796,6 +810,7 @@ export class ARSession {
       let anchorMoved = false;
       if (!b.rejected && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
         anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: b.correctionRotation, translation: b.correctionTranslation });
+        if (anchorMoved) this.worldChangeReason = "ba_correction";
       }
       if (this.config.debug.log) {
         const t = b.correctionTranslation;
@@ -824,6 +839,26 @@ export class ARSession {
     this.setState(r.state);
     const w0 = performance.now();
     this.updateWorld(r);
+    // 指示書 §8: the frame's world-tracking record, after every place that
+    // may change the world frame (BA correction above, create / drop in
+    // updateWorld) has run. A change without a reason is a bug (the
+    // anchor-invariance test asserts it never happens).
+    const worldNow = this.worldAnchor.frame;
+    this.worldDiagnostics = buildWorldDiagnostics({
+      frameId: r.frameId,
+      quality: r.quality,
+      mapPose: r.mapPose,
+      plane: r.plane,
+      previousPlaneNormal: this.prevPlaneNormal,
+      planeRecovery: r.planeRecovery,
+      bundleAdjustment: r.bundleAdjustment,
+      previousWorld: this.prevWorldFrame,
+      world: worldNow,
+      changeReason: this.worldChangeReason,
+    });
+    if (this.worldDiagnostics.worldTransformChanged) this.logger.info(formatWorldChange(this.worldDiagnostics));
+    this.prevWorldFrame = worldNow;
+    this.prevPlaneNormal = r.plane ? r.plane.normal : null;
     const w1 = performance.now();
     if (this.syncActive) this.presentFrame(r.frameId);
     const w2 = performance.now();
@@ -1014,6 +1049,7 @@ export class ARSession {
     if (this.worldAnchor.checkMap(r.mapPose)) {
       this.world.setWorldReady(false);
       this.arCamera.resetSmoothing();
+      this.worldChangeReason = "map_reset";
       this.logger.info("world lost (map reset)");
       this.emit("worldLost");
     }
@@ -1024,6 +1060,7 @@ export class ARSession {
     const anchorPlane = r.planeAnchor ?? (r.plane?.found ? r.plane : null);
     if (!this.worldAnchor.isReady && anchorPlane && r.mapPose) {
       if (this.worldAnchor.create(anchorPlane, r.mapPose)) {
+        this.worldChangeReason = "created";
         const scale = this.worldAnchor.frame!.scale;
         const area = r.plane?.areaEstimate ?? 0;
         const extent = Math.max(0.4, Math.min(3, Math.sqrt(Math.max(area, 1e-6)) * scale * 1.5));

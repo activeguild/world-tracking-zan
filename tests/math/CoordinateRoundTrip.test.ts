@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { cameraPoseToThree, threePoseToCamera, worldFromPlane } from "../../src/math/CoordinateSystem";
+import { cameraPoseToThree, mapDirToWorld, mapToWorld, threePoseToCamera, worldFromPlane, worldToMap } from "../../src/math/CoordinateSystem";
 import { mat3Identity } from "../../src/math/Matrix";
-import { rotationAxisAngle, rotationDistance, type RigidTransform } from "../../src/math/Pose";
+import { cameraCenterOf, rotationAxisAngle, rotationDistance, type RigidTransform } from "../../src/math/Pose";
 import { createRng } from "../../src/vision/OutlierRejection";
 import { poseFromCenter } from "../helpers/scene";
 
@@ -36,6 +36,32 @@ describe("CoordinateSystem round trip (v2 §19)", () => {
     // Forward (CV +Z) is world −Z: moving forward decreases world Z.
     const c = cameraPoseToThree(w, poseFromCenter(mat3Identity(), [0, 0, 0.3]));
     expect(c.position[2] - a.position[2]).toBeCloseTo(-0.3 * 0.5, 12);
+  });
+
+  it("Test 4 (指示書 §4.3): one convention — X_cam = R X_map + t; the Three camera sits at the CV camera centre and looks along CV +Z; map ↔ world round trips are exact", () => {
+    const rng = createRng(7);
+    for (let i = 0; i < 100; i++) {
+      const n = [rng() - 0.5, -(0.5 + rng()), rng() - 0.5];
+      const w = worldFromPlane(n, [rng(), 1 + rng(), rng() * 2], identity, 0.2 + rng());
+      const axis = [rng() - 0.5, rng() - 0.5, rng() - 0.5];
+      const pose = poseFromCenter(rotationAxisAngle(axis, (rng() - 0.5) * 2), [rng() - 0.5, rng() - 0.5, rng() - 0.5]);
+      const t = cameraPoseToThree(w, pose);
+      // Position: the world point of the camera centre C = −Rᵀ t.
+      const c = mapToWorld(w, cameraCenterOf(pose));
+      for (let a = 0; a < 3; a++) expect(t.position[a]).toBeCloseTo(c[a], 10);
+      // Orientation: the Three camera looks along its −Z, which is CV +Z (third row of R) in world.
+      const [x, y, z, q] = t.quaternion;
+      const lookThree = [-(2 * (x * z + y * q)), -(2 * (y * z - x * q)), -(1 - 2 * (x * x + y * y))];
+      const r = pose.rotation;
+      const lookCv = mapDirToWorld(w, [r[6], r[7], r[8]]);
+      for (let a = 0; a < 3; a++) expect(lookThree[a]).toBeCloseTo(lookCv[a], 10);
+      // Points: map → world → map and world → map → world are exact.
+      const p = [rng() * 2 - 1, rng() * 2 - 1, rng() * 2 - 1];
+      const back = worldToMap(w, mapToWorld(w, p));
+      for (let a = 0; a < 3; a++) expect(back[a]).toBeCloseTo(p[a], 12);
+      const pw = mapToWorld(w, worldToMap(w, p));
+      for (let a = 0; a < 3; a++) expect(pw[a]).toBeCloseTo(p[a], 12);
+    }
   });
 
   it("Test 3: pose → Three → pose round trip error < 1e-6 for random poses and planes", () => {

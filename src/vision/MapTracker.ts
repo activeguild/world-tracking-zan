@@ -1,6 +1,7 @@
 import type { LandmarkConfig } from "../ar/ARConfig";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
+import { bundleAdjust, type BAObservation } from "../math/BundleAdjustment";
 import { refinePosePnP } from "../math/PnP";
 import { cameraCenterOf, composeTransforms, invertTransform, rotationDistance, type RigidTransform } from "../math/Pose";
 import {
@@ -233,6 +234,14 @@ export class MapTracker {
   private relinkSnapSum = 0;
   private relinkFarSum = 0;
   private purgedTotal = 0;
+  /**
+   * What the two-view refinement of the last initialization did (指示書
+   * §6–§7): mean reprojection error before / after (px), how far it moved
+   * the init pose from the essential-matrix estimate, and whether its
+   * result was used. Null until a map was initialized or with the
+   * refinement off.
+   */
+  lastInitRefinement: { errorBeforePx: number; errorAfterPx: number; iterations: number; converged: boolean; rotationDeg: number; directionDeg: number; applied: boolean } | null = null;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -362,7 +371,8 @@ export class MapTracker {
     if (rel.parallaxPx < cfg.initMinParallaxPx) return false;
     if (rel.translationConfidence < cfg.initMinTranslationConfidence) return false;
 
-    const pose: RigidTransform = { rotation: rel.rotation, translation: rel.translationDirection };
+    // A copy: the two-view refinement below edits it in place.
+    const pose: RigidTransform = { rotation: Float64Array.from(rel.rotation), translation: Float64Array.from(rel.translationDirection) };
     const refTracks = tracks.filter((t) => t.refFrame === refFrameId);
     if (refTracks.length !== rel.inlierMask.length) return false;
     const f = (k.fx + k.fy) / 2;
@@ -384,12 +394,62 @@ export class MapTracker {
     }
     if (created.length < cfg.initMinLandmarks) return false;
 
+    // Two-view bundle adjustment of the initialization (指示書 §6–§7): the
+    // essential-matrix pose is a closed-form estimate from a RANSAC subset
+    // with the depths triangulated from it; on a floor-dominant view with
+    // yaw and forward motion its translation direction was 2.3° off, which
+    // shows up as a laterally graded depth distortion of the first map and
+    // a map scale that PnP reads differently from every viewpoint. Refine
+    // the init pose and all landmarks jointly against every inlier
+    // correspondence; the reference pose (map origin) stays fixed and the
+    // median depth is the scale gauge. The result replaces the estimate only
+    // when it is finite and lowered the error.
+    this.lastInitRefinement = null;
+    if (cfg.initRefineWithBA) {
+      const nL = created.length;
+      const landmarks = new Float64Array(nL * 3);
+      const observations: BAObservation[] = [];
+      for (let i = 0; i < nL; i++) {
+        const { track: t, p } = created[i];
+        landmarks.set(p, i * 3);
+        observations.push({ keyframe: 0, landmark: i, x: (t.refX - k.cx) / k.fx, y: (t.refY - k.cy) / k.fy });
+        observations.push({ keyframe: 1, landmark: i, x: (t.x - k.cx) / k.fx, y: (t.y - k.cy) / k.fy });
+      }
+      const refined: RigidTransform = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
+      const res = bundleAdjust(
+        { keyframes: [{ pose: identity(), fixed: true }, { pose: refined, fixed: false }], landmarks, landmarkCount: nL, observations },
+        { huber: cfg.pnpHuberPx / f, maxIterations: 20, epsilon: 1e-9, minRelativeGain: 1e-4 },
+      );
+      let finite = Number.isFinite(res.errorAfter);
+      for (let i = 0; finite && i < landmarks.length; i++) if (!Number.isFinite(landmarks[i])) finite = false;
+      for (let i = 0; finite && i < 9; i++) if (!Number.isFinite(refined.rotation[i])) finite = false;
+      for (let i = 0; finite && i < 3; i++) if (!Number.isFinite(refined.translation[i])) finite = false;
+      const c0 = cameraCenterOf(pose), c1 = cameraCenterOf(refined);
+      const n0 = Math.hypot(c0[0], c0[1], c0[2]), n1 = Math.hypot(c1[0], c1[1], c1[2]);
+      const directionDeg = n0 > 1e-12 && n1 > 1e-12 ? (Math.acos(Math.max(-1, Math.min(1, (c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2]) / (n0 * n1)))) * 180) / Math.PI : 0;
+      const applied = finite && res.errorAfter < res.errorBefore;
+      this.lastInitRefinement = {
+        errorBeforePx: res.errorBefore * f,
+        errorAfterPx: res.errorAfter * f,
+        iterations: res.iterations,
+        converged: res.converged,
+        rotationDeg: (rotationDistance(pose.rotation, refined.rotation) * 180) / Math.PI,
+        directionDeg,
+        applied,
+      };
+      if (applied) {
+        pose.rotation.set(refined.rotation);
+        pose.translation.set(refined.translation);
+        for (let i = 0; i < nL; i++) created[i].p.set(landmarks.subarray(i * 3, i * 3 + 3));
+      }
+    }
+
     this.map.clear();
     this.purgedTotal = 0;
     this.lastReanchor = null;
     this._initialized = true;
     this._mapFrameId = refFrameId;
-    this._pose = { rotation: Float64Array.from(rel.rotation), translation: Float64Array.from(rel.translationDirection) };
+    this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
     this._framesSinceTracked = 0;
     const refPose = identity();
     for (const { track, p } of created) {

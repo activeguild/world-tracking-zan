@@ -36,6 +36,15 @@ describe("validatePoseCandidate", () => {
     expect(v.rejection?.limit).toBe(5);
   });
 
+  it("rejects a non-finite candidate as invalid_pose before any continuity check (指示書 §5.2)", () => {
+    const nan = poseFromCenter(mat3Identity(), [NaN, 0, 0]);
+    const v = validatePoseCandidate(nan, ref, limits, "map");
+    expect(v.accepted).toBe(false);
+    expect(v.rejection?.code).toBe("invalid_pose");
+    const inf = poseFromCenter(mat3Identity(), [0, Infinity, 0]);
+    expect(validatePoseCandidate(inf, ref, limits, "plane").rejection?.code).toBe("invalid_pose");
+  });
+
   it("the same check between two candidates reports a disagreement, not a jump (v4 §8 C ≠ B)", () => {
     const v = validatePoseCandidate(poseFromCenter(mat3Identity(), [0.3, 0, 0]), ref, limits, "plane vs map", true);
     expect(v.accepted).toBe(false);

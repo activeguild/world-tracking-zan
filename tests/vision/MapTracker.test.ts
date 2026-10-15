@@ -251,12 +251,14 @@ describe("MapTracker", () => {
       }
     }
     // Capped: the limit stops growing once 1 + 0.1·frames reaches the cap
-    // (the base — the median landmark depth — wobbles by < 1% between frames).
+    // (the base — max(8 % of the median landmark depth, 3 × the last move) —
+    // wobbles by a few % between frames).
     const capAt = Math.ceil((cfg.jumpRejectMaxLostGrowth - 1) / cfg.jumpRejectLostGrowthPerFrame);
     expect(limits[capAt + 5] / limits[capAt]).toBeCloseTo(1, 1);
     expect(limits[44] / limits[capAt]).toBeCloseTo(1, 1);
     // The first lost frame is gated with growth 1 (the reference pose was tracked one frame ago).
-    expect(limits[capAt] / limits[0]).toBeCloseTo(cfg.jumpRejectMaxLostGrowth, 1);
+    expect(limits[capAt] / limits[0]).toBeGreaterThan(cfg.jumpRejectMaxLostGrowth * 0.9);
+    expect(limits[capAt] / limits[0]).toBeLessThan(cfg.jumpRejectMaxLostGrowth * 1.1);
 
     // Long loss: with only a few links the required inliers rise to
     // minRecoveryInliersLong (insufficient_inliers names that limit).
