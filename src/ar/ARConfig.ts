@@ -180,6 +180,19 @@ export interface LandmarkConfig {
   initMinTranslationConfidence: number;
   /** Landmarks that must triangulate well for the initialization to be accepted. */
   initMinLandmarks: number;
+  /**
+   * 修正指示書「空間固定性」§6–§7: refine the two-view initialization by a
+   * bundle adjustment of the two views (reference fixed, init pose free,
+   * all triangulated landmarks) before the map is created. The essential
+   * matrix alone left a 2.3° translation-direction error on a floor-dominant
+   * scene with yaw and forward motion, which bakes a laterally graded depth
+   * distortion (1.4 → 6 % across the image) into the first map; PnP against
+   * such a map reads a different scale from every viewpoint (3–4 % along the
+   * first slide), and every later landmark generation inherits it. The
+   * refinement brings the direction error to the tracking-noise floor.
+   * `?initba=0` in the demo turns it off for A/B.
+   */
+  initRefineWithBA: boolean;
   /** Minimum ray parallax angle (degrees) for a triangulated point. */
   minTriangulationAngleDeg: number;
   /** Maximum reprojection error (px, both views summed) for a triangulated point. */
@@ -292,6 +305,46 @@ export interface LandmarkConfig {
    * of leaving PnP without observations.
    */
   reassociateRadiusPx: number;
+  /**
+   * v20 (Android recording 28): confirm every re-association against a
+   * stored keyframe observation of the landmark — the keyframe patch is
+   * tracked by LK (forward-backward checked, the relocalization tracker)
+   * into the current frame starting at the candidate track, the link is
+   * made only when it lands within the radius, and the track is snapped to
+   * that keyframe-consistent position. A re-detected corner 1–2 px beside
+   * the landmark's true projection otherwise carries that offset for as
+   * long as the track lives (relinked tracks showed 0.5–1.5 px more PnP
+   * error than native ones and were the majority after 20 s). Landmarks no
+   * keyframe observes are linked by distance alone (`relinkRaw`).
+   * `?relinkverify=0` in the demo turns the check off for A/B.
+   */
+  relinkVerify: boolean;
+  /**
+   * v21 (Android recording 31): remove landmarks that a stored keyframe
+   * contradicts. Two sources, one criterion
+   * (`bundleAdjustment.maxObservationErrorPx`): a keyframe observation the
+   * bundle adjustment leaves out as a gross outlier, and a re-association
+   * candidate whose keyframe patch lands that far from the landmark's
+   * projection (`relink ✗ far@9–15px` on device). Until now such landmarks
+   * were only skipped per run / per frame and stayed in the map, where they
+   * keep producing relink candidates and pull PnP towards a compromise.
+   * The track observing a purged landmark re-anchors and the corner is
+   * triangulated again from the current poses. `?purge=0` for A/B.
+   */
+  purgeInconsistent: boolean;
+  /**
+   * v24 re-anchor probe (diagnostics only, Android recording 35: the PnP
+   * residual is isotropic and not a depth error, so it is either on the live
+   * tracks or between the map and the corners as seen now). Every
+   * `reanchorProbeEveryFrames` frames (0 = off) up to `reanchorProbeMaxTracks`
+   * PnP inliers are re-observed by LK from the oldest keyframe observation of
+   * their landmark, and the residual of the live track is compared with the
+   * residual of where the keyframe patch landed (`ReanchorStats`, HUD
+   * `Reanc`). Nothing is written back. Needs `relinkVerify`.
+   * `?reanchor=0` in the demo turns it off.
+   */
+  reanchorProbeEveryFrames: number;
+  reanchorProbeMaxTracks: number;
   /** Also re-associate with the propagated pose while lost for at most this many frames. */
   reassociateMaxLostFrames: number;
   /**
@@ -717,9 +770,43 @@ export interface BundleAdjustmentConfig {
    * against a 3° prior) must not be written back. A keyframe that causes
    * this `maxPoseJumpStrikes` runs in a row is left out of later solves
    * (its observations disagree with the map). 0 disables the guard.
+   * Ratio 1 (Android recording 30): accepted runs moved the newest keyframe
+   * by 5.1–5.3° / 0.6–0.8 u (1.8 σ, under the earlier 2 σ limit) although
+   * its PnP pose had a 2 px residual over 100+ inliers — a 5° pose error
+   * would show as tens of pixels, so those solutions ran along the
+   * pitch–height ambiguity of a near-planar scene and tilted the world.
    */
   maxPoseJumpPriorRatio: number;
   maxPoseJumpStrikes: number;
+  /**
+   * v20: the solve stops once an accepted iteration lowers the cost by less
+   * than this fraction (0.01 = 1 % of the robust cost ≈ 0.5 % of the RMS
+   * error). The earlier criteria (update norm < 1e-7 map units, relative
+   * gain < 1e-6) are never met on real observations, so every on-device run
+   * hit the iteration cap (`it 15!`) while the last ten iterations changed
+   * the error by thousandths of a pixel. 0 keeps the strict criteria only.
+   */
+  minIterationGain: number;
+  /**
+   * 改善指示書 Phase 2: which rigid motion the session applies to the world
+   * anchor after an accepted run. `local` (default) = a robust rigid fit of
+   * the adjusted landmarks' old → new positions weighted around the world
+   * origin and the placed objects (`VisionInput.anchorPoints`, Gaussian
+   * radius `anchorFitDepthRatio` × median depth): objects stay attached to
+   * the floor landmarks next to them, whether the run restored a drifted
+   * map rigidly or refined it non-rigidly. `keyframe` = the newest
+   * keyframe's own pose correction (v18): no hop at the BA frame by
+   * construction, but it also contains that keyframe's tracking-pose error,
+   * which the object then keeps (a growing 1–2.6 px in the synthetic
+   * session). `none` = the anchor never moves (off by the whole correction
+   * when the map is pulled back toward the first keyframe). Falls back to
+   * `keyframe` when no anchor points are known or fewer than
+   * `anchorFitMinLandmarks` landmarks carry weight. The canonical pose is
+   * always re-expressed with the keyframe correction. `?anchor=local|kf|none`.
+   */
+  anchorCorrection: "local" | "keyframe" | "none";
+  anchorFitDepthRatio: number;
+  anchorFitMinLandmarks: number;
 }
 
 export interface ARConfig {
@@ -814,6 +901,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     initMinParallaxPx: 30,
     initMinTranslationConfidence: 0.5,
     initMinLandmarks: 30,
+    initRefineWithBA: true,
     minTriangulationAngleDeg: 1.0,
     // The map is fixed once built (no depth refinement), so landmarks must
     // be well conditioned when created: 20 px of parallax from the anchor
@@ -854,6 +942,11 @@ export const DEFAULT_CONFIG: ARConfig = {
     // FAST re-detects a corner within ~1 px; a tight radius keeps chance
     // matches on unrelated texture rare.
     reassociateRadiusPx: 2.5,
+    relinkVerify: true,
+    purgeInconsistent: true,
+    // Diagnostics cadence: 40 LK points every 5 frames, well under 1 ms.
+    reanchorProbeEveryFrames: 5,
+    reanchorProbeMaxTracks: 40,
     reassociateMaxLostFrames: 90,
     minRecoveryInliers: 24,
     recoverySeedInliers: 4,
@@ -994,8 +1087,12 @@ export const DEFAULT_CONFIG: ARConfig = {
     maxLandmarkShiftRatio: 0.2,
     maxShiftedFraction: 0.1,
     minGainFraction: 0.15,
-    maxPoseJumpPriorRatio: 2,
+    maxPoseJumpPriorRatio: 1,
     maxPoseJumpStrikes: 2,
+    minIterationGain: 0.01,
+    anchorCorrection: "local",
+    anchorFitDepthRatio: 0.05,
+    anchorFitMinLandmarks: 10,
   },
   state: {
     minTrackedForTracking: 40,

@@ -213,7 +213,7 @@ describe("PnP reprojection breakdown (v16 diagnostics)", () => {
       if (!o.mapPose || o.mapPose.framesSinceTracked !== 0) continue;
       const b = o.mapPose.reprojection;
       // The split covers exactly the PnP inlier set, every frame.
-      expect(b.nativeCount + b.relinkCount + b.relocCount).toBe(b.centerCount + b.edgeCount);
+      expect(b.nativeCount + b.relinkCount + b.relinkRawCount + b.relocCount).toBe(b.centerCount + b.edgeCount);
       if (b.relinkCount) relinkSeen++;
       if (f < 100) expect(b.relinkCount).toBe(0);
       last = b;
@@ -221,7 +221,7 @@ describe("PnP reprojection breakdown (v16 diagnostics)", () => {
     expect(last).not.toBeNull();
     expect(cut).toBeGreaterThan(40);
     // Every landmark-linked track carries its link source.
-    for (const t of engine.tracksForTests()) if (t.landmarkId >= 0) expect(t.linkSource === "native" || t.linkSource === "relink" || t.linkSource === "reloc").toBe(true);
+    for (const t of engine.tracksForTests()) if (t.landmarkId >= 0) expect(["native", "relink", "relinkRaw", "reloc"]).toContain(t.linkSource);
     // The cut links come back as relinks; on a consistent synthetic floor the re-linked
     // group (same corners) is not worse than the native one.
     expect(relinkSeen).toBeGreaterThan(50);

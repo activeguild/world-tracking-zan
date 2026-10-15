@@ -6,6 +6,7 @@ import { FeatureTracker, TrackStatus } from "./FeatureTracker";
 import type { ImagePyramid } from "./ImagePyramid";
 import { clonePyramid, type CoarseImage, downsampleToCoarse, type Keyframe, type KeyframeObservation } from "./Keyframe";
 import type { LandmarkMap } from "./LandmarkMap";
+import type { RelinkCandidate, RelinkKeyframeChoice, RelinkVerdict } from "./MapTracker";
 import { poseDelta } from "./PoseValidation";
 import { emptyLkStatusCounts, type LkFailureReason, lkFailureReason, type LkStatusCounts, type RelocalizationSearchStage } from "./RelocalizationSchedule";
 import type { Track } from "./types";
@@ -636,6 +637,7 @@ export class Relocalizer {
     this.retry.clear();
     this.prepared = null;
     this.referencedCache = null;
+    this.observationIndex = null;
   }
 
   /** Ranking prepared on a tracked frame, if any (diagnostics). */
@@ -732,6 +734,7 @@ export class Relocalizer {
     this.retry.delete(victim.id);
     this.evictedCount++;
     this.referencedCache = null;
+    this.observationIndex = null;
     return victim;
   }
 
@@ -758,6 +761,112 @@ export class Relocalizer {
       this.referencedCache = s;
     }
     return this.referencedCache;
+  }
+
+  private observationIndex: Map<number, { kf: Keyframe; x: number; y: number }[]> | null = null;
+
+  /** Keyframe observations by landmark id; cached until the keyframe set changes. */
+  private observationsOf(landmarkId: number): { kf: Keyframe; x: number; y: number }[] | undefined {
+    if (!this.observationIndex) {
+      const idx = new Map<number, { kf: Keyframe; x: number; y: number }[]>();
+      for (const kf of this.keyframes) {
+        for (const o of kf.observations) {
+          const list = idx.get(o.landmarkId);
+          const entry = { kf, x: o.x, y: o.y };
+          if (list) list.push(entry);
+          else idx.set(o.landmarkId, [entry]);
+        }
+      }
+      this.observationIndex = idx;
+    }
+    return this.observationIndex.get(landmarkId);
+  }
+
+  /**
+   * Keyframe check of re-association candidates (v20, Android recording 28:
+   * relinked tracks carried 0.5–1.5 px more PnP error than native ones).
+   * For each candidate the observation of its landmark in the stored
+   * keyframe whose view is closest to `pose` is tracked by LK (the
+   * relocalization tracker: forward-backward checked) into `current`,
+   * starting at the candidate track. `verified` when the keyframe patch
+   * lands within `radiusPx` of the track — the verdict carries that
+   * keyframe-consistent position; `rejected` when LK fails or lands farther
+   * away (a neighbouring corner, a changed scene); `unverified` when no
+   * stored keyframe observes the landmark. Candidates are grouped by
+   * keyframe so each keyframe pyramid is tracked once. `choice` picks the
+   * keyframe when several observe a landmark: nearest in rotation (the
+   * relink check) or the oldest (the v24 re-anchor probe).
+   */
+  verifyRelinks(
+    candidates: RelinkCandidate[],
+    current: ImagePyramid,
+    pose: RigidTransform,
+    radiusPx: number,
+    choice: RelinkKeyframeChoice = "nearest",
+  ): RelinkVerdict[] {
+    const verdicts: RelinkVerdict[] = candidates.map((c) => ({ status: "unverified", x: c.x, y: c.y }));
+    if (this.keyframes.length === 0 || candidates.length === 0) return verdicts;
+    const groups = new Map<Keyframe, { index: number; kx: number; ky: number }[]>();
+    for (let i = 0; i < candidates.length; i++) {
+      const obs = this.observationsOf(candidates[i].landmarkId);
+      if (!obs || obs.length === 0) continue;
+      let best = obs[0];
+      if (obs.length > 1) {
+        if (choice === "oldest") {
+          for (const o of obs) if (o.kf.frameId < best.kf.frameId) best = o;
+        } else {
+          let bestD = Infinity;
+          for (const o of obs) {
+            const d = rotationDistance(o.kf.pose.rotation, pose.rotation);
+            if (d < bestD) {
+              bestD = d;
+              best = o;
+            }
+          }
+        }
+      }
+      const list = groups.get(best.kf);
+      const entry = { index: i, kx: best.x, ky: best.y };
+      if (list) list.push(entry);
+      else groups.set(best.kf, [entry]);
+    }
+    for (const [kf, list] of groups) {
+      const n = list.length;
+      const pts = new Float32Array(n * 2);
+      const guesses = new Float32Array(n * 2);
+      for (let j = 0; j < n; j++) {
+        pts[j * 2] = list[j].kx;
+        pts[j * 2 + 1] = list[j].ky;
+        guesses[j * 2] = candidates[list[j].index].x;
+        guesses[j * 2 + 1] = candidates[list[j].index].y;
+      }
+      // The tracker's displacement gate (from the guess = the candidate
+      // track) is left wide so that a patch landing beyond the radius still
+      // reports where it landed; the radius itself is applied here.
+      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, radiusPx * 4);
+      for (let j = 0; j < n; j++) {
+        const v = verdicts[list[j].index];
+        v.keyframeFrameId = kf.frameId;
+        const st = res.status[j];
+        if (st === TrackStatus.OK || st === TrackStatus.TOO_FAR) {
+          const lx = res.positions[j * 2], ly = res.positions[j * 2 + 1];
+          const d = Math.hypot(lx - guesses[j * 2], ly - guesses[j * 2 + 1]);
+          if (st === TrackStatus.OK && d <= radiusPx) {
+            v.status = "verified";
+            v.x = lx;
+            v.y = ly;
+          } else {
+            v.status = "rejected";
+            v.reason = "too_far";
+            v.landedPx = d;
+          }
+        } else {
+          v.status = "rejected";
+          v.reason = "lk_failed";
+        }
+      }
+    }
+    return verdicts;
   }
 
   /** Observations of a keyframe whose landmarks are still in the map. */
@@ -804,6 +913,7 @@ export class Relocalizer {
     };
     this.keyframes.push(kf);
     this.referencedCache = null;
+    this.observationIndex = null;
     this.evictRedundant(map, sceneDepth);
     this.lastKeyframePose = kf.pose;
     this.lastKeyframeFrame = frameId;

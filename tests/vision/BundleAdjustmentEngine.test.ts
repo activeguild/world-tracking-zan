@@ -236,30 +236,27 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(engine.keyframes.length).toBeGreaterThanOrEqual(3);
     const baseline = meanErr(outs, 60, 80);
     const kfs = engine.keyframes;
-    // The free keyframe with the most landmarks that reference it and that no
-    // other keyframe observes.
-    const exclusiveOf = (L: (typeof kfs)[number]) => {
-      const seenElsewhere = new Set<number>();
-      for (const kf of kfs) if (kf !== L) for (const o of kf.observations) seenElsewhere.add(o.landmarkId);
-      return [...engine.landmarkMap.values()].filter((lm) => lm.refKeyframeId === L.id && !seenElsewhere.has(lm.id));
-    };
+    // The free keyframe with the most landmarks that reference it.
+    const referencing = (L: (typeof kfs)[number]) => [...engine.landmarkMap.values()].filter((lm) => lm.refKeyframeId === L.id);
     let L = kfs[1];
-    let refL = exclusiveOf(L);
+    let refL = referencing(L);
     for (let i = 2; i < kfs.length; i++) {
-      const cand = exclusiveOf(kfs[i]);
+      const cand = referencing(kfs[i]);
       if (cand.length > refL.length) {
         L = kfs[i];
         refL = cand;
       }
     }
     expect(refL.length).toBeGreaterThan(8);
-    // Half of them lose their keyframe observation: no keyframe observes them
-    // any more, so the solve cannot touch them — propagation must.
+    // Half of them lose every keyframe observation (orphans): no keyframe
+    // observes them any more, so the solve cannot touch them — propagation
+    // must. (Removing the observations from every keyframe makes the test
+    // independent of which keyframes happened to observe them.)
     const orphan = new Set<number>();
     refL.forEach((lm, i) => {
       if (i % 2 === 0) orphan.add(lm.id);
     });
-    L.observations = L.observations.filter((o) => !orphan.has(o.landmarkId));
+    for (const kf of kfs) kf.observations = kf.observations.filter((o) => !orphan.has(o.landmarkId));
     // Perturb L and, consistently, every landmark that references it: the
     // sub-map built from L is off by ΔT (0.5°, 0.5% of the depth ≈ 5 px, under
     // the 10 px gross-outlier gate so L's other observations still pull it back).
@@ -341,7 +338,18 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     L.pose.translation.set(tPert.translation);
     const before = new Map<number, Float64Array>();
     for (const lm of engine.landmarkMap.values()) before.set(lm.id, Float64Array.from(lm.position));
-    // Run 1: rejected, blamed on L, nothing written back.
+    // v21: L also contradicts 10 landmarks by 15 px (a keyframe made during
+    // fast motion, recording 32). On a pose-jump rejection the keyframe is
+    // the suspect, so these must not be purged.
+    const contradicted: number[] = [];
+    for (const o of L.observations) {
+      if (!engine.landmarkMap.get(o.landmarkId)) continue;
+      o.x += 15;
+      contradicted.push(o.landmarkId);
+      if (contradicted.length === 10) break;
+    }
+    expect(contradicted.length).toBe(10);
+    // Run 1: rejected, blamed on L, nothing written back, nothing purged.
     expect(engine.runBundleAdjustment(TP_K)).toBe(true);
     let ba = engine.bundleAdjustment;
     expect(ba.rejected).toBe(true);
@@ -349,6 +357,9 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(ba.jumpKeyframeId).toBe(L.id);
     expect(ba.jumpRotationDeg).toBeGreaterThan(0.3);
     expect(ba.excludedKeyframes).toBe(0);
+    expect(ba.outliers).toBeGreaterThanOrEqual(10);
+    expect(ba.purged).toBe(0);
+    for (const id of contradicted) expect(engine.landmarkMap.get(id)).toBeDefined();
     expect((rotationDistance(L.pose.rotation, tPert.rotation) * 180) / Math.PI).toBeLessThan(1e-4);
     for (const lm of engine.landmarkMap.values()) {
       const p0 = before.get(lm.id)!;
@@ -367,6 +378,9 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     expect(ba.rejectReason).not.toBe("pose_jump");
     expect(ba.keyframes).toBe(kfs.length - 1);
     expect(ba.excludedKeyframes).toBe(1);
+    // L is out of the solve, so its contradictions are not tested either.
+    expect(ba.purged).toBe(0);
+    for (const id of contradicted) expect(engine.landmarkMap.get(id)).toBeDefined();
     expect((rotationDistance(L.pose.rotation, tPert.rotation) * 180) / Math.PI).toBeLessThan(1e-4);
     console.log(`[ba-engine] v19 pose jump: KF${ba.jumpKeyframeId === -1 ? L.id : ba.jumpKeyframeId} struck out after 2 strikes; run 3 ${ba.rejected ? `rejected (${ba.rejectReason})` : "accepted"} over ${ba.keyframes} keyframes`);
     // With the default ratio (2 × prior) the same perturbation is not a jump.

@@ -58,7 +58,83 @@ jump; a keyframe that does this twice in a row is left out of later solves
 row splits the PnP error by how each track got its landmark (triangulated
 from the track itself / re-associated after a re-detection / injected by
 the relocalizer): a re-linked group clearly worse than the native one is
-association error, not map error.
+association error, not map error. On Android it was (×1.2–1.9, recording
+28), so a re-association is now confirmed against a stored keyframe: the
+landmark's keyframe observation is tracked by LK into the current frame
+starting at the candidate track, the link is made only when it lands within
+the radius, and the track is snapped onto that keyframe-consistent position
+(`relink 3/5 ✗2 raw 1 snap 0.8px` on the PnP row; `raw` = linked without a
+keyframe to check against). `?relinkverify=0` turns the check off for A/B.
+The BA stops once an iteration gains less than 1 % of the cost, so `it`
+reads as a real iteration count instead of the cap. After an accepted run
+the world anchor follows the landmarks next to the placed objects
+(`VisionInput.anchorPoints`, sent by the session each frame): the rotation
+of the newest keyframe's correction plus a robust mean of the nearby
+landmarks' displacement as translation, not the keyframe's own pose
+correction, which also carries that frame's tracking error that the object
+then kept (a growing 2.4 px in the synthetic session vs 0.9 px; a full
+rigid fit on a dozen clustered landmarks gave 2–7° rotations on device, so
+only the translation is local). `?anchor=kf|none` for A/B, HUD `corr …
+(kf … local … nN)`.
+
+Landmarks a stored keyframe contradicts are removed from the map (v21):
+a keyframe observation the BA leaves out as a gross outlier (> 10 px,
+`maxObservationErrorPx`), or a re-association candidate whose keyframe patch
+lands that far from the landmark's projection. On device both were the same
+population (`+22–32 out` per BA run, `relink ✗ far 7–14@9–15px` every
+frame): such a landmark used to stay in the map, come back as a relink
+candidate frame after frame and pull PnP towards a compromise. The track
+observing a purged landmark re-anchors and the corner is triangulated again
+from current poses. HUD: `purge N` on the BA and PnP rows, `LM … purged N`
+cumulative; `?purge=0` for A/B.
+
+The PnP residual *vectors* are fitted with an affine field each frame (v22,
+`ResidualField.ts`, diagnostics only): a common shift (pose bias), a radial
+scale and shear (focal length, fx ≠ fy, principal point), a rotation (roll)
+and the random remainder (LK precision). HUD `Res mean (…)px scale …% rot …°
+rms … rand … sys …%` (`sys` = share the field explains; above half it is a
+model error, not noise) and `ResG adj (…) none (…) Δ | plane (…) other (…) Δ`
+(two parts of the map pulling the pose apart). On a planar scene a focal or
+lens error is absorbed by the map while sliding and shows in the field only
+while tilting (synthetic 10 % focal error: `sys` 28 % max, 0.5 px at the edge,
+floor / wall gap 0.8 px). The random part is further split along / across
+each landmark's parallax direction (v23, `ResP ∥ … ⊥ … ×…`): depth errors
+line the residuals up with that direction (×5 in synthetic tests), isotropic
+noise reads ×1. On device it read ×1.0–1.4 with the across component as
+large as the along one — not a depth error.
+
+The re-anchor probe (v24, diagnostics only, `Reanc` row) then asks whether
+the residual sits on the live tracks: every 5 frames up to 40 PnP inliers
+are re-observed by LK from the *oldest* keyframe observation of their
+landmark (the same forward-backward checked tracker as the relink check,
+started at the live track), and the residual of the live track is compared
+with the residual of where the keyframe patch landed, against the same
+projections; PnP is also re-solved on the sample with either set
+(`Reanc trk 2.3 → kf 1.0px ×0.43 (n 34/40) snap 1.8px … PnP 2.2 → 1.1px`).
+A landed residual well below the track residual with a 1–3 px snap means the
+tracks slid off the corners the map was built from (periodic re-anchoring is
+the fix); equal residuals mean the tracks are where the keyframe patches are
+and the error is between the map and the corner as it looks from this view.
+Nothing is written back. `?reanchor=0` turns it off.
+
+The world-fixity pass (修正指示書「空間固定性」) added a per-frame world
+record (`ARStats.worldDiagnostics`, HUD `Wdiag`): which pose was used and
+whether it passed the gate, whether the world transform changed and why
+(`created` / `ba_correction` / `map_reset` — anything else is a bug), the
+plane normal delta and the BA result of the same frame. The anchor-invariance
+scenario (init → plane → placement → yaw → pitch → return → translation → BA
+→ loss → relocalization) found the first real drift source in the synthetic
+scene: the essential-matrix initialization was 2.3° off in translation
+direction on a floor-dominant view with yaw and forward motion, which bakes a
+laterally graded 1–6 % depth distortion into the first map; PnP then reads a
+different scale from every viewpoint (+4 % along the first slide, with or
+without BA, even with the map frozen) and every later landmark generation
+inherits it. The initialization is now refined by a two-view bundle
+adjustment (reference fixed, init pose and all landmarks free, median depth
+as gauge): direction error 0.3°, depth ratio flat within 0.5 %, scale
+conserved within 0.3 %, placed points within 1 px through the whole scenario.
+`?initba=0` turns it off for A/B. The BA also rejects any run that produces a
+non-finite value (`invalid`) instead of silently doing nothing.
 
 ## Phase 5 — keyframes and relocalization
 

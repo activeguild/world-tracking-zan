@@ -100,7 +100,11 @@ export class FeatureTracker {
       const ny = tmp[1];
       res.residual[i] = tmp[2];
       // Displacement is measured from the initial guess so that a coarse
-      // pre-alignment (relocalization) does not count against the gate.
+      // pre-alignment (relocalization) does not count against the gate. The
+      // landing position is kept for a TOO_FAR point (diagnostics only;
+      // callers read positions only for OK points).
+      res.positions[i * 2] = nx;
+      res.positions[i * 2 + 1] = ny;
       const dx = nx - gx;
       const dy = ny - gy;
       if (dx * dx + dy * dy > maxDispSq) {

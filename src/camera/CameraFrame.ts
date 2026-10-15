@@ -16,6 +16,12 @@ export interface GrayFrame {
   intrinsics: CameraIntrinsics;
   /** Gravity direction in the camera frame at capture time, if known. */
   gravity?: number[] | null;
+  /**
+   * Map-frame points the bundle adjustment's anchor correction should be
+   * local to (world origin and placed objects; x,y,z interleaved), set by
+   * the session once the world exists (改善指示書 Phase 2).
+   */
+  anchorPoints?: number[] | null;
 }
 
 /**

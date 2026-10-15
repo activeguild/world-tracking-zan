@@ -121,6 +121,7 @@ export interface HudStats {
     landmarks: number;
     observations: number;
     outliers: number;
+    purged: number;
     shifted: number;
     rejected: boolean;
     rejectReason: string;
@@ -131,6 +132,11 @@ export interface HudStats {
     propagated: number;
     untouched: number;
     correctionTranslation: ArrayLike<number>;
+    keyframeCorrectionShift: number;
+    keyframeCorrectionDeg: number;
+    localCorrectionShift: number;
+    localCorrectionDeg: number;
+    localFitLandmarks: number;
     errorBeforePx: number;
     errorAfterPx: number;
     iterations: number;
@@ -218,8 +224,44 @@ export interface HudStats {
       nativeErrorPx: number;
       relinkCount: number;
       relinkErrorPx: number;
+      relinkRawCount: number;
+      relinkRawErrorPx: number;
       relocCount: number;
       relocErrorPx: number;
+      field: {
+        count: number;
+        meanX: number;
+        meanY: number;
+        scale: number;
+        scaleEdgePx: number;
+        rotationDeg: number;
+        shearX: number;
+        shearY: number;
+        rmsPx: number;
+        randomPx: number;
+        systematic: number;
+        parallelRmsPx: number;
+        perpRmsPx: number;
+        parallaxRatio: number;
+        parallaxCount: number;
+        depthSensitivityMedianPx: number;
+        depthErrorMedian: number;
+        depthErrorBias: number;
+        planeDepthBias: number;
+        otherDepthBias: number;
+        adjustedCount: number;
+        adjustedX: number;
+        adjustedY: number;
+        untouchedCount: number;
+        untouchedX: number;
+        untouchedY: number;
+        planeCount: number;
+        planeX: number;
+        planeY: number;
+        otherCount: number;
+        otherX: number;
+        otherY: number;
+      };
     } | null;
     cameraCenter: number[];
     framesSinceTracked: number;
@@ -246,6 +288,29 @@ export interface HudStats {
     history: string;
     /** Landmarks re-linked to tracks this frame. */
     relinked: number;
+    /** Keyframe check of this frame's re-association candidates (v20). */
+    relink?: { candidates: number; verified: number; rejected: number; unverified: number; meanSnapPx: number; rejectedTooFar: number; rejectedLk: number; meanFarPx: number; purged: number; purgedTotal: number };
+    /** Last re-anchor probe (v24 diagnostics). */
+    reanchor?: {
+      frameId: number;
+      sampled: number;
+      landed: number;
+      lkFailed: number;
+      tooFar: number;
+      noKeyframe: number;
+      trackRmsPx: number;
+      landedRmsPx: number;
+      meanSnapPx: number;
+      medianSnapPx: number;
+      improved: number;
+      keyframeAgeMedianFrames: number;
+      trackPnpErrorPx: number;
+      trackPnpInliers: number;
+      landedPnpErrorPx: number;
+      landedPnpInliers: number;
+      landedPoseDeltaTranslation: number;
+      landedPoseDeltaDeg: number;
+    } | null;
     /** Pose re-seeded by a relocalization (this frame or its monitoring window). */
     relocalized: boolean;
     /** Map PnP recovery status (v6 §10). */
@@ -309,6 +374,24 @@ export interface HudStats {
     added: number;
   } | null;
   world?: { ready: boolean; scale: number; placed: number } | null;
+  /** 指示書 §8: per-frame world-tracking record (anchor change + reason, plane normal delta, pose acceptance). */
+  worldDiag?: {
+    poseSource: string;
+    poseAccepted: boolean;
+    poseRejectReason: string | null;
+    anchorPositionDelta: number;
+    anchorRotationDeltaDeg: number;
+    worldTransformChanged: boolean;
+    worldTransformChangeReason: string;
+    planeNormalDeltaDeg: number;
+    planeAccepted: boolean;
+    planeRecoveryActive: boolean;
+    baExecuted: boolean;
+    baAccepted: boolean;
+    baRejectReason: string;
+  } | null;
+  /** 指示書「空間固定性」§7: two-view refinement of the map initialization. */
+  initRefine?: { errorBeforePx: number; errorAfterPx: number; iterations: number; converged: boolean; rotationDeg: number; directionDeg: number; applied: boolean } | null;
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
   /** Camera world position (m) once the world exists. */
@@ -436,6 +519,32 @@ export class DebugOverlay {
       rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
     }
     if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
+    // 指示書「空間固定性」§8: did the world transform change this frame, and
+    // why. Any change outside created / ba_correction / map_reset is a bug
+    // (orange). Up here because the WORLD section is below the fold once the
+    // TRACK section is long (Android recording 38).
+    if (s.worldDiag && s.world?.ready) {
+      const d = s.worldDiag;
+      const unexplained = d.worldTransformChanged && d.worldTransformChangeReason === "none";
+      rows.push(
+        row(
+          "Wdiag",
+          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}`,
+          unexplained ? "hud-warn" : undefined,
+        ),
+      );
+    }
+    // 指示書「空間固定性」§7: what the two-view refinement did to this map's initialization.
+    if (s.initRefine) {
+      const ir = s.initRefine;
+      rows.push(
+        row(
+          "Init",
+          `${ir.errorBeforePx.toFixed(2)} → ${ir.errorAfterPx.toFixed(2)}px  it ${ir.iterations}${ir.converged ? "" : "!"}  moved ${ir.rotationDeg.toFixed(2)}° / dir ${ir.directionDeg.toFixed(2)}°  ${ir.applied ? "applied" : "NOT applied"}`,
+          ir.applied ? undefined : "hud-warn",
+        ),
+      );
+    }
     // v18: the processing size / grabber / flags were only in the TIMING
     // section, below the fold of the iPhone recording — repeat them here.
     rows.push(
@@ -480,8 +589,36 @@ export class DebugOverlay {
     rows.push(section("TRACK"));
     rows.push(row("Feat", `${s.featureCount} / ${s.trackedCount} / ${s.inlierCount}`));
     if (m) {
-      const flags = `${m.relinked ? `  relink ${m.relinked}` : ""}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
+      // v20: `relink 3/5 ✗2 raw 1 snap 0.8px` = 3 of 5 candidates linked, 2
+      // rejected by the keyframe check, 1 linked without a keyframe, and the
+      // mean distance the verified tracks were snapped by.
+      const rl = m.relink;
+      const relinkText = rl && rl.candidates
+        ? `  relink ${m.relinked}/${rl.candidates}${rl.rejected ? ` ✗${rl.rejected} (far ${rl.rejectedTooFar}${rl.rejectedTooFar ? `@${rl.meanFarPx.toFixed(1)}px` : ""} lk ${rl.rejectedLk})` : ""}${rl.unverified ? ` raw ${rl.unverified}` : ""}${rl.verified ? ` snap ${rl.meanSnapPx.toFixed(1)}px` : ""}${rl.purged ? ` purge ${rl.purged}` : ""}`
+        : m.relinked ? `  relink ${m.relinked}` : "";
+      const flags = `${relinkText}${m.translationPredicted ? "  t PRED" : m.translationHeld ? "  t HELD" : ""}${m.jumpRejected ? "  JUMP" : ""}`;
       rows.push(row("PnP", `${m.pnpInliers}i ${m.reprojPx.toFixed(2)}px${flags}`, m.jumpRejected ? "hud-warn" : undefined));
+      // v24: the re-anchor probe, right under the PnP row (at the end of the
+      // breakdown it was below the fold of Android recording 36). `trk` = RMS
+      // residual of the live tracks,
+      // `kf` = of where the oldest keyframe patch landed, over the same
+      // sample and projections; `PnP` = the error PnP reaches on the sample
+      // with either set. Orange when re-anchoring halves the residual: the
+      // live tracks slid off the corners the map was built from.
+      const ra = m.reanchor;
+      if (ra && ra.sampled > 0) {
+        const ratio = ra.landed && ra.trackRmsPx > 0 ? ra.landedRmsPx / ra.trackRmsPx : 0;
+        const fails = `${ra.lkFailed ? ` lk ${ra.lkFailed}` : ""}${ra.tooFar ? ` far ${ra.tooFar}` : ""}${ra.noKeyframe ? ` nokf ${ra.noKeyframe}` : ""}`;
+        rows.push(
+          row(
+            "Reanc",
+            ra.landed
+              ? `trk ${ra.trackRmsPx.toFixed(2)} → kf ${ra.landedRmsPx.toFixed(2)}px ×${ratio.toFixed(2)} (n ${ra.landed}/${ra.sampled}${fails})  snap ${ra.meanSnapPx.toFixed(1)}px med ${ra.medianSnapPx.toFixed(1)}  better ${ra.improved}/${ra.landed}  kf age ${ra.keyframeAgeMedianFrames}f${ra.landedPnpInliers ? `  PnP ${ra.trackPnpErrorPx.toFixed(2)} → ${ra.landedPnpErrorPx.toFixed(2)}px (${ra.trackPnpInliers}/${ra.landedPnpInliers}i, Δ ${ra.landedPoseDeltaDeg.toFixed(2)}°)` : ""}`
+              : `no landing (n 0/${ra.sampled}${fails})`,
+            ra.landed >= 6 && ratio > 0 && ratio <= 0.5 ? "hud-warn" : undefined,
+          ),
+        );
+      }
       // v16: where the error sits. Edge ≫ center → focal length / lens
       // distortion (objects shift while tilting and come back); plane ≠
       // other → biased landmark depths.
@@ -529,13 +666,14 @@ export class DebugOverlay {
         // v19: by how the track got its landmark. A relink group clearly
         // worse than the native one is association error (a re-detected
         // corner linked to the wrong landmark), not map error.
-        if (rb.relinkCount || rb.relocCount) {
+        if (rb.relinkCount || rb.relinkRawCount || rb.relocCount) {
           const ratio = rb.nativeCount && rb.relinkCount && rb.nativeErrorPx > 0 ? rb.relinkErrorPx / rb.nativeErrorPx : 0;
+          const rawRatio = rb.nativeCount && rb.relinkRawCount && rb.nativeErrorPx > 0 ? rb.relinkRawErrorPx / rb.nativeErrorPx : 0;
           rows.push(
             row(
               "Link",
-              `native ${rb.nativeErrorPx.toFixed(2)}px (${rb.nativeCount})  relink ${rb.relinkErrorPx.toFixed(2)} (${rb.relinkCount})  reloc ${rb.relocErrorPx.toFixed(2)} (${rb.relocCount})${ratio ? `  ×${ratio.toFixed(1)}` : ""}`,
-              ratio >= 1.5 ? "hud-warn" : undefined,
+              `native ${rb.nativeErrorPx.toFixed(2)}px (${rb.nativeCount})  relink ${rb.relinkErrorPx.toFixed(2)} (${rb.relinkCount})${ratio ? ` ×${ratio.toFixed(1)}` : ""}${rb.relinkRawCount ? `  raw ${rb.relinkRawErrorPx.toFixed(2)} (${rb.relinkRawCount})${rawRatio ? ` ×${rawRatio.toFixed(1)}` : ""}` : ""}  reloc ${rb.relocErrorPx.toFixed(2)} (${rb.relocCount})`,
+              ratio >= 1.5 || rawRatio >= 1.5 ? "hud-warn" : undefined,
             ),
           );
         }
@@ -553,6 +691,45 @@ export class DebugOverlay {
             ),
           );
         }
+        // v22: the direction of the residuals. `sys` = share of the residual
+        // energy an affine field (shift / scale / rotation / shear) explains;
+        // the rest is random (LK precision). A systematic share above half
+        // is orange: a model error, not noise. The group means tell whether
+        // two parts of the map pull the pose apart.
+        const rf = rb.field;
+        if (rf.count >= 6) {
+          const vec = (x: number, y: number) => `(${x >= 0 ? "+" : ""}${x.toFixed(1)},${y >= 0 ? "+" : ""}${y.toFixed(1)})`;
+          rows.push(
+            row(
+              "Res",
+              `mean ${vec(rf.meanX, rf.meanY)}px  scale ${(rf.scale * 100).toFixed(2)}% (${rf.scaleEdgePx >= 0 ? "+" : ""}${rf.scaleEdgePx.toFixed(1)}px@edge)  rot ${rf.rotationDeg.toFixed(2)}°  shear ${(rf.shearX * 100).toFixed(2)}/${(rf.shearY * 100).toFixed(2)}%  rms ${rf.rmsPx.toFixed(2)} rand ${rf.randomPx.toFixed(2)}px  sys ${(rf.systematic * 100).toFixed(0)}%`,
+              rf.systematic >= 0.5 ? "hud-warn" : undefined,
+            ),
+          );
+          const gap = rf.adjustedCount && rf.untouchedCount ? Math.hypot(rf.adjustedX - rf.untouchedX, rf.adjustedY - rf.untouchedY) : 0;
+          const pgap = rf.planeCount && rf.otherCount ? Math.hypot(rf.planeX - rf.otherX, rf.planeY - rf.otherY) : 0;
+          rows.push(
+            row(
+              "ResG",
+              `adj ${vec(rf.adjustedX, rf.adjustedY)} (${rf.adjustedCount})  none ${vec(rf.untouchedX, rf.untouchedY)} (${rf.untouchedCount})${gap ? ` Δ${gap.toFixed(1)}` : ""}  |  plane ${vec(rf.planeX, rf.planeY)} (${rf.planeCount})  other ${vec(rf.otherX, rf.otherY)} (${rf.otherCount})${pgap ? ` Δ${pgap.toFixed(1)}` : ""}`,
+              gap >= 1 || pgap >= 1 ? "hud-warn" : undefined,
+            ),
+          );
+          // v23: the random part along vs across the parallax directions.
+          // Isotropic noise reads ×1.0; depth errors line the residuals up
+          // with the parallax direction (orange from ×1.5) and the implied
+          // relative depth error is read off the sensitive landmarks.
+          if (rf.parallaxCount > 0) {
+            const pct = (v: number) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
+            rows.push(
+              row(
+                "ResP",
+                `∥ ${rf.parallelRmsPx.toFixed(2)}px ⊥ ${rf.perpRmsPx.toFixed(2)}px ×${rf.parallaxRatio.toFixed(1)}  depth err med ${(rf.depthErrorMedian * 100).toFixed(1)}% bias ${pct(rf.depthErrorBias)} (n ${rf.parallaxCount}/${rf.count}, sens ${rf.depthSensitivityMedianPx.toFixed(0)}px)  plane ${pct(rf.planeDepthBias)} other ${pct(rf.otherDepthBias)}`,
+                rf.parallaxRatio >= 1.5 ? "hud-warn" : undefined,
+              ),
+            );
+          }
+        }
       }
       // Phase 7: what the last bundle adjustment did to the map. The error is
       // the keyframe-observation error (not this frame's PnP); a run that does
@@ -564,7 +741,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u`,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : ba.rejectReason === "invalid" ? "invalid (non-finite)" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
             (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );
@@ -832,7 +1009,7 @@ export class DebugOverlay {
     if (m) {
       rows.push(row("mapC", xyz(m.cameraCenter)));
       rows.push(row("Δcam", `${cm(m.deltaTranslationM)} / ${m.deltaRotationDeg.toFixed(2)}°`));
-      rows.push(row("LM", `${m.landmarks}  plane ${p ? p.inliers : 0}  other ${p ? Math.max(0, m.landmarks - p.inliers) : m.landmarks}`));
+      rows.push(row("LM", `${m.landmarks}  plane ${p ? p.inliers : 0}  other ${p ? Math.max(0, m.landmarks - p.inliers) : m.landmarks}${m.relink?.purgedTotal ? `  purged ${m.relink.purgedTotal}` : ""}`));
     }
     if (p) {
       rows.push(row("Plane", `n(${p.normal.map((v) => v.toFixed(2)).join(",")}) rms ${p.rms.toFixed(3)}`));

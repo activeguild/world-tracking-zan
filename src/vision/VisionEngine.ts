@@ -45,6 +45,7 @@ import {
 } from "./types";
 import { type Mat3, mat3Identity, mat3Multiply, mat3TransformPoint } from "../math/Matrix";
 import { type BAObservation, bundleAdjust } from "../math/BundleAdjustment";
+import { translationFit } from "../math/RigidFit";
 import type { CameraIntrinsics } from "../camera/CameraIntrinsics";
 import { transpose3 } from "../math/Decomposition";
 import { applyTransform, cameraCenterOf, composeTransforms, invertTransform, rotationDistance, rotationToQuaternion, type RigidTransform } from "../math/Pose";
@@ -166,6 +167,8 @@ export class VisionEngine {
    * dropped and the scan restarts where the camera looks now.
    */
   private worldEstablished = false;
+  /** Map-frame points the BA anchor correction is fitted around (Phase 2), from the latest input. */
+  private anchorPoints: number[] | null = null;
   /** Stage counters of the most recent relocalization attempt of the current lost episode (v6). */
   private relocDiagnostics: RelocalizationDiagnostics | null = null;
   private relocDiagnosticsAge = 0;
@@ -228,6 +231,19 @@ export class VisionEngine {
     this.planeDetector = new PlaneDetector(config.plane, rng);
     this.planeTracker = new PlaneTracker(config.planeTracking);
     this.relocalizer = new Relocalizer(config.relocalization, config.tracker);
+    // v20: re-associations are confirmed against the keyframes' image
+    // pyramids. `curPyramid` is the frame being processed while the map
+    // tracker runs (the swap happens at the end of process()).
+    if (config.landmarks.relinkVerify) {
+      this.mapTracker.relinkVerifier = {
+        verify: (candidates, pose, radiusPx, choice) => this.relocalizer.verifyRelinks(candidates, this.curPyramid, pose, radiusPx, choice),
+      };
+      // v21: a keyframe patch landing a BA-outlier distance away removes the landmark.
+      if (config.landmarks.purgeInconsistent) this.mapTracker.purgeFarPx = config.bundleAdjustment.maxObservationErrorPx;
+      // v24: the re-anchor probe (diagnostics only) rides on the same check.
+      this.mapTracker.reanchorProbeEveryFrames = config.landmarks.reanchorProbeEveryFrames;
+      this.mapTracker.reanchorProbeMaxTracks = config.landmarks.reanchorProbeMaxTracks;
+    }
   }
 
   /** The fixed plane the world is anchored to (null until a plane was found). */
@@ -285,6 +301,11 @@ export class VisionEngine {
   /** The landmark map itself (tests / diagnostics; positions are live). */
   get landmarkMap(): LandmarkMap {
     return this.mapTracker.map;
+  }
+
+  /** The map tracker itself (tests: initialization refinement report). */
+  mapTrackerForTests(): MapTracker {
+    return this.mapTracker;
   }
 
   get state(): TrackingState {
@@ -380,6 +401,10 @@ export class VisionEngine {
     const ids: number[] = [];
     for (const [id, c] of counts) {
       if (c < Math.max(1, cfg.minLandmarkObservations)) continue;
+      // 指示書 §5.2: a non-finite position would poison the whole solve (its
+      // cost is NaN, so no step is ever accepted); keep it out of the problem.
+      const p = map.get(id)!.position;
+      if (!Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) continue;
       index.set(id, ids.length);
       ids.push(id);
     }
@@ -390,6 +415,9 @@ export class VisionEngine {
     const maxErr = cfg.maxObservationErrorPx / f;
     const observations: BAObservation[] = [];
     let outliers = 0;
+    // v21: landmarks a keyframe contradicts (an observation beyond the
+    // outlier gate) are removed from the map after the run.
+    const inconsistent = new Set<number>();
     const kfIndex = new Map<number, number>();
     kfs.forEach((kf, i) => kfIndex.set(kf.id, i));
     for (let ki = 0; ki < kfs.length; ki++) {
@@ -402,13 +430,18 @@ export class VisionEngine {
         const z = r[6] * X + r[7] * Y + r[8] * Z + t[2];
         if (z <= 1e-6) {
           outliers++;
+          inconsistent.add(o.landmarkId);
           continue;
         }
         const x = (o.x - k.cx) / k.fx, y = (o.y - k.cy) / k.fy;
         const u = (r[0] * X + r[1] * Y + r[2] * Z + t[0]) / z;
         const v = (r[3] * X + r[4] * Y + r[5] * Z + t[1]) / z;
-        if (Math.hypot(u - x, v - y) > maxErr) {
+        const err = Math.hypot(u - x, v - y);
+        // `> maxErr` is false for NaN: a non-finite observation or pose must
+        // not slip into the problem as a "good" one.
+        if (!(err <= maxErr)) {
           outliers++;
+          inconsistent.add(o.landmarkId);
           continue;
         }
         observations.push({ keyframe: ki, landmark: li, x, y });
@@ -439,7 +472,7 @@ export class VisionEngine {
     };
     // Keyframe poses are refined in place; keep a copy to restore on rejection.
     const savedPoses = kfs.map((kf) => ({ rotation: Float64Array.from(kf.pose.rotation), translation: Float64Array.from(kf.pose.translation) }));
-    const res = bundleAdjust(problem, { huber: cfg.huberPx / f, maxIterations: cfg.maxIterations, epsilon: 1e-7 });
+    const res = bundleAdjust(problem, { huber: cfg.huberPx / f, maxIterations: cfg.maxIterations, epsilon: 1e-7, minRelativeGain: cfg.minIterationGain });
     // Whole-run sanity check: landmarks that slid far along their rays.
     let shifted = 0;
     let maxShift = 0;
@@ -466,7 +499,19 @@ export class VisionEngine {
       }
     }
     let rejectReason: BundleAdjustmentRejectReason = "none";
-    if (shifted > cfg.maxShiftedFraction * ids.length) rejectReason = "shift";
+    // 指示書 §5.2: a solve that produced anything non-finite is discarded as
+    // a whole (poses restored below, landmarks never written).
+    let finite = Number.isFinite(res.errorBefore) && Number.isFinite(res.errorAfter);
+    for (let i = 0; finite && i < positions.length; i++) if (!Number.isFinite(positions[i])) finite = false;
+    for (let i = 0; finite && i < kfs.length; i++) {
+      const p = kfs[i].pose;
+      for (let a = 0; a < 9; a++) if (!Number.isFinite(p.rotation[a])) finite = false;
+      for (let a = 0; a < 3; a++) if (!Number.isFinite(p.translation[a])) finite = false;
+    }
+    if (!finite) {
+      rejectReason = "invalid";
+      if (!Number.isFinite(maxShift)) maxShift = 0;
+    } else if (shifted > cfg.maxShiftedFraction * ids.length) rejectReason = "shift";
     else if (cfg.maxPoseJumpPriorRatio > 0 && jumpRatio > cfg.maxPoseJumpPriorRatio) rejectReason = "pose_jump";
     else if (cfg.minGainFraction > 0 && res.errorAfter > res.errorBefore * (1 - cfg.minGainFraction)) rejectReason = "no_gain";
     const rejected = rejectReason !== "none";
@@ -487,6 +532,7 @@ export class VisionEngine {
     let propagated = 0;
     let untouched = 0;
     const correction: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
+    let keyframeCorrectionShift = 0, keyframeCorrectionDeg = 0, localCorrectionShift = 0, localCorrectionDeg = 0, localFitLandmarks = 0;
     if (rejected) {
       for (let i = 0; i < kfs.length; i++) {
         kfs[i].pose.rotation.set(savedPoses[i].rotation);
@@ -501,10 +547,48 @@ export class VisionEngine {
         if (i === 0) continue;
         corrections.set(kfs[i].id, composeTransforms(invertTransform(kfs[i].pose), savedPoses[i]));
       }
+      // Phase 2: the motion of the adjusted landmarks around the anchor
+      // points (world origin, placed objects) is what the world anchor should
+      // follow: it keeps the objects attached to the floor landmarks next to
+      // them whether the run restored a drifted map or refined it. Gaussian
+      // weights by the distance to the nearest anchor point, radius
+      // `anchorFitDepthRatio` × median depth; the fit is robust (reweighted).
+      const oldPositions = new Float64Array(ids.length * 3);
+      for (let i = 0; i < ids.length; i++) oldPositions.set(map.get(ids[i])!.position, i * 3);
+      let fit: ReturnType<typeof translationFit> = null;
+      const ap = this.anchorPoints;
+      const newestKf = kfs[kfs.length - 1];
+      const newestCorrection = newestKf.frameId === frameId ? corrections.get(newestKf.id) : undefined;
+      if (cfg.anchorCorrection === "local" && newestCorrection && ap && ap.length >= 3 && cfg.anchorFitDepthRatio > 0) {
+        const radius = cfg.anchorFitDepthRatio * Math.max(medianDepth, 1e-6);
+        const inv2r2 = 1 / (2 * radius * radius);
+        const weights = new Float64Array(ids.length);
+        let weighted = 0;
+        for (let i = 0; i < ids.length; i++) {
+          let best = Infinity;
+          for (let a = 0; a + 2 < ap.length; a += 3) {
+            const d2 = (oldPositions[i * 3] - ap[a]) ** 2 + (oldPositions[i * 3 + 1] - ap[a + 1]) ** 2 + (oldPositions[i * 3 + 2] - ap[a + 2]) ** 2;
+            if (d2 < best) best = d2;
+          }
+          weights[i] = Math.exp(-best * inv2r2);
+          if (weights[i] > 0.3) weighted++;
+        }
+        // Rotation from the keyframe correction (well constrained), only
+        // the translation from the landmarks next to the objects (recording
+        // 29: a full rigid fit on 11–13 clustered landmarks gave 2–7°).
+        if (weighted >= cfg.anchorFitMinLandmarks) {
+          fit = translationFit(oldPositions, positions, ids.length, newestCorrection.rotation, weights);
+          if (fit) localFitLandmarks = weighted;
+        }
+      }
       for (let i = 0; i < ids.length; i++) {
         const lm = map.get(ids[i])!;
         lm.position.set(positions.subarray(i * 3, i * 3 + 3));
         lm.baMode = "adjusted";
+      }
+      if (fit) {
+        localCorrectionShift = Math.hypot(fit.transform.translation[0], fit.transform.translation[1], fit.transform.translation[2]);
+        localCorrectionDeg = (rotationDistance(fit.transform.rotation, correction.rotation) * 180) / Math.PI;
       }
       // Landmarks no stored keyframe observes follow their reference
       // keyframe (v18): without this the solved and the unsolved part of the
@@ -532,11 +616,29 @@ export class VisionEngine {
       const newest = kfs[kfs.length - 1];
       const c = corrections.get(newest.id);
       if (c && newest.frameId === frameId) {
-        correction.rotation.set(c.rotation);
-        correction.translation.set(c.translation);
+        keyframeCorrectionShift = Math.hypot(c.translation[0], c.translation[1], c.translation[2]);
+        keyframeCorrectionDeg = (rotationDistance(c.rotation, correction.rotation) * 180) / Math.PI;
         this.mapTracker.rebasePose(c);
+        // The keyframe correction is the fallback of the local mode (no
+        // anchor points known, or too few landmarks around them).
+        if (cfg.anchorCorrection === "keyframe" || (cfg.anchorCorrection === "local" && !fit)) {
+          correction.rotation.set(c.rotation);
+          correction.translation.set(c.translation);
+        }
+      }
+      if (cfg.anchorCorrection === "local" && fit) {
+        correction.rotation.set(fit.transform.rotation);
+        correction.translation.set(fit.transform.translation);
       }
     }
+    // v21: drop the landmarks the keyframes contradict (the test is against
+    // the state before the solve, so a no-gain or shift rejection does not
+    // matter). Not on a pose-jump rejection: the keyframe that wants to move
+    // is the suspect there, and its observations would purge good landmarks
+    // (Android recording 32: 31 landmarks went with a keyframe made during
+    // fast motion that was struck out two runs later). Their tracks
+    // re-anchor and the corners are triangulated again from current poses.
+    const purged = this.config.landmarks.purgeInconsistent && rejectReason !== "pose_jump" ? this.mapTracker.purgeLandmarks(inconsistent, this.tracks) : 0;
     const ms = now() - t0;
     this.timing.ba += ms;
     const prev = this.lastBundleAdjustment;
@@ -549,6 +651,7 @@ export class VisionEngine {
       landmarks: ids.length,
       observations: observations.length,
       outliers,
+      purged,
       shifted,
       rejected,
       rejectReason,
@@ -560,6 +663,11 @@ export class VisionEngine {
       untouched,
       correctionRotation: correction.rotation,
       correctionTranslation: correction.translation,
+      keyframeCorrectionShift,
+      keyframeCorrectionDeg,
+      localCorrectionShift,
+      localCorrectionDeg,
+      localFitLandmarks,
       errorBeforePx: res.errorBefore * f,
       errorAfterPx: res.errorAfter * f,
       iterations: res.iterations,
@@ -605,6 +713,7 @@ export class VisionEngine {
       );
     }
 
+    this.anchorPoints = input.anchorPoints ?? null;
     // 1. Pyramid
     this.curPyramid.build(input.gray);
     const t1 = now();
@@ -755,6 +864,7 @@ export class VisionEngine {
       relocalization: this.relocStatus,
       motion: this.lastMotion,
       bundleAdjustment: this.lastBundleAdjustment,
+      initRefinement: this.mapTracker.initialized ? this.mapTracker.lastInitRefinement : null,
       worldEstablished: this.worldEstablished,
       planeRecovery: this.lastPlaneRecovery,
       landmarks: this.packedLandmarks.slice(0, this.packedLandmarkCount * LANDMARK_STRIDE),
@@ -1135,6 +1245,8 @@ export class VisionEngine {
         translationPredicted: r.translationPredicted,
         jumpRejected: r.jumpRejected,
         reassociated: r.reassociated,
+        relink: r.relink,
+        reanchor: r.reanchor,
         mapInlierCount: tracker.selection.mapInlierCount,
         planeInlierCount: tracker.selection.planeInlierCount,
         rejectReason: tracker.selection.planeReject ?? tracker.selection.mapReject,

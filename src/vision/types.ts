@@ -4,6 +4,7 @@ import type { TrackingQuality } from "./TrackingQuality";
 import type { PoseRejection } from "./PoseValidation";
 import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
 import type { RelocalizationSearchStage, RelocalizationTimeline } from "./RelocalizationSchedule";
+import { emptyResidualField, type ResidualField } from "./ResidualField";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -17,7 +18,7 @@ export interface Corner {
  *
  * Positions are in level-0 processing-image pixels.
  */
-export type TrackLinkSource = "native" | "relink" | "reloc";
+export type TrackLinkSource = "native" | "relink" | "relinkRaw" | "reloc";
 
 export interface Track {
   id: number;
@@ -50,10 +51,13 @@ export interface Track {
    * How the track came to observe its landmark (v19 diagnostics): `native`
    * = the landmark was triangulated from this very track, `relink` =
    * re-association of a re-detected corner to an existing landmark (within
-   * `reassociateRadiusPx`), `reloc` = a keyframe observation matched by the
-   * relocalizer. Undefined counts as native. A re-linked track that sits on
-   * a neighbouring corner carries a systematic error for as long as it
-   * lives; this splits that from map error.
+   * `reassociateRadiusPx`) that a keyframe observation of the landmark
+   * confirmed by LK (v20), `relinkRaw` = the same re-association without a
+   * keyframe to check against (no stored keyframe observes the landmark),
+   * `reloc` = a keyframe observation matched by the relocalizer. Undefined
+   * counts as native. A re-linked track that sits on a neighbouring corner
+   * carries a systematic error for as long as it lives; this splits that
+   * from map error.
    */
   linkSource?: TrackLinkSource;
   /**
@@ -149,6 +153,10 @@ export interface MapPoseOutput {
   jumpRejected: boolean;
   /** Unlinked landmarks re-linked to tracks this frame (v3 §15). */
   reassociated: number;
+  /** What the keyframe check made of this frame's re-association candidates (v20). */
+  relink: RelinkStats;
+  /** Last re-anchor probe on this map (v24 diagnostics; null until one ran). */
+  reanchor: ReanchorStats | null;
   /** Inliers of the landmark-PnP candidate / the plane candidate this frame (0 when absent). */
   mapInlierCount: number;
   planeInlierCount: number;
@@ -395,12 +403,125 @@ export interface ReprojectionBreakdown {
   nativeErrorPx: number;
   relinkCount: number;
   relinkErrorPx: number;
+  /** Re-associations no keyframe could verify (v20, `Track.linkSource` = relinkRaw). */
+  relinkRawCount: number;
+  relinkRawErrorPx: number;
   relocCount: number;
   relocErrorPx: number;
+  /**
+   * v22: the residual vectors themselves (observed − projected) fitted with
+   * an affine model over the image: common shift, radial scale, rotation,
+   * shear, and the random part left over. Direction, where every split
+   * above is magnitude only.
+   */
+  field: ResidualField;
+}
+
+/**
+ * Re-association bookkeeping of one frame (v20): how many unlinked landmarks
+ * found an unlinked track within the radius, and what the keyframe check
+ * (LK from the keyframe observation of the landmark into the current frame)
+ * made of them. `verified` links were snapped to the keyframe-consistent
+ * position, `rejected` candidates were not linked, `unverified` were linked
+ * without a check because no stored keyframe observes the landmark.
+ */
+export interface RelinkStats {
+  candidates: number;
+  verified: number;
+  rejected: number;
+  unverified: number;
+  /** Mean distance (px) between the track and the keyframe-LK position over the verified links. */
+  meanSnapPx: number;
+  /** Rejections split: the keyframe patch tracked but landed beyond the radius (`rejectedTooFar`, mean distance `meanFarPx`) vs LK failed (`rejectedLk`). */
+  rejectedTooFar: number;
+  rejectedLk: number;
+  meanFarPx: number;
+  /**
+   * v21: landmarks removed from the map in this frame because the keyframe
+   * patch landed at least `bundleAdjustment.maxObservationErrorPx` from the
+   * candidate — the keyframe's view of the landmark and its projection
+   * under the current pose disagree, so the landmark is inconsistent with
+   * the map (the same population as the BA's gross outliers).
+   */
+  purged: number;
+  /** v21: landmarks removed so far on the current map (relink + BA). */
+  purgedTotal: number;
+}
+
+export function emptyRelinkStats(): RelinkStats {
+  return { candidates: 0, verified: 0, rejected: 0, unverified: 0, meanSnapPx: 0, rejectedTooFar: 0, rejectedLk: 0, meanFarPx: 0, purged: 0, purgedTotal: 0 };
+}
+
+/**
+ * v24 re-anchor probe (diagnostics only, Android recording 35): is the 2–3 px
+ * PnP residual on the live tracks or between the map and the corners
+ * themselves? A sample of this frame's PnP inliers is re-observed by LK from
+ * the *oldest* stored keyframe observation of their landmark into the current
+ * frame (the same forward-backward checked tracker as the relink check,
+ * started at the live track). The residual of the live track and the
+ * residual of where the keyframe patch landed are compared against the same
+ * projections, and PnP is re-solved on the sample with either set of
+ * observations. Nothing is written back to the tracks or the map.
+ *
+ *   landed ≪ track (ratio well under 1, snap of 1–3 px): the live tracks
+ *     have slid off the corners the map was built from (LK lock / drift) —
+ *     periodic re-anchoring of tracks to keyframe patches is the fix;
+ *   landed ≈ track: the tracks sit where the keyframe patches do, so the
+ *     residual is between the map / pose and the corner as it looks from
+ *     this view (view-dependent corner appearance, or map error).
+ */
+export interface ReanchorStats {
+  /** Frame the probe ran in (the stats are held until the next probe). */
+  frameId: number;
+  /** Inliers sampled, and how the keyframe patch LK ended for them. */
+  sampled: number;
+  landed: number;
+  lkFailed: number;
+  tooFar: number;
+  noKeyframe: number;
+  /** RMS residual (px) of the live tracks and of the landed positions over the landed sample, against this frame's projections. */
+  trackRmsPx: number;
+  landedRmsPx: number;
+  /** Mean / median distance (px) between the live track and where its keyframe patch landed. */
+  meanSnapPx: number;
+  medianSnapPx: number;
+  /** Landed samples whose residual is smaller than the live track's. */
+  improved: number;
+  /** Median age (frames) of the keyframe observations used. */
+  keyframeAgeMedianFrames: number;
+  /** PnP re-solved on the landed sample with the live-track observations vs the landed observations (mean inlier error px, inliers). */
+  trackPnpErrorPx: number;
+  trackPnpInliers: number;
+  landedPnpErrorPx: number;
+  landedPnpInliers: number;
+  /** How far the landed-observation PnP pose is from the track-observation one (map units / deg). */
+  landedPoseDeltaTranslation: number;
+  landedPoseDeltaDeg: number;
 }
 
 /** Why a bundle adjustment run was discarded (v18; `pose_jump` v19). */
-export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain" | "pose_jump";
+/**
+ * What the two-view bundle adjustment of the last map initialization did
+ * (指示書「空間固定性」§7): mean reprojection error of the init
+ * correspondences before / after (px), how far it moved the init pose from
+ * the essential-matrix estimate (rotation / translation direction, deg), and
+ * whether the refined result replaced it.
+ */
+export interface InitRefinementOutput {
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  rotationDeg: number;
+  directionDeg: number;
+  applied: boolean;
+}
+
+/**
+ * `invalid` (指示書 §5.2): the solve produced a non-finite landmark, pose or
+ * error (a NaN / Infinity reached the problem); nothing is written back.
+ */
+export type BundleAdjustmentRejectReason = "none" | "shift" | "no_gain" | "pose_jump" | "invalid";
 
 /**
  * Local bundle adjustment report (Phase 7): what the last run over the
@@ -421,6 +542,12 @@ export interface BundleAdjustmentOutput {
   observations: number;
   /** Observations left out as gross outliers before the solve. */
   outliers: number;
+  /**
+   * v21: landmarks removed from the map after the run because a keyframe
+   * observation of them was a gross outlier (keyframe view and map
+   * disagree by more than `maxObservationErrorPx`); 0 with the purge off.
+   */
+  purged: number;
   /** Landmarks the solve moved by more than maxLandmarkShiftRatio × depth. */
   shifted: number;
   /** The whole run was discarded (`rejectReason`); map and keyframe poses untouched. */
@@ -453,6 +580,19 @@ export interface BundleAdjustmentOutput {
    */
   correctionRotation: Float64Array;
   correctionTranslation: Float64Array;
+  /**
+   * Phase 2 diagnostics: the two candidate anchor motions of this run. The
+   * newest keyframe's own correction (what the canonical pose is rebased
+   * with) and the local rigid fit of the adjusted landmarks' displacement
+   * around the anchor points, each as a translation magnitude (map units)
+   * and rotation (degrees); `localFitLandmarks` = landmarks that carried
+   * weight in the fit (0 = no fit, the keyframe correction was used).
+   */
+  keyframeCorrectionShift: number;
+  keyframeCorrectionDeg: number;
+  localCorrectionShift: number;
+  localCorrectionDeg: number;
+  localFitLandmarks: number;
   errorBeforePx: number;
   errorAfterPx: number;
   iterations: number;
@@ -473,6 +613,7 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     landmarks: 0,
     observations: 0,
     outliers: 0,
+    purged: 0,
     shifted: 0,
     rejected: false,
     rejectReason: "none",
@@ -484,6 +625,11 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     untouched: 0,
     correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
     correctionTranslation: new Float64Array(3),
+    keyframeCorrectionShift: 0,
+    keyframeCorrectionDeg: 0,
+    localCorrectionShift: 0,
+    localCorrectionDeg: 0,
+    localFitLandmarks: 0,
     errorBeforePx: 0,
     errorAfterPx: 0,
     iterations: 0,
@@ -538,8 +684,11 @@ export function emptyReprojectionBreakdown(): ReprojectionBreakdown {
     nativeErrorPx: 0,
     relinkCount: 0,
     relinkErrorPx: 0,
+    relinkRawCount: 0,
+    relinkRawErrorPx: 0,
     relocCount: 0,
     relocErrorPx: 0,
+    field: emptyResidualField(),
   };
 }
 
@@ -713,6 +862,12 @@ export interface VisionInput {
    * device dependent). Used only for the horizontality test of planes.
    */
   gravity?: number[] | null;
+  /**
+   * Map-frame points (x,y,z interleaved) the bundle adjustment's world
+   * anchor correction is fitted around: the world origin and the placed
+   * objects (改善指示書 Phase 2). Null / empty = no local fit possible.
+   */
+  anchorPoints?: number[] | null;
 }
 
 /**
@@ -746,6 +901,8 @@ export interface VisionOutput {
   motion: MotionDiagnostics;
   /** Last local bundle adjustment (Phase 7); `runs` 0 before the first. */
   bundleAdjustment: BundleAdjustmentOutput;
+  /** Two-view refinement of the current map's initialization (指示書「空間固定性」§7); null before a map exists or with it off. */
+  initRefinement: InitRefinementOutput | null;
   /**
    * World tracking established for the current map (v10 §5–§7): a plane was
    * found and the world anchored to it. Only then does a lost map lead to

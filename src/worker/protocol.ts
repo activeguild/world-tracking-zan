@@ -11,6 +11,7 @@ import type {
   PlaneSearchOutput,
   PoseOutput,
   BundleAdjustmentOutput,
+  InitRefinementOutput,
   MotionDiagnostics,
   RelocalizationOutput,
 } from "../vision/types";
@@ -41,6 +42,8 @@ export interface FrameRequest {
   intrinsics: CameraIntrinsics;
   /** Gravity direction in the camera frame, if known. */
   gravity: number[] | null;
+  /** Map-frame points the BA anchor correction is local to (Phase 2). */
+  anchorPoints: number[] | null;
   /**
    * Wall-clock send time (performance.timeOrigin + performance.now(), ms),
    * comparable across the main thread and the worker (v16 main-thread timing).
@@ -87,6 +90,7 @@ export interface ResultResponse {
   relocalization: RelocalizationOutput;
   motion: MotionDiagnostics;
   bundleAdjustment: BundleAdjustmentOutput;
+  initRefinement: InitRefinementOutput | null;
   worldEstablished: boolean;
   planeRecovery: PlaneRecoveryDiagnostics;
   /** Float32 packed landmarks (see LANDMARK_STRIDE). Transferred. */

@@ -44,6 +44,18 @@ function hit(nn: number[], d: number, C: number[], w: number[]): number {
   return s > 0 ? s : -1;
 }
 
+/**
+ * Gravity as the device would report it in the camera frame of pose p:
+ * the floor normal rotated into the camera (g_cam = R g_world). The
+ * constant `tpGravity` is only exact for the identity pose; under a yaw it
+ * tilts the gravity-constrained plane by the yaw angle.
+ */
+export function tpGravityAt(p: TPPose): number[] {
+  const { R } = p;
+  const g = tpGravity;
+  return [R[0] * g[0] + R[1] * g[1] + R[2] * g[2], R[3] * g[0] + R[4] * g[1] + R[5] * g[2], R[6] * g[0] + R[7] * g[1] + R[8] * g[2]];
+}
+
 /** World direction of the ray through pixel (x, y) for pose p. */
 export function tpRay(p: TPPose, x: number, y: number): number[] {
   const dx = (x - TP_K.cx) / TP_K.fx;

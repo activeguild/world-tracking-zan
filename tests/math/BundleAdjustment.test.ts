@@ -130,6 +130,75 @@ describe("bundle adjustment (Phase 7)", () => {
     expect(n).toBeGreaterThan(problem.observations.length * 0.9);
   });
 
+  it("v20: with noisy observations the relative-gain stopping rule ends the solve early at the same error", () => {
+    // The strict criteria (update < 1e-9, gain < 1e-6) are never met on noisy
+    // data: the solve runs to the cap for thousandths of a pixel (the
+    // on-device `it 15!`). With `minRelativeGain` 1 % it stops once an
+    // iteration stops paying, at an error within 1 % of the full solve.
+    const strict = build(4, 1.0);
+    const early = build(4, 1.0);
+    const resStrict = bundleAdjust(strict.problem, { huber: 2 / F, maxIterations: 15, epsilon: 1e-9 });
+    const resEarly = bundleAdjust(early.problem, { huber: 2 / F, maxIterations: 15, epsilon: 1e-9, minRelativeGain: 0.01 });
+    const errStrict = resStrict.errorAfter * F;
+    const errEarly = resEarly.errorAfter * F;
+    console.log(`[ba] stopping rule: strict ${errStrict.toFixed(4)} px in ${resStrict.iterations} it (converged ${resStrict.converged}); gain ≥ 1 % ${errEarly.toFixed(4)} px in ${resEarly.iterations} it (converged ${resEarly.converged})`);
+    expect(resEarly.converged).toBe(true);
+    expect(resEarly.iterations).toBeLessThan(resStrict.iterations);
+    expect(Math.abs(errEarly - errStrict) / errStrict).toBeLessThan(0.01);
+    // Exact observations still converge to the floor: the rule never stops a solve that is still gaining.
+    const exact = build(4, 0);
+    const resExact = bundleAdjust(exact.problem, { huber: 2 / F, maxIterations: 30, epsilon: 1e-9, minRelativeGain: 0.01 });
+    expect(resExact.errorAfter * F).toBeLessThan(0.05);
+  });
+
+  it("指示書 §5.2: the fixed keyframe is bit-identical, every depth in it stays finite and positive, and the scale gauge is preserved", () => {
+    const { problem } = build(3, 0.5);
+    const gauge: number[] = [];
+    for (const o of problem.observations) if (o.keyframe === 0 && !gauge.includes(o.landmark)) gauge.push(o.landmark);
+    problem.gaugeLandmarks = gauge;
+    const fixedBefore = { rotation: Array.from(problem.keyframes[0].pose.rotation), translation: Array.from(problem.keyframes[0].pose.translation) };
+    const depthIn0 = (lm: Float64Array, i: number) => {
+      const r = problem.keyframes[0].pose.rotation, t = problem.keyframes[0].pose.translation;
+      return r[6] * lm[i * 3] + r[7] * lm[i * 3 + 1] + r[8] * lm[i * 3 + 2] + t[2];
+    };
+    const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
+    const gaugeBefore = median(gauge.map((i) => depthIn0(problem.landmarks, i)));
+    const res = bundleAdjust(problem, { huber: 2 / F, maxIterations: 30, epsilon: 1e-9 });
+    expect(res.iterations).toBeGreaterThan(0);
+    expect(res.errorAfter).toBeLessThan(res.errorBefore);
+    expect(Array.from(problem.keyframes[0].pose.rotation)).toEqual(fixedBefore.rotation);
+    expect(Array.from(problem.keyframes[0].pose.translation)).toEqual(fixedBefore.translation);
+    for (let i = 0; i < problem.landmarkCount; i++) {
+      for (let a = 0; a < 3; a++) expect(Number.isFinite(problem.landmarks[i * 3 + a])).toBe(true);
+      expect(depthIn0(problem.landmarks, i)).toBeGreaterThan(0);
+    }
+    for (const kf of problem.keyframes) {
+      for (const v of kf.pose.rotation) expect(Number.isFinite(v)).toBe(true);
+      for (const v of kf.pose.translation) expect(Number.isFinite(v)).toBe(true);
+    }
+    const gaugeAfter = median(gauge.map((i) => depthIn0(problem.landmarks, i)));
+    expect(Math.abs(gaugeAfter - gaugeBefore) / gaugeBefore).toBeLessThan(1e-9);
+  });
+
+  it("指示書 §5.2: a non-finite landmark leaves the solver without a step — nothing is written, the result says so", () => {
+    const { problem } = build(4, 0.5);
+    problem.landmarks[5 * 3 + 1] = NaN;
+    const landmarksBefore = Float64Array.from(problem.landmarks);
+    const posesBefore = problem.keyframes.map((k) => ({ rotation: Array.from(k.pose.rotation), translation: Array.from(k.pose.translation) }));
+    const res = bundleAdjust(problem, { huber: 2 / F, maxIterations: 30, epsilon: 1e-9 });
+    expect(res.iterations).toBe(0);
+    expect(res.converged).toBe(false);
+    expect(Number.isFinite(res.errorBefore)).toBe(false);
+    for (let i = 0; i < landmarksBefore.length; i++) {
+      if (Number.isNaN(landmarksBefore[i])) expect(Number.isNaN(problem.landmarks[i])).toBe(true);
+      else expect(problem.landmarks[i]).toBe(landmarksBefore[i]);
+    }
+    problem.keyframes.forEach((k, i) => {
+      expect(Array.from(k.pose.rotation)).toEqual(posesBefore[i].rotation);
+      expect(Array.from(k.pose.translation)).toEqual(posesBefore[i].translation);
+    });
+  });
+
   it("does nothing harmful on an already consistent problem", () => {
     const { problem } = build(3, 0);
     // Replace the perturbed start with the truth: re-build with zero perturbation by solving once, then run again.
