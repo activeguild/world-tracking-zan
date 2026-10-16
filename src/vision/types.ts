@@ -220,8 +220,12 @@ export interface PlanePoseOutput {
   confidence: number;
 }
 
-/** Packed landmark layout (Float32): [x, y, z, planeInlier] in the map frame. */
-export const LANDMARK_STRIDE = 4;
+/**
+ * Packed landmark layout (Float32): [x, y, z, planeInlier, age] in the map
+ * frame; `age` = frames since the landmark was triangulated (the session's
+ * object-floor diagnostic splits young / old generations by it).
+ */
+export const LANDMARK_STRIDE = 5;
 
 /**
  * Where the per-frame plane search stopped (修正指示書 v11 §21–§22, §37–§38):

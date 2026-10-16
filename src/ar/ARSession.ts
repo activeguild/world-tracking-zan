@@ -30,6 +30,7 @@ import type {
 import type { PoseRejectCode } from "../vision/PoseValidation";
 import { wallNow, type EngineTiming } from "../worker/protocol";
 import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
+import { objectFloorDiagnostics, type ObjectFloorRecord } from "./ObjectFloorDiagnostics";
 import { WorldAnchor } from "./WorldAnchor";
 import { buildWorldDiagnostics, formatWorldChange, type WorldTrackingDiagnostics, type WorldTransformChangeReason } from "./WorldDiagnostics";
 import {
@@ -173,6 +174,12 @@ export interface ARStats {
   worldDiagnostics: WorldTrackingDiagnostics | null;
   /** Two-view refinement of the current map's initialization (指示書「空間固定性」§7); null without a map. */
   initRefinement: InitRefinementOutput | null;
+  /**
+   * Height of the floor the map knows around the world origin (id 0) and
+   * each placed object, relative to the world plane they sit on (recording
+   * 43: cube size vs floor texture). Empty before the world exists.
+   */
+  objectFloor: ObjectFloorRecord[];
 }
 
 /**
@@ -267,6 +274,7 @@ export class ARSession {
   private worldEstablished = false;
   private worldDiagnostics: WorldTrackingDiagnostics | null = null;
   private initRefinement: InitRefinementOutput | null = null;
+  private objectFloor: ObjectFloorRecord[] = [];
   /** World frame object of the previous frame: the anchor replaces it on every change, so identity says "changed". */
   private prevWorldFrame: WorldFrame | null = null;
   private prevPlaneNormal: number[] | null = null;
@@ -555,6 +563,7 @@ export class ARSession {
       objectVisibility: this.objectVisibility,
       worldDiagnostics: this.worldDiagnostics,
       initRefinement: this.initRefinement,
+      objectFloor: this.objectFloor,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
@@ -880,6 +889,27 @@ export class ARSession {
       changeReason: this.worldChangeReason,
     });
     if (this.worldDiagnostics.worldTransformChanged) this.logger.info(formatWorldChange(this.worldDiagnostics));
+    // Recording 43: the floor the map knows around the origin and the placed
+    // objects vs the plane they sit on (diagnostics only; a few ops per landmark).
+    if (worldNow && r.mapPose && r.mapPose.framesSinceTracked === 0) {
+      const d = this.config.debug;
+      this.objectFloor = objectFloorDiagnostics(
+        r.landmarks,
+        r.landmarkCount,
+        worldNow,
+        r.mapPose.rotation,
+        r.mapPose.cameraCenter,
+        this.world.objects.filter((o) => o.placed).map((o) => ({ id: o.id, position: o.position.toArray() })),
+        {
+          radiusDepthRatio: d.objectFloorRadiusDepthRatio,
+          heightWindowDepthRatio: d.objectFloorHeightWindowDepthRatio,
+          minLandmarks: d.objectFloorMinLandmarks,
+          youngFrames: d.objectFloorYoungFrames,
+        },
+      );
+    } else if (!worldNow) {
+      this.objectFloor = [];
+    }
     this.prevWorldFrame = worldNow;
     this.prevPlaneNormal = r.plane ? r.plane.normal : null;
     const w1 = performance.now();

@@ -492,6 +492,7 @@ function refreshHud(): void {
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
     worldDiag: s.worldDiagnostics,
     initRefine: s.initRefinement,
+    objectFloor: s.objectFloor,
     planePose: s.planePose
       ? {
           tracked: s.planePose.tracked,

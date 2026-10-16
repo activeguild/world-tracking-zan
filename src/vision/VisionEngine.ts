@@ -1789,6 +1789,7 @@ export class VisionEngine {
       this.packedLandmarks[o + 1] = lm.position[1];
       this.packedLandmarks[o + 2] = lm.position[2];
       this.packedLandmarks[o + 3] = lm.planeInlier ? 1 : 0;
+      this.packedLandmarks[o + 4] = input.frameId - lm.firstFrame;
       i++;
     }
     this.packedLandmarkCount = i;

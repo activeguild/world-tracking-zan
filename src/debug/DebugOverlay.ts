@@ -436,6 +436,22 @@ export interface HudStats {
       anchorFitLandmarks: number;
     } | null;
   } | null;
+  /** Recording 43: floor the map knows around the origin (id 0) / each object vs the world plane. */
+  objectFloor?: {
+    id: number;
+    depth: number;
+    depthMeters: number;
+    neighbors: number;
+    planeFlagged: number;
+    young: number;
+    old: number;
+    heightRatio: number;
+    heightSpread: number;
+    youngHeightRatio: number;
+    oldHeightRatio: number;
+    tiltDeg: number;
+    localDepthRatio: number;
+  }[];
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
   /** Camera world position (m) once the world exists. */
@@ -603,6 +619,28 @@ export class DebugOverlay {
           ),
         );
       }
+    }
+    // Recording 43 ("the cube's size changes differently from the floor"):
+    // height of the floor the map knows around the origin (O) and each
+    // placed object, as a fraction of the object's depth, young / old
+    // generations apart, local tilt and the local surface depth along the
+    // camera → object ray (×1.00 = the object is on the surface).
+    if (s.objectFloor && s.objectFloor.length > 1) {
+      const pct = (v: number) => (Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%` : "-");
+      let warn = false;
+      const parts = s.objectFloor.map((f) => {
+        const label = f.id === 0 ? "O" : `${f.id}`;
+        if (!Number.isFinite(f.heightRatio)) return `${label} n${f.neighbors}`;
+        // Height ≥ 2 % of the depth, or a tilt ≥ 2° measured on enough points
+        // (a plane through a handful of triangulated points is a few degrees noisy).
+        if (f.id !== 0 && (Math.abs(f.heightRatio) >= 0.02 || (f.tiltDeg >= 2 && f.neighbors >= 15))) warn = true;
+        const gen = Number.isFinite(f.youngHeightRatio) || Number.isFinite(f.oldHeightRatio) ? ` y${pct(f.youngHeightRatio)} o${pct(f.oldHeightRatio)}` : "";
+        const tilt = Number.isFinite(f.tiltDeg) ? ` tilt ${f.tiltDeg.toFixed(1)}°` : "";
+        const ratio = Number.isFinite(f.localDepthRatio) ? ` ×${f.localDepthRatio.toFixed(3)}` : "";
+        const depth = f.id !== 0 && Number.isFinite(f.depth) ? ` Z ${f.depth.toFixed(2)}u/${f.depthMeters.toFixed(2)}m` : "";
+        return `${label} h ${pct(f.heightRatio)}±${(f.heightSpread * 100).toFixed(1)}${gen} (n${f.neighbors}/${f.planeFlagged}pl)${tilt}${ratio}${depth}`;
+      });
+      rows.push(row("ObjFlr", parts.join("  |  "), warn ? "hud-warn" : undefined));
     }
     // v18: the processing size / grabber / flags were only in the TIMING
     // section, below the fold of the iPhone recording — repeat them here.

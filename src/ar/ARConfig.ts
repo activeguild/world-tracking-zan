@@ -687,6 +687,19 @@ export interface DebugConfig {
   overlay: boolean;
   /** Pose age (render time − frame capture time) above which the HUD shows POSE STALE (ms). */
   poseStaleMs: number;
+  /**
+   * Object-floor diagnostic (HUD `ObjFlr`): the landmarks around the world
+   * origin and each placed object, within `objectFloorRadiusDepthRatio` ×
+   * the object's depth horizontally and `objectFloorHeightWindowDepthRatio`
+   * × depth above / below the world plane, say how far the plane the
+   * object sits on is from the floor the map knows there. Statistics need
+   * `objectFloorMinLandmarks` neighbours; landmarks younger than
+   * `objectFloorYoungFrames` are the "young" generation.
+   */
+  objectFloorRadiusDepthRatio: number;
+  objectFloorHeightWindowDepthRatio: number;
+  objectFloorMinLandmarks: number;
+  objectFloorYoungFrames: number;
 }
 
 /**
@@ -1128,6 +1141,10 @@ export const DEFAULT_CONFIG: ARConfig = {
     logIntervalMs: 1000,
     overlay: true,
     poseStaleMs: 100,
+    objectFloorRadiusDepthRatio: 0.1,
+    objectFloorHeightWindowDepthRatio: 0.25,
+    objectFloorMinLandmarks: 5,
+    objectFloorYoungFrames: 30,
   },
   useWorker: true,
 };
