@@ -136,7 +136,7 @@ function describeRun(name: string, r: Run): void {
   const pnpAt = (f: number) => r.pnp.find((p) => p.f >= f);
   console.log(
     `[initmv] ${name}: init ${r.initFrame}, world ${r.worldAt}, stages ${r.stages}/${stages?.maxStages ?? 0}` +
-      r.stageRuns.map(({ f, stage: s }) => `\n[initmv]   stage ${s.stage} @ frame ${f} par ${s.parallaxPx.toFixed(0)}px ${s.landmarks}lm ${s.errorBeforePx.toFixed(3)} → ${s.errorAfterPx.toFixed(3)}px it ${s.iterations} moved ${s.rotationDeg.toFixed(2)}° / dir ${s.directionDeg.toFixed(2)}° Δlm ${s.maxLandmarkShift.toFixed(3)} rebuilt ${s.rebuilt} removed ${s.removed} kf ${s.keyframesReposed} corr ${Math.hypot(s.correctionTranslation[0], s.correctionTranslation[1], s.correctionTranslation[2]).toFixed(4)} (fit n${s.anchorFitLandmarks}) ${s.applied ? "applied" : "NOT applied"}`).join("") +
+      r.stageRuns.map(({ f, stage: s }) => `\n[initmv]   stage ${s.stage} @ frame ${f} base ×${s.baselineRatio.toFixed(2)} par ${s.parallaxPx.toFixed(0)}px ${s.landmarks}lm ${s.errorBeforePx.toFixed(3)} → ${s.errorAfterPx.toFixed(3)}px it ${s.iterations} moved ${s.rotationDeg.toFixed(2)}° / dir ${s.directionDeg.toFixed(2)}° Δlm ${s.maxLandmarkShift.toFixed(3)} rebuilt ${s.rebuilt} removed ${s.removed} kf ${s.keyframesReposed} corr ${Math.hypot(s.correctionTranslation[0], s.correctionTranslation[1], s.correctionTranslation[2]).toFixed(4)} (fit n${s.anchorFitLandmarks}) ${s.applied ? "applied" : `REJECTED ${s.rejectReason}`}`).join("") +
       `\n[initmv]   final dir err ${r.dirErrDeg.toFixed(3)}°; init-landmark depth ratio n${r.ratios.length} ${r.ratioMean.toFixed(4)}±${r.ratioSd.toFixed(4)} gradient ${r.ratioGradient.toFixed(4)}; PnP ${[20, 40, 60, 80, 100, 119].map((f) => { const p = pnpAt(f); return p ? `${p.f}:${p.err.toFixed(2)}/${p.inliers}` : `${f}:-`; }).join(" ")}`,
   );
 }
@@ -144,12 +144,16 @@ function describeRun(name: string, r: Run): void {
 describe("multi-view refinement of the initial map (v25)", () => {
   it("restores a direction-distorted init map once the parallax from the reference has grown; the two-view refinement alone cannot", () => {
     const stagesRun = run(slide, 120, {}, distort);
-    const noStages = run(slide, 120, { landmarks: { initRefineStages: 0 } }, distort);
+    // Control: no stages and no keyframe BA (the BA holds the reference view
+    // fixed too since 指示書「座標系整合性」§3, so it would partly undo the distortion).
+    const noStages = run(slide, 120, { landmarks: { initRefineStages: 0 }, bundleAdjustment: { enabled: false } }, distort);
+    const noStagesBa = run(slide, 120, { landmarks: { initRefineStages: 0 } }, distort);
     const clean = run(slide, 120, {});
     describeRun("distorted, stages", stagesRun);
-    describeRun("distorted, no stages", noStages);
+    describeRun("distorted, no stages, no BA", noStages);
+    describeRun("distorted, no stages, keyframe BA", noStagesBa);
     describeRun("clean, stages", clean);
-    // The distortion was injected: without stages the lateral gradient persists.
+    // The distortion was injected: without stages (and BA) the lateral gradient persists.
     expect(noStages.stages).toBe(0);
     expect(Math.abs(noStages.ratioGradient)).toBeGreaterThan(0.015);
     // With stages the init landmarks are back on their true depths (flat ratio).
@@ -187,7 +191,9 @@ describe("multi-view refinement of the initial map (v25)", () => {
     for (const { f, stage: st } of r.stageRuns) {
       expect(st.frameId).toBe(f);
       expect(st.stage).toBe(prev + 1);
-      expect(st.parallaxPx).toBeGreaterThanOrEqual(30 * Math.pow(2, st.stage) - 1e-9);
+      // Trigger: the camera baseline from the reference view, not the pixel parallax.
+      expect(st.baselineRatio).toBeGreaterThanOrEqual(Math.pow(2, st.stage) - 1e-9);
+      expect(st.parallaxPx).toBeGreaterThanOrEqual(30);
       expect(st.landmarks).toBeGreaterThanOrEqual(30);
       prev = st.stage;
     }

@@ -4,14 +4,15 @@ import { FeatureDetector } from "./FeatureDetector";
 import { FeatureTracker, TrackStatus, allocResult, type TrackResult } from "./FeatureTracker";
 import { ImagePyramid } from "./ImagePyramid";
 import { ransacHomography, type Rng } from "./OutlierRejection";
-import { MapTracker, type InitStageRun } from "./MapTracker";
+import { MapTracker, type InitStageCandidate } from "./MapTracker";
+import { validateInitStage, validateKeyframeRepose, type KeyframeReposeSkip } from "./InitStageValidation";
 import type { LandmarkMap } from "./LandmarkMap";
 import type { Keyframe } from "./Keyframe";
 import { PlaneDetector } from "./PlaneDetector";
 import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
-import { Relocalizer, requiredConfirmations, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
+import { Relocalizer, requiredConfirmations, spatialCellCount, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
 import {
   advanceTimeline,
   candidateAction,
@@ -28,6 +29,7 @@ import {
   LANDMARK_STRIDE,
   type BundleAdjustmentOutput,
   type BundleAdjustmentRejectReason,
+  type InitStageOutput,
   emptyBundleAdjustment,
   packTracks,
   type MapPoseOutput,
@@ -384,148 +386,254 @@ export class VisionEngine {
    * there is not enough to solve. Also callable from tests.
    */
   /**
-   * v25: re-solve every stored keyframe's pose against the (refined) map
-   * from its own observations, keeping the keyframe set consistent with the
-   * map after a multi-view init stage. Observations of landmarks that are
-   * gone are skipped; a keyframe with too few inliers keeps its pose.
-   * Returns the number of keyframes re-posed.
+   * Pose each stored keyframe would get in the refined map of an init stage
+   * (指示書 §4; computed into temporary storage, nothing written). PnP runs
+   * on the *solved* landmarks only — at their new positions — never on the
+   * rest of the map, which is still in the old frame at this point. The
+   * PnP pose replaces the keyframe's when it passes `validateKeyframeRepose`
+   * (relocalization-grade inliers / error / spread, and close to what the
+   * rigid correction `C` predicts); otherwise the keyframe is carried by
+   * `C` alone (`T_old ∘ C⁻¹`, the v18 propagation), so every keyframe ends
+   * up in the refined frame either way. Non-finite results are reported.
    */
-  private reposeKeyframes(k: CameraIntrinsics, solved: ReadonlySet<number>): number {
+  private planKeyframePoses(c: InitStageCandidate, k: CameraIntrinsics, correction: RigidTransform, maxRotationDeg: number, maxShift: number) {
     const cfg = this.config.landmarks;
-    const map = this.mapTracker.map;
+    const rc = this.config.relocalization;
     const f = (k.fx + k.fy) / 2;
     const opts = { huber: cfg.pnpHuberPx / f, inlierThreshold: cfg.pnpInlierPx / f, maxIterations: cfg.pnpMaxIterations, epsilon: 1e-6 };
-    let reposed = 0;
+    const index = new Map<number, number>();
+    c.ids.forEach((id, i) => index.set(id, i));
+    const invC = invertTransform(correction);
+    const plans: { kf: Keyframe; pose: RigidTransform; outcome: "reposed" | "propagated"; skip: KeyframeReposeSkip }[] = [];
+    let finite = true;
     for (const kf of this.relocalizer.keyframes) {
-      // Against the landmarks the stage solved when the keyframe observes
-      // enough of them (the rest of the map is still in the old frame at
-      // this point); otherwise against everything it observes.
-      const collect = (onlySolved: boolean) => {
-        const pts: number[] = [], ox: number[] = [], oy: number[] = [];
-        for (const o of kf.observations) {
-          if (onlySolved && !solved.has(o.landmarkId)) continue;
-          const lm = map.get(o.landmarkId);
-          if (!lm) continue;
-          pts.push(lm.position[0], lm.position[1], lm.position[2]);
-          ox.push((o.x - k.cx) / k.fx);
-          oy.push((o.y - k.cy) / k.fy);
-        }
-        return { pts, ox, oy };
-      };
-      let { pts, ox, oy } = collect(true);
-      if (ox.length < cfg.minPnPInliers) ({ pts, ox, oy } = collect(false));
+      // Expected pose in the refined frame from the rigid part alone.
+      const expected = composeTransforms(kf.pose, invC);
+      const pts: number[] = [], ox: number[] = [], oy: number[] = [], px: number[] = [], py: number[] = [];
+      for (const o of kf.observations) {
+        const li = index.get(o.landmarkId);
+        if (li === undefined) continue;
+        pts.push(c.after[li * 3], c.after[li * 3 + 1], c.after[li * 3 + 2]);
+        ox.push((o.x - k.cx) / k.fx);
+        oy.push((o.y - k.cy) / k.fy);
+        px.push(o.x);
+        py.push(o.y);
+      }
       const n = ox.length;
-      if (n < cfg.minPnPInliers) continue;
-      const res = refinePosePnP(kf.pose, Float64Array.from(pts), ox, oy, n, opts);
-      if (res.inlierCount < cfg.minPnPInliers) continue;
-      let finite = true;
-      for (let i = 0; finite && i < 9; i++) if (!Number.isFinite(res.pose.rotation[i])) finite = false;
-      for (let i = 0; finite && i < 3; i++) if (!Number.isFinite(res.pose.translation[i])) finite = false;
-      if (!finite) continue;
-      kf.pose.rotation.set(res.pose.rotation);
-      kf.pose.translation.set(res.pose.translation);
-      reposed++;
+      let skip: KeyframeReposeSkip = "few_observations";
+      let pose: RigidTransform = expected;
+      if (n >= rc.minInliers) {
+        const res = refinePosePnP(expected, Float64Array.from(pts), ox, oy, n, opts);
+        let ok = true;
+        for (let i = 0; ok && i < 9; i++) if (!Number.isFinite(res.pose.rotation[i])) ok = false;
+        for (let i = 0; ok && i < 3; i++) if (!Number.isFinite(res.pose.translation[i])) ok = false;
+        const inX: number[] = [], inY: number[] = [];
+        for (let i = 0; i < n; i++) if (res.inliers[i]) inX.push(px[i]), inY.push(py[i]);
+        const d = poseDelta(res.pose, expected);
+        skip = validateKeyframeRepose(
+          { observations: n, inliers: res.inlierCount, meanErrorPx: res.meanError * f, spatialCells: spatialCellCount(inX, inY, inX.length, k.width, k.height), rotationDeg: d.rotationDeg, shift: d.translation, finite: ok },
+          { minInliers: rc.minInliers, maxMeanErrorPx: rc.relaxedMeanErrorPx, minSpatialCells: rc.minSpatialCells, maxRotationDeg, maxShift },
+        );
+        if (skip === "none") pose = res.pose;
+      }
+      for (let i = 0; finite && i < 9; i++) if (!Number.isFinite(pose.rotation[i])) finite = false;
+      for (let i = 0; finite && i < 3; i++) if (!Number.isFinite(pose.translation[i])) finite = false;
+      plans.push({ kf, pose, outcome: skip === "none" ? "reposed" : "propagated", skip });
     }
-    return reposed;
+    return { plans, finite };
   }
 
   /**
-   * v25: finish an accepted multi-view init stage — re-pose the stored
-   * keyframes against the refined init landmarks, rebuild the landmarks
-   * triangulated after the initialization from those re-posed views (they
-   * were built in the old map), and derive the world-anchor correction the
-   * session applies (rotation from the current pose's correction, translation
+   * v25 / 指示書 §5–§6: judge a multi-view init stage candidate and, when it
+   * passes, prepare everything the stage changes in temporary storage —
+   * keyframe poses in the refined frame, the rebuilt landmarks (from those
+   * poses, the reference view and the current solved pose), the world-anchor
+   * correction (rotation from the current pose's correction, translation
    * from the init landmarks around the anchor points when enough of them,
-   * else the pose correction — the Phase 2 local mode; `bundleAdjustment.
-   * anchorCorrection` selects it as for the BA).
+   * else the pose correction — the Phase 2 local mode) — and commit all of
+   * it at once. A candidate that fails any check, or whose post-processing
+   * yields a non-finite value, changes nothing; the stage is consumed and
+   * the record says why.
    */
-  private finishInitStage(run: InitStageRun, k: CameraIntrinsics, frameId: number): void {
-    const st = run.output;
-    if (!st.applied) {
-      if (this.config.debug.log) console.log(`[AR] INIT STAGE ${st.stage} at frame ${frameId} NOT applied: ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px`);
+  private finishInitStage(c: InitStageCandidate, k: CameraIntrinsics, frameId: number): void {
+    const tracker = this.mapTracker;
+    const cfgBa = this.config.bundleAdjustment;
+    const cfgLm = this.config.landmarks;
+    const rc = this.config.relocalization;
+    const dPose = poseDelta(c.poseAfter, c.poseBefore);
+    const c0 = cameraCenterOf(c.poseBefore), c1 = cameraCenterOf(c.poseAfter);
+    const n0 = Math.hypot(c0[0], c0[1], c0[2]), n1 = Math.hypot(c1[0], c1[1], c1[2]);
+    const directionDeg = n0 > 1e-12 && n1 > 1e-12 ? (Math.acos(Math.max(-1, Math.min(1, (c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2]) / (n0 * n1)))) * 180) / Math.PI : 0;
+    let finite = Number.isFinite(c.errorAfterPx) && Number.isFinite(c.errorBeforePx);
+    for (let i = 0; finite && i < c.after.length; i++) if (!Number.isFinite(c.after[i])) finite = false;
+    for (let i = 0; finite && i < 9; i++) if (!Number.isFinite(c.poseAfter.rotation[i])) finite = false;
+    for (let i = 0; finite && i < 3; i++) if (!Number.isFinite(c.poseAfter.translation[i])) finite = false;
+    const spatialCells = spatialCellCount(c.obsX, c.obsY, c.ids.length, k.width, k.height);
+    const maxRotationDeg = cfgBa.posePriorRotationDeg * cfgBa.maxPoseJumpPriorRatio;
+    const verdict = validateInitStage(
+      {
+        finite,
+        errorBeforePx: c.errorBeforePx,
+        errorAfterPx: c.errorAfterPx,
+        landmarks: c.ids.length,
+        spatialCells,
+        behindCamera: c.behindCamera,
+        rotationDeg: dPose.rotationDeg,
+        cameraShift: dPose.translation,
+        medianDepth: c.medianDepth,
+        shiftedFraction: c.ids.length ? c.shifted / c.ids.length : 1,
+      },
+      {
+        minGainFraction: cfgBa.minGainFraction,
+        minLandmarks: cfgLm.initMinLandmarks,
+        minSpatialCells: rc.minSpatialCells,
+        maxRotationDeg,
+        maxShiftDepthRatio: cfgBa.posePriorTranslationDepthRatio * cfgBa.maxPoseJumpPriorRatio,
+        maxShiftedFraction: cfgBa.maxShiftedFraction,
+      },
+    );
+    const st: InitStageOutput = {
+      stage: c.stage,
+      frameId,
+      parallaxPx: c.parallaxPx,
+      baselineRatio: c.baselineRatio,
+      landmarks: c.ids.length,
+      errorBeforePx: c.errorBeforePx,
+      errorAfterPx: c.errorAfterPx,
+      iterations: c.iterations,
+      converged: c.converged,
+      rotationDeg: dPose.rotationDeg,
+      directionDeg,
+      maxLandmarkShift: Number.isFinite(c.maxLandmarkShift) ? c.maxLandmarkShift : 0,
+      applied: false,
+      rejectReason: verdict.reason,
+      cameraShift: dPose.translation,
+      medianDepth: c.medianDepth,
+      spatialCells,
+      shiftedFraction: c.ids.length ? c.shifted / c.ids.length : 1,
+      referenceErrorAfterPx: c.referenceErrorAfterPx,
+      rebuilt: 0,
+      removed: 0,
+      keyframesReposed: 0,
+      keyframesPropagated: 0,
+      correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+      correctionTranslation: new Float64Array(3),
+      anchorFitLandmarks: 0,
+    };
+    const log = (msg: string) => {
+      if (this.config.debug.log) console.log(`[AR] INIT STAGE ${st.stage} at frame ${frameId} ${msg}`);
+    };
+    if (!verdict.accepted) {
+      tracker.recordInitStage(st);
+      log(`REJECTED (${verdict.reason}): ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u (limits ${maxRotationDeg.toFixed(1)}° / ${verdict.maxShift.toFixed(3)} u), cells ${spatialCells}, behind ${c.behindCamera}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%`);
       return;
     }
-    const tracker = this.mapTracker;
-    const solved = new Set(run.ids);
-    st.keyframesReposed = this.reposeKeyframes(k, solved);
-    // Views of an unsolved landmark: the reference view (init landmarks),
-    // keyframe observations (re-posed) and its current track.
+    // ---- Prepare (temporary storage only) ----
+    // Rigid part of the change, old map → new map near the camera: a point
+    // fixed in the camera, X_cam = T_old X_old = T_new X_new → C = T_new⁻¹ T_old.
+    const correction = composeTransforms(invertTransform(c.poseAfter), c.poseBefore);
+    const kfPlan = this.planKeyframePoses(c, k, correction, maxRotationDeg, verdict.maxShift);
+    const solved = new Set(c.ids);
     const trackOf = new Map<number, Track>();
     for (const t of this.tracks) if (t.landmarkId >= 0) trackOf.set(t.landmarkId, t);
+    // Views of an unsolved landmark, all in the refined frame: the reference
+    // view (init landmarks), the planned keyframe poses and the current track.
     const kfViews = new Map<number, { pose: RigidTransform; x: number; y: number }[]>();
-    for (const kf of this.relocalizer.keyframes) {
-      for (const o of kf.observations) {
+    for (const p of kfPlan.plans) {
+      for (const o of p.kf.observations) {
         let v = kfViews.get(o.landmarkId);
         if (!v) kfViews.set(o.landmarkId, (v = []));
-        v.push({ pose: kf.pose, x: o.x, y: o.y });
+        v.push({ pose: p.pose, x: o.x, y: o.y });
       }
     }
     const reference: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
-    const rb = tracker.rebuildUnsolvedLandmarks(this.tracks, k, solved, (lm) => {
+    const plan = tracker.planRebuild(k, solved, (lm) => {
       const v = kfViews.get(lm.id)?.slice() ?? [];
       if (tracker.isInitLandmark(lm.id)) v.unshift({ pose: reference, x: lm.anchorX, y: lm.anchorY });
       const t = trackOf.get(lm.id);
-      if (t) v.push({ pose: run.poseAfter, x: t.x, y: t.y });
+      if (t) v.push({ pose: c.poseAfter, x: t.x, y: t.y });
       return v;
     });
-    st.rebuilt = rb.rebuilt;
-    st.removed = rb.removed;
-    // Anchor correction old map → new map (as the BA's, Phase 2): a point
-    // fixed in the camera, X_cam = T_old X_old = T_new X_new → C = T_new⁻¹ T_old.
-    const cfgBa = this.config.bundleAdjustment;
-    const c = composeTransforms(invertTransform(run.poseAfter), run.poseBefore);
+    let postFinite = kfPlan.finite;
+    for (const u of plan.updates) for (let i = 0; postFinite && i < 3; i++) if (!Number.isFinite(u.position[i])) postFinite = false;
+    // Anchor correction (as the BA's, Phase 2).
+    const corrRot = new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const corrTrans = new Float64Array(3);
+    let anchorFitLandmarks = 0;
     if (cfgBa.anchorCorrection !== "none") {
-      st.correctionRotation.set(c.rotation);
-      st.correctionTranslation.set(c.translation);
+      corrRot.set(correction.rotation);
+      corrTrans.set(correction.translation);
       const ap = this.anchorPoints;
       if (cfgBa.anchorCorrection === "local" && ap && ap.length >= 3 && cfgBa.anchorFitDepthRatio > 0) {
-        const n = run.ids.length;
-        const depth = tracker.sceneDepth;
-        const radius = cfgBa.anchorFitDepthRatio * Math.max(depth, 1e-6);
+        const n = c.ids.length;
+        const radius = cfgBa.anchorFitDepthRatio * Math.max(tracker.sceneDepth, 1e-6);
         const inv2r2 = 1 / (2 * radius * radius);
         const weights = new Float64Array(n);
         let weighted = 0;
         for (let i = 0; i < n; i++) {
           let best = Infinity;
           for (let a = 0; a + 2 < ap.length; a += 3) {
-            const d2 = (run.before[i * 3] - ap[a]) ** 2 + (run.before[i * 3 + 1] - ap[a + 1]) ** 2 + (run.before[i * 3 + 2] - ap[a + 2]) ** 2;
+            const d2 = (c.before[i * 3] - ap[a]) ** 2 + (c.before[i * 3 + 1] - ap[a + 1]) ** 2 + (c.before[i * 3 + 2] - ap[a + 2]) ** 2;
             if (d2 < best) best = d2;
           }
           weights[i] = Math.exp(-best * inv2r2);
           if (weights[i] > 0.3) weighted++;
         }
         if (weighted >= cfgBa.anchorFitMinLandmarks) {
-          const fit = translationFit(run.before, run.after, n, c.rotation, weights);
+          const fit = translationFit(c.before, c.after, n, correction.rotation, weights);
           if (fit) {
-            st.correctionTranslation.set(fit.transform.translation);
-            st.anchorFitLandmarks = weighted;
+            corrTrans.set(fit.transform.translation);
+            anchorFitLandmarks = weighted;
           }
         }
       }
     }
-    if (this.config.debug.log) {
-      const corr = Math.hypot(st.correctionTranslation[0], st.correctionTranslation[1], st.correctionTranslation[2]);
-      console.log(
-        `[AR] INIT STAGE ${st.stage} at frame ${frameId}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px in ${st.iterations} it, pose moved ${st.rotationDeg.toFixed(2)}° / dir ${st.directionDeg.toFixed(2)}°, max landmark shift ${st.maxLandmarkShift.toFixed(3)} u, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, ${st.keyframesReposed} keyframes re-posed, anchor correction ${corr.toFixed(4)} u (${st.anchorFitLandmarks ? `local fit on ${st.anchorFitLandmarks}` : "pose"})`,
-      );
+    for (let i = 0; postFinite && i < 9; i++) if (!Number.isFinite(corrRot[i])) postFinite = false;
+    for (let i = 0; postFinite && i < 3; i++) if (!Number.isFinite(corrTrans[i])) postFinite = false;
+    if (!postFinite) {
+      st.rejectReason = "postprocess";
+      tracker.recordInitStage(st);
+      log("REJECTED (postprocess): a non-finite keyframe pose, rebuilt landmark or correction; nothing written");
+      return;
     }
+    // ---- Commit (all at once) ----
+    const rb = tracker.commitInitStage(c, plan, this.tracks);
+    for (const p of kfPlan.plans) {
+      p.kf.pose.rotation.set(p.pose.rotation);
+      p.kf.pose.translation.set(p.pose.translation);
+      if (p.outcome === "reposed") st.keyframesReposed++;
+      else st.keyframesPropagated++;
+    }
+    st.applied = true;
+    st.rebuilt = rb.rebuilt;
+    st.removed = rb.removed;
+    st.correctionRotation.set(corrRot);
+    st.correctionTranslation.set(corrTrans);
+    st.anchorFitLandmarks = anchorFitLandmarks;
+    tracker.recordInitStage(st);
+    const corr = Math.hypot(corrTrans[0], corrTrans[1], corrTrans[2]);
+    log(
+      `applied: baseline ×${st.baselineRatio.toFixed(2)}, parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px in ${st.iterations} it (reference view ${st.referenceErrorAfterPx.toFixed(2)} px), pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u (dir ${directionDeg.toFixed(2)}°), max landmark shift ${st.maxLandmarkShift.toFixed(3)} u, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, keyframes re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}${kfPlan.plans.filter((p) => p.outcome === "propagated").map((p) => ` KF${p.kf.id}:${p.skip}`).join("")}, anchor correction ${corr.toFixed(4)} u (${anchorFitLandmarks ? `local fit on ${anchorFitLandmarks}` : "pose"})`,
+    );
   }
 
   runBundleAdjustment(k: CameraIntrinsics, frameId = this.lastFrameId): boolean {
     const cfg = this.config.bundleAdjustment;
     // Keyframes struck out after repeated pose jumps (v19) stay stored for
-    // relocalization but do not take part in the solve; the first keyframe
-    // (the gauge) is never excluded.
+    // relocalization but do not take part in the solve; the origin keyframe
+    // (explicit flag, 指示書 §3) is never excluded.
     const stored = this.relocalizer.keyframes;
-    const kfs = stored.filter((kf, i) => i === 0 || !this.baExcludedKeyframes.has(kf.id));
+    const kfs = stored.filter((kf) => kf.origin || !this.baExcludedKeyframes.has(kf.id));
     const excludedKeyframes = stored.length - kfs.length;
     const map = this.mapTracker.map;
     if (kfs.length < Math.max(2, cfg.minKeyframes)) return false;
     const t0 = now();
     const f = (k.fx + k.fy) / 2;
-    // Landmarks observed by enough keyframes.
+    // Landmarks observed by enough keyframes. The reference view (identity,
+    // the map frame) counts as a view of the init landmarks it anchored.
     const counts = new Map<number, number>();
     for (const kf of kfs) for (const o of kf.observations) if (map.get(o.landmarkId)) counts.set(o.landmarkId, (counts.get(o.landmarkId) ?? 0) + 1);
+    for (const lm of map.values()) if (this.mapTracker.isInitLandmark(lm.id) && lm.anchorPose) counts.set(lm.id, (counts.get(lm.id) ?? 0) + 1);
     const index = new Map<number, number>();
     const ids: number[] = [];
     for (const [id, c] of counts) {
@@ -547,8 +655,32 @@ export class VisionEngine {
     // v21: landmarks a keyframe contradicts (an observation beyond the
     // outlier gate) are removed from the map after the run.
     const inconsistent = new Set<number>();
-    const kfIndex = new Map<number, number>();
-    kfs.forEach((kf, i) => kfIndex.set(kf.id, i));
+    const identityPose: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
+    // Gauge (指示書 §3): the solve holds the map frame itself fixed — the
+    // two-view reference camera (identity), observing the init landmarks at
+    // their anchor pixels — and every stored keyframe is free. The map frame
+    // is then never written by any solver (the init stages hold the same
+    // view fixed). Only when the reference view has too few observations
+    // left does the origin keyframe take over as the fixed one.
+    const refViews: { li: number; x: number; y: number }[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const lm = map.get(ids[i])!;
+      if (!this.mapTracker.isInitLandmark(lm.id) || !lm.anchorPose) continue;
+      const X = positions[i * 3], Y = positions[i * 3 + 1], Z = positions[i * 3 + 2];
+      const x = (lm.anchorX - k.cx) / k.fx, y = (lm.anchorY - k.cy) / k.fy;
+      if (!(Z > 1e-6) || !(Math.hypot(X / Z - x, Y / Z - y) <= maxErr)) {
+        outliers++;
+        inconsistent.add(lm.id);
+        continue;
+      }
+      refViews.push({ li: i, x, y });
+    }
+    const gauge: BundleAdjustmentOutput["gauge"] = refViews.length >= this.config.landmarks.minPnPInliers ? "reference" : "origin";
+    const originIndex = Math.max(0, kfs.findIndex((kf) => kf.origin));
+    // Problem keyframes: [reference (fixed), ...stored (free)] or [...stored (origin fixed)].
+    const problemKeyframes = gauge === "reference" ? [{ pose: identityPose, fixed: true }, ...kfs.map((kf) => ({ pose: kf.pose, fixed: false }))] : kfs.map((kf, i) => ({ pose: kf.pose, fixed: i === originIndex }));
+    const kfOffset = gauge === "reference" ? 1 : 0;
+    if (gauge === "reference") for (const v of refViews) observations.push({ keyframe: 0, landmark: v.li, x: v.x, y: v.y });
     for (let ki = 0; ki < kfs.length; ki++) {
       const kf = kfs[ki];
       const r = kf.pose.rotation, t = kf.pose.translation;
@@ -573,24 +705,26 @@ export class VisionEngine {
           inconsistent.add(o.landmarkId);
           continue;
         }
-        observations.push({ keyframe: ki, landmark: li, x, y });
+        observations.push({ keyframe: ki + kfOffset, landmark: li, x, y });
       }
     }
     if (observations.length < 12) return false;
-    // Scale gauge: the median depth, in the fixed first keyframe, of the
-    // landmarks that keyframe observes (a stable set across runs).
+    // Scale gauge: the median depth, in the fixed view, of the landmarks it
+    // observes (a stable set across runs).
+    const fixedIndex = gauge === "reference" ? 0 : originIndex;
     const gaugeLandmarks: number[] = [];
-    for (const o of observations) if (o.keyframe === 0) gaugeLandmarks.push(o.landmark);
-    // Depth of every landmark in the first keyframe: the priors and the shift
+    for (const o of observations) if (o.keyframe === fixedIndex) gaugeLandmarks.push(o.landmark);
+    // Depth of every landmark in the fixed view: the priors and the shift
     // check are relative to it.
-    const r0 = kfs[0].pose.rotation, t0k = kfs[0].pose.translation;
+    const fixedPose = problemKeyframes[fixedIndex].pose;
+    const r0 = fixedPose.rotation, t0k = fixedPose.translation;
     const depths = new Float64Array(ids.length);
     for (let i = 0; i < ids.length; i++) depths[i] = Math.abs(r0[6] * positions[i * 3] + r0[7] * positions[i * 3 + 1] + r0[8] * positions[i * 3 + 2] + t0k[2]);
     const sortedDepths = Float64Array.from(depths).sort();
     const medianDepth = sortedDepths.length ? sortedDepths[sortedDepths.length >> 1] : 0;
     const landmarkPriorSigma = cfg.landmarkPriorDepthRatio > 0 ? depths.map((d) => cfg.landmarkPriorDepthRatio * Math.max(d, 1e-6)) : undefined;
     const problem = {
-      keyframes: kfs.map((kf, i) => ({ pose: kf.pose, fixed: i === 0 })),
+      keyframes: problemKeyframes,
       landmarks: positions,
       landmarkCount: ids.length,
       observations,
@@ -615,7 +749,9 @@ export class VisionEngine {
     let jumpKeyframeId = -1, jumpRotationDeg = 0, jumpShift = 0, jumpRatio = 0;
     const sigmaRot = (cfg.posePriorRotationDeg * Math.PI) / 180;
     const sigmaTrans = cfg.posePriorTranslationDepthRatio * medianDepth;
-    for (let i = 1; i < kfs.length; i++) {
+    const isFree = (i: number) => gauge === "reference" || i !== originIndex;
+    for (let i = 0; i < kfs.length; i++) {
+      if (!isFree(i)) continue;
       const rot = rotationDistance(savedPoses[i].rotation, kfs[i].pose.rotation);
       const c0 = cameraCenterOf(savedPoses[i]), c1 = cameraCenterOf(kfs[i].pose);
       const shift = Math.hypot(c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]);
@@ -673,7 +809,7 @@ export class VisionEngine {
       // X_new = T_new⁻¹ T_old X_old.
       const corrections = new Map<number, RigidTransform>();
       for (let i = 0; i < kfs.length; i++) {
-        if (i === 0) continue;
+        if (!isFree(i)) continue;
         corrections.set(kfs[i].id, composeTransforms(invertTransform(kfs[i].pose), savedPoses[i]));
       }
       // Phase 2: the motion of the adjusted landmarks around the anchor
@@ -727,7 +863,7 @@ export class VisionEngine {
         if (index.has(lm.id)) continue;
         const c = corrections.get(lm.refKeyframeId);
         if (!c) {
-          // Reference is the fixed first keyframe (no correction) or gone.
+          // Reference keyframe gone (or the fixed origin under the origin gauge).
           lm.baMode = "none";
           untouched++;
           continue;
@@ -777,6 +913,8 @@ export class VisionEngine {
       ranThisFrame: true,
       keyframes: kfs.length,
       freeKeyframes: res.freeKeyframes,
+      gauge,
+      referenceObservations: gauge === "reference" ? refViews.length : 0,
       landmarks: ids.length,
       observations: observations.length,
       outliers,
@@ -1060,7 +1198,7 @@ export class VisionEngine {
           this.relocPreparedFrame = -1;
           // The initialization frame is the first keyframe; the landmarks
           // triangulated in the initialization reference it (Phase 7 v18).
-          const kf0 = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp);
+          const kf0 = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, null, 0, true);
           tracker.referenceKeyframeId = kf0.id;
           for (const lm of tracker.map.values()) lm.refKeyframeId = kf0.id;
           this.relocStatus.keyframes = this.relocalizer.count;
@@ -1318,8 +1456,10 @@ export class VisionEngine {
         // session moves the anchor by the stage's correction).
         if (cfg.initRefineWithBA && cfg.initRefineStages > 0) {
           // (Counted in the `map` time: at most `initRefineStages` runs per map.)
-          const run = tracker.refineInitStage(this.tracks, k, frameId);
-          if (run) this.finishInitStage(run, k, frameId);
+          // Not during medium / fast motion: the observations of a blurred
+          // frame are not what to re-constrain the map with (recording 41).
+          const candidate = tracker.refineInitStage(this.tracks, k, frameId, this.config.bundleAdjustment.maxLandmarkShiftRatio, this.lastMotion.level !== "normal");
+          if (candidate) this.finishInitStage(candidate, k, frameId);
         }
         // Keyframe policy (spec §35).
         const par = this.medianParallaxSinceLastKeyframe();

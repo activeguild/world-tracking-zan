@@ -5,6 +5,7 @@ import type { PoseRejection } from "./PoseValidation";
 import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
 import type { RelocalizationSearchStage, RelocalizationTimeline } from "./RelocalizationSchedule";
 import { emptyResidualField, type ResidualField } from "./ResidualField";
+import type { InitStageRejectReason } from "./InitStageValidation";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -525,7 +526,9 @@ export interface InitRefinementOutput {
   maxStages: number;
   currentParallaxPx: number;
   trackedInitLandmarks: number;
-  nextStageParallaxPx: number;
+  /** Camera baseline from the reference view over the initialization baseline (current / needed for the next stage). */
+  currentBaselineRatio: number;
+  nextStageBaselineRatio: number;
   lastStage: InitStageOutput | null;
 }
 
@@ -542,8 +545,9 @@ export interface InitStageOutput {
   /** 1-based stage index. */
   stage: number;
   frameId: number;
-  /** Median parallax (px) of the init landmarks from the reference view when the stage ran. */
+  /** Median parallax (px) of the init landmarks from the reference view when the stage ran, and the baseline ratio that triggered it. */
   parallaxPx: number;
+  baselineRatio: number;
   /** Init landmarks in the solve. */
   landmarks: number;
   errorBeforePx: number;
@@ -556,11 +560,27 @@ export interface InitStageOutput {
   /** Largest landmark move (map units). */
   maxLandmarkShift: number;
   applied: boolean;
+  /**
+   * Why the stage was not applied (指示書 §6; `none` when applied). The
+   * solve is accepted only when it is finite, lowers the error by
+   * `bundleAdjustment.minGainFraction`, keeps the current pose within the BA
+   * pose-jump limits, spreads its observations over the image, leaves every
+   * landmark in front of both cameras and moves few of them far.
+   */
+  rejectReason: InitStageRejectReason;
+  /** Camera-centre move of the current pose by the solve (map units) and the median reference-view depth it was judged against. */
+  cameraShift: number;
+  medianDepth: number;
+  spatialCells: number;
+  shiftedFraction: number;
+  /** Mean reprojection error of the solved landmarks in the reference view after the solve (px; the map frame stayed the reference camera). */
+  referenceErrorAfterPx: number;
   /** Landmarks not in the solve (triangulated after the initialization, or init landmarks without a track): re-triangulated from re-posed views / dropped (fewer than two views or failed gates). */
   rebuilt: number;
   removed: number;
-  /** Stored keyframes whose pose was re-solved against the refined map. */
+  /** Stored keyframes whose pose was re-solved by PnP on the solved landmarks only, and those carried by the rigid pose correction instead (§4). */
   keyframesReposed: number;
+  keyframesPropagated: number;
   /**
    * Rigid transform old map → new map near the placed objects (rotation
    * from the current pose's correction, translation from the init landmarks
@@ -594,6 +614,16 @@ export interface BundleAdjustmentOutput {
   ranThisFrame: boolean;
   keyframes: number;
   freeKeyframes: number;
+  /**
+   * What the solve held fixed (指示書 §3): `reference` = the two-view
+   * reference camera (identity, the map frame itself, observing the init
+   * landmarks at their anchor pixels; every stored keyframe is free),
+   * `origin` = the origin keyframe, used only when the reference view has
+   * fewer than `landmarks.minPnPInliers` observations left.
+   */
+  gauge: "reference" | "origin";
+  /** Observations of the reference view in the solve (0 with the origin gauge). */
+  referenceObservations: number;
   /** Landmarks refined (observed by ≥ minLandmarkObservations keyframes). */
   landmarks: number;
   observations: number;
@@ -667,6 +697,8 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     ranThisFrame: false,
     keyframes: 0,
     freeKeyframes: 0,
+    gauge: "reference",
+    referenceObservations: 0,
     landmarks: 0,
     observations: 0,
     outliers: 0,

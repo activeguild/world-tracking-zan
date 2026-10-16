@@ -716,8 +716,12 @@ export class Relocalizer {
     let victim: Keyframe | null = null;
     let victimKey = Number.POSITIVE_INFINITY;
     let victimAlive = Number.POSITIVE_INFINITY;
-    for (let i = 1; i < n - 1; i++) {
+    // The origin keyframe (explicit flag, 指示書 §3; the first stored one when
+    // no keyframe carries the flag) and the newest one are never evicted.
+    const flagged = this.keyframes.some((kf) => kf.origin);
+    for (let i = 0; i < n - 1; i++) {
       const kf = this.keyframes[i];
+      if (kf.origin || (!flagged && i === 0)) continue;
       const alive = map ? this.aliveObservations(kf, map) : kf.observations.length;
       // A keyframe with fewer live landmarks than a relocalization needs can
       // never succeed: it is the most redundant whatever its viewpoint.
@@ -728,7 +732,7 @@ export class Relocalizer {
         victimAlive = alive;
       }
     }
-    if (!victim) victim = this.keyframes[1];
+    if (!victim) victim = this.keyframes.find((kf, i) => !kf.origin && i < n - 1) ?? this.keyframes[1];
     const idx = this.keyframes.indexOf(victim);
     this.keyframes.splice(idx, 1);
     this.retry.delete(victim.id);
@@ -894,6 +898,7 @@ export class Relocalizer {
     timestamp: number,
     map: LandmarkMap | null = null,
     sceneDepth = 0,
+    origin = false,
   ): Keyframe {
     const observations: KeyframeObservation[] = [];
     for (const t of tracks) {
@@ -905,6 +910,7 @@ export class Relocalizer {
       id: this.nextId++,
       frameId,
       timestamp,
+      origin,
       pose: { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) },
       pyramid: clonePyramid(pyramid),
       coarse,

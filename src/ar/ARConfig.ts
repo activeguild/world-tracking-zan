@@ -200,16 +200,20 @@ export interface LandmarkConfig {
    * changing the residual, and the fresh map (0.5 px) jumped to ~2 px as
    * soon as a third viewpoint arrived. Each stage k (1…`initRefineStages`)
    * re-solves the init landmarks and the current pose against the fixed
-   * reference view once the median parallax of the tracked init landmarks
-   * from the reference reaches `initMinParallaxPx × initRefineParallaxFactor^k`
-   * (30 → 60 → 120 → 240 px). Landmarks triangulated after the
-   * initialization are dropped at an accepted stage (they were built in the
-   * old map) and the stored keyframes are re-posed. Only before the world is
-   * established (the anchor is not moved); 0 = two-view refinement only.
-   * `?initstages=N` in the demo.
+   * reference view once the camera's *baseline* from the reference view (the
+   * camera-centre distance, in units of the initialization baseline) has
+   * grown by `initRefineBaselineFactor^k` (×2 → ×4 → ×8) and the tracked
+   * init landmarks show at least `initMinParallaxPx` of median parallax. The
+   * baseline, not the pixel parallax, is what conditions the depth: a pure
+   * rotation moves the pixels by hundreds of px without adding any
+   * (修正指示書「座標系整合性」, the §9.2 scenario's yaw phase). Landmarks not
+   * in the solve are re-triangulated against the re-posed keyframes and the
+   * world anchor follows the stage's correction (§5–§7 of that document);
+   * a stage is accepted only through `validateInitStage`. 0 = two-view
+   * refinement only. `?initstages=N` in the demo.
    */
   initRefineStages: number;
-  initRefineParallaxFactor: number;
+  initRefineBaselineFactor: number;
   /** Minimum ray parallax angle (degrees) for a triangulated point. */
   minTriangulationAngleDeg: number;
   /** Maximum reprojection error (px, both views summed) for a triangulated point. */
@@ -920,7 +924,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     initMinLandmarks: 30,
     initRefineWithBA: true,
     initRefineStages: 3,
-    initRefineParallaxFactor: 2,
+    initRefineBaselineFactor: 2,
     minTriangulationAngleDeg: 1.0,
     // The map is fixed once built (no depth refinement), so landmarks must
     // be well conditioned when created: 20 px of parallax from the anchor

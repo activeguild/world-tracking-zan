@@ -15,6 +15,16 @@ export interface Keyframe {
   id: number;
   frameId: number;
   timestamp: number;
+  /**
+   * The keyframe stored at the map initialization (the origin view of the
+   * map's keyframe set): never evicted, protects the init landmarks, and the
+   * fallback gauge of the keyframe bundle adjustment when the reference view
+   * has too few observations left. Explicit (指示書 §3) rather than "index 0".
+   * Note: the map *frame* itself is defined by the two-view reference camera
+   * (identity pose, `MapTracker.mapFrameId`), which is not a stored keyframe
+   * and is never written by any solver.
+   */
+  origin: boolean;
   /** X_cam = R X_map + t */
   pose: RigidTransform;
   pyramid: ImagePyramid;

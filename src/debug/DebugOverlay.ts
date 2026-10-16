@@ -118,6 +118,8 @@ export interface HudStats {
     lastFrameId: number;
     keyframes: number;
     freeKeyframes: number;
+    gauge?: string;
+    referenceObservations?: number;
     landmarks: number;
     observations: number;
     outliers: number;
@@ -389,6 +391,9 @@ export interface HudStats {
     baExecuted: boolean;
     baAccepted: boolean;
     baRejectReason: string;
+    initStageExecuted?: boolean;
+    initStageAccepted?: boolean;
+    initStageRejectReason?: string;
   } | null;
   /** 指示書「空間固定性」§7: two-view refinement of the map initialization. */
   initRefine?: {
@@ -404,7 +409,8 @@ export interface HudStats {
     maxStages?: number;
     currentParallaxPx?: number;
     trackedInitLandmarks?: number;
-    nextStageParallaxPx?: number;
+    currentBaselineRatio?: number;
+    nextStageBaselineRatio?: number;
     lastStage?: {
       stage: number;
       parallaxPx: number;
@@ -419,7 +425,13 @@ export interface HudStats {
       applied: boolean;
       rebuilt: number;
       removed: number;
+      baselineRatio?: number;
       keyframesReposed: number;
+      keyframesPropagated?: number;
+      rejectReason?: string;
+      cameraShift?: number;
+      spatialCells?: number;
+      referenceErrorAfterPx?: number;
       correctionTranslation: Float64Array;
       anchorFitLandmarks: number;
     } | null;
@@ -561,7 +573,7 @@ export class DebugOverlay {
       rows.push(
         row(
           "Wdiag",
-          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}`,
+          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}${d.initStageExecuted ? `  init ${d.initStageAccepted ? "ok" : d.initStageRejectReason}` : ""}`,
           unexplained ? "hud-warn" : undefined,
         ),
       );
@@ -580,12 +592,12 @@ export class DebugOverlay {
       // current pose free) as the parallax from the reference grows.
       if (ir.maxStages !== undefined && ir.maxStages > 0) {
         const st = ir.lastStage;
-        const progress = `${ir.stages ?? 0}/${ir.maxStages}  par ${(ir.currentParallaxPx ?? 0).toFixed(0)}/${(ir.nextStageParallaxPx ?? 0).toFixed(0)}px (n ${ir.trackedInitLandmarks ?? 0})`;
+        const progress = `${ir.stages ?? 0}/${ir.maxStages}  base ×${(ir.currentBaselineRatio ?? 0).toFixed(2)}/${(ir.nextStageBaselineRatio ?? 0).toFixed(0)} par ${(ir.currentParallaxPx ?? 0).toFixed(0)}px (n ${ir.trackedInitLandmarks ?? 0})`;
         rows.push(
           row(
             "InitMV",
             st
-              ? `${progress}  last @${st.parallaxPx.toFixed(0)}px ${st.landmarks}lm ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)}px it ${st.iterations}${st.converged ? "" : "!"} moved ${st.rotationDeg.toFixed(2)}° / dir ${st.directionDeg.toFixed(2)}° Δlm ${st.maxLandmarkShift.toFixed(3)}u ${st.applied ? `applied rebuilt ${st.rebuilt} −${st.removed}lm kf ${st.keyframesReposed} corr ${Math.hypot(st.correctionTranslation[0], st.correctionTranslation[1], st.correctionTranslation[2]).toFixed(3)}u${st.anchorFitLandmarks ? ` (n${st.anchorFitLandmarks})` : " (pose)"}` : "NOT applied"}`
+              ? `${progress}  last ×${(st.baselineRatio ?? 0).toFixed(2)} @${st.parallaxPx.toFixed(0)}px ${st.landmarks}lm ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)}px it ${st.iterations}${st.converged ? "" : "!"} moved ${st.rotationDeg.toFixed(2)}° / ${(st.cameraShift ?? 0).toFixed(3)}u Δlm ${st.maxLandmarkShift.toFixed(3)}u cells ${st.spatialCells ?? "-"} ${st.applied ? `applied ref ${(st.referenceErrorAfterPx ?? 0).toFixed(2)}px rebuilt ${st.rebuilt} −${st.removed}lm kf ${st.keyframesReposed}+${st.keyframesPropagated ?? 0} corr ${Math.hypot(st.correctionTranslation[0], st.correctionTranslation[1], st.correctionTranslation[2]).toFixed(3)}u${st.anchorFitLandmarks ? ` (n${st.anchorFitLandmarks})` : " (pose)"}` : `REJECTED ${st.rejectReason ?? ""}`}`
               : progress,
             st && !st.applied ? "hud-warn" : undefined,
           ),
@@ -788,7 +800,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : ba.rejectReason === "invalid" ? "invalid (non-finite)" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : ba.rejectReason === "invalid" ? "invalid (non-finite)" : "shift"}` : ""}  kf ${ba.freeKeyframes}/${ba.keyframes}${ba.gauge === "origin" ? " fix origin" : ba.gauge === "reference" ? ` ref${ba.referenceObservations ?? 0}` : ""}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
             (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );

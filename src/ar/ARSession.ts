@@ -833,16 +833,16 @@ export class ARSession {
     // v25: an accepted multi-view init stage re-constrained the init map;
     // the world anchor follows its correction the same way (once, this frame).
     const st = r.initRefinement?.lastStage;
-    if (st && st.applied && st.frameId === r.frameId) {
+    if (st && st.frameId === r.frameId) {
       let anchorMoved = false;
-      if (this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
         anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
         if (anchorMoved) this.worldChangeReason = "init_stage";
       }
       if (this.config.debug.log) {
         const t = st.correctionTranslation;
         this.logger.info(
-          `INIT STAGE ${st.stage} at frame ${st.frameId}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / dir ${st.directionDeg.toFixed(2)}°, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
         );
       }
     }
@@ -874,6 +874,7 @@ export class ARSession {
       previousPlaneNormal: this.prevPlaneNormal,
       planeRecovery: r.planeRecovery,
       bundleAdjustment: r.bundleAdjustment,
+      initStage: r.initRefinement?.lastStage ?? null,
       previousWorld: this.prevWorldFrame,
       world: worldNow,
       changeReason: this.worldChangeReason,

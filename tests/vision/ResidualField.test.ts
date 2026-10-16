@@ -252,7 +252,8 @@ describe("residual vector field in the engine", () => {
     for (let f = 0; f < FRAMES; f++) seq.push(tpRender(poseAt(f)));
     const run = (fov: number) => {
       const k = approximateIntrinsics(TP_W, TP_H, fov);
-      const engine = new VisionEngine(TP_W, TP_H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(11));
+      // A diagnostic of a *deliberately* perturbed map: no BA and no init stage may repair it meanwhile.
+      const engine = new VisionEngine(TP_W, TP_H, resolveConfig({ bundleAdjustment: { enabled: false }, landmarks: { initRefineStages: 0 } }), createRng(11));
       const slide: ResidualField[] = [], tilt: ResidualField[] = [];
       for (let f = 0; f < FRAMES; f++) {
         const mp = engine.process({ frameId: f, timestamp: f * 33.3, width: TP_W, height: TP_H, gray: seq[f], intrinsics: k, gravity: tpGravity }).mapPose;
@@ -293,7 +294,8 @@ describe("residual vector field in the engine", () => {
     const seq: Uint8Array[] = [];
     for (let f = 0; f < FRAMES; f++) seq.push(tpRender(poseAt(f)));
     const run = (perturb: number) => {
-      const engine = new VisionEngine(TP_W, TP_H, resolveConfig({ bundleAdjustment: { enabled: false } }), createRng(11));
+      // A diagnostic of a *deliberately* perturbed map: no BA and no init stage may repair it meanwhile.
+      const engine = new VisionEngine(TP_W, TP_H, resolveConfig({ bundleAdjustment: { enabled: false }, landmarks: { initRefineStages: 0 } }), createRng(11));
       const before: ResidualField[] = [], after: ResidualField[] = [];
       for (let f = 0; f < FRAMES; f++) {
         const mp = engine.process({ frameId: f, timestamp: f * 33.3, width: TP_W, height: TP_H, gray: seq[f], intrinsics: approximateIntrinsics(TP_W, TP_H, TP_FOV), gravity: tpGravity }).mapPose;

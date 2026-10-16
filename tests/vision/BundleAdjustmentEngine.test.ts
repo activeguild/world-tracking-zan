@@ -61,7 +61,10 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
         // consistent synthetic map the mean may move by a few hundredths of a px.
         expect(ba.errorAfterPx).toBeLessThanOrEqual(ba.errorBeforePx + 0.05);
         expect(ba.errorAfterPx).toBeLessThan(1.0);
-        expect(ba.freeKeyframes).toBe(ba.keyframes - 1);
+        // 指示書「座標系整合性」§3: the fixed view is the reference camera (the map frame), every stored keyframe is free.
+        expect(ba.gauge).toBe("reference");
+        expect(ba.freeKeyframes).toBe(ba.keyframes);
+        expect(ba.referenceObservations).toBeGreaterThanOrEqual(12);
         expect(ba.landmarks).toBeGreaterThan(20);
         expect(ba.observations).toBeGreaterThan(40);
         expect(engine.timing.ba).toBeGreaterThan(0);

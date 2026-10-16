@@ -145,7 +145,16 @@ parallax of the tracked init landmarks from the reference view reaches 60 /
 the fixed reference view; the stored keyframes are re-posed, the landmarks
 built in the meantime are re-triangulated from all their views, and the world
 anchor follows the stage's correction (`init_stage`). `?initstages=0` keeps
-the two-view refinement only. On the synthetic scene a laterally graded ±3 %
+the two-view refinement only. A stage triggers on the camera *baseline* from
+the reference view (×2 / ×4 / ×8 of the initialization baseline), never on
+pixel parallax alone, and is accepted only through `validateInitStage`
+(finite, ≥ 15 % gain, spread observations, positive depths, pose change
+within the BA pose-jump limits, few far-moved landmarks); the solve, the
+keyframe poses (PnP on the solved landmarks only, else carried by the rigid
+correction) and the rebuilt landmarks are prepared in temporary storage and
+committed atomically. The keyframe BA holds the reference view itself fixed
+(every stored keyframe free), so one immutable map frame serves the
+initialization, the stages and the BA. On the synthetic scene a laterally graded ±3 %
 depth distortion injected after the initialization is removed by the stages
 (direction error 0.58° → 0.13°), and the clean map's PnP error drops from
 0.51 to 0.16 px.

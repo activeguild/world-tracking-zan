@@ -214,6 +214,7 @@ function runScenario(config: Parameters<typeof resolveConfig>[0] = {}) {
       previousPlaneNormal: prevNormal,
       planeRecovery: o.planeRecovery,
       bundleAdjustment: o.bundleAdjustment,
+      initStage: o.initRefinement?.lastStage ?? null,
       previousWorld: prevWorld,
       world: anchor.frame,
       changeReason: reason,
@@ -378,7 +379,9 @@ describe("anchor invariance through the §9.2 scenario", () => {
     };
     const hops: number[] = [];
     for (let i = 1; i < tracked.length; i++) {
-      if (tracked[i].diag.baExecuted && tracked[i].diag.baAccepted && tracked[i].f === tracked[i - 1].f + 1) hops.push(Math.abs(tracked[i].placedErrPx - tracked[i - 1].placedErrPx));
+      const d = tracked[i].diag;
+      // BA frames and accepted init-stage frames alike (指示書 §9.4): the map frame changed, the objects must not hop.
+      if (((d.baExecuted && d.baAccepted) || (d.initStageExecuted && d.initStageAccepted)) && tracked[i].f === tracked[i - 1].f + 1) hops.push(Math.abs(tracked[i].placedErrPx - tracked[i - 1].placedErrPx));
     }
     console.log(
       `[anchor] placed-point error median ${median.toFixed(2)} / max ${max.toFixed(2)} px (yaw ${byPhase("yaw").toFixed(2)} pitch ${byPhase("pitch").toFixed(2)} return ${byPhase("return").toFixed(2)} translate ${byPhase("translate").toFixed(2)}); BA hops ${hops.map((h) => h.toFixed(2)).join(" ")} px`,
