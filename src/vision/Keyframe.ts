@@ -16,13 +16,12 @@ export interface Keyframe {
   frameId: number;
   timestamp: number;
   /**
-   * The keyframe stored at the map initialization (the origin view of the
-   * map's keyframe set): never evicted, protects the init landmarks, and the
-   * fallback gauge of the keyframe bundle adjustment when the reference view
-   * has too few observations left. Explicit (指示書 §3) rather than "index 0".
-   * Note: the map *frame* itself is defined by the two-view reference camera
-   * (identity pose, `MapTracker.mapFrameId`), which is not a stored keyframe
-   * and is never written by any solver.
+   * The origin keyframe (指示書「座標系整合性と空間固定性」§3): the two-view
+   * *reference* camera of the map initialization, stored with its image and
+   * the init landmarks at their reference pixels. Its pose is the identity —
+   * it *is* the map frame — and it is immutable: the init stages and the
+   * keyframe bundle adjustment hold it fixed, the stage post-processing never
+   * re-poses it, eviction never drops it. Explicit flag rather than "index 0".
    */
   origin: boolean;
   /** X_cam = R X_map + t */
@@ -74,10 +73,15 @@ export function downsampleToCoarse(src: { width: number; height: number; data: U
 /** Deep-copy a pyramid (the engine reuses its buffers every frame). */
 export function clonePyramid(src: ImagePyramid): ImagePyramid {
   const p = new ImagePyramid(src.width, src.height, src.numLevels);
-  for (let i = 0; i < p.levels.length && i < src.levels.length; i++) {
-    p.levels[i].data.set(src.levels[i].data);
-    p.levels[i].gradX.set(src.levels[i].gradX);
-    p.levels[i].gradY.set(src.levels[i].gradY);
-  }
+  copyPyramidInto(p, src);
   return p;
+}
+
+/** Copy `src` into the already allocated `dst` of the same geometry (no allocation). */
+export function copyPyramidInto(dst: ImagePyramid, src: ImagePyramid): void {
+  for (let i = 0; i < dst.levels.length && i < src.levels.length; i++) {
+    dst.levels[i].data.set(src.levels[i].data);
+    dst.levels[i].gradX.set(src.levels[i].gradX);
+    dst.levels[i].gradY.set(src.levels[i].gradY);
+  }
 }

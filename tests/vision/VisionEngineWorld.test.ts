@@ -3,7 +3,7 @@ import { resolveConfig, type PartialARConfig } from "../../src/ar/ARConfig";
 import { TrackingState } from "../../src/ar/ARState";
 import { WorldAnchor } from "../../src/ar/WorldAnchor";
 import { approximateIntrinsics } from "../../src/camera/CameraIntrinsics";
-import { worldToMap } from "../../src/math/CoordinateSystem";
+import { worldToMap, type WorldFrame } from "../../src/math/CoordinateSystem";
 import { type Mat3, mat3Invert, mat3Multiply, mat3TransformPoint } from "../../src/math/Matrix";
 import { createRng } from "../../src/vision/OutlierRejection";
 import type { VisionInput, VisionOutput } from "../../src/vision/types";
@@ -54,8 +54,12 @@ const gravity = [0, Math.SQRT1_2, Math.SQRT1_2];
 interface RunResult {
   outs: VisionOutput[];
   anchor: WorldAnchor;
+  /** The anchor's frame object right after placement (it must never be replaced during plain tracking). */
+  anchorFrameAtPlacement: WorldFrame;
   A: number;
+  /** Per frame after A, in frame order: the three placed points' errors (unsorted; see `sortedErrs`). */
   errs: number[];
+  sortedErrs: number[];
   maxErr: number;
   heights: number[];
   expectedHeights: number[];
@@ -114,7 +118,7 @@ function run(config: PartialARConfig, frames = 60): RunResult {
       maxErr = Math.max(maxErr, e);
     }
   }
-  errs.sort((a, b) => a - b);
+  const sortedErrs = errs.slice().sort((a, b) => a - b);
 
   // Camera height above the plane: 0.5 m at creation, then following the
   // simulated motion (distance to the plane nᵀX = 1 is 1 − n·C), scaled by
@@ -126,13 +130,13 @@ function run(config: PartialARConfig, frames = 60): RunResult {
     heights.push(anchor.cameraPose(outs[B].mapPose!)!.position[1]);
     expectedHeights.push((0.5 * distAt(B)) / distAt(A));
   }
-  return { outs, anchor, A, errs, maxErr, heights, expectedHeights };
+  return { outs, anchor, anchorFrameAtPlacement: anchor.frame!, A, errs, sortedErrs, maxErr, heights, expectedHeights };
 }
 
 describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4, 修正指示書 §22)", () => {
   it("fixed map + PnP (default): hit-tested points reproject onto the same desk pixel across camera motion", () => {
     const r = run({});
-    const median = r.errs[r.errs.length >> 1];
+    const median = r.sortedErrs[r.sortedErrs.length >> 1];
     console.log(`[world] fixed-map PnP drift over ${r.outs.length - r.A - 1} frames: median ${median.toFixed(2)} px, max ${r.maxErr.toFixed(2)} px`);
     expect(median).toBeLessThan(1.0);
     expect(r.maxErr).toBeLessThan(3);
@@ -154,7 +158,7 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4, 修正
 
   it("with landmark depth refinement on (A/B, v2 §26) the synthetic desk also stays fixed", () => {
     const r = run({ landmarks: { enableLandmarkDepthRefinement: true } });
-    const median = r.errs[r.errs.length >> 1];
+    const median = r.sortedErrs[r.sortedErrs.length >> 1];
     console.log(`[world] refinement-on drift over ${r.outs.length - r.A - 1} frames: median ${median.toFixed(2)} px, max ${r.maxErr.toFixed(2)} px`);
     expect(median).toBeLessThan(1.5);
     expect(r.maxErr).toBeLessThan(4);
@@ -162,7 +166,7 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4, 修正
 
   it("plane-anchored pose (experimental, planeTracking.enabled): hit-tested points reproject onto the same desk pixel", () => {
     const r = run({ planeTracking: { enabled: true } });
-    const median = r.errs[r.errs.length >> 1];
+    const median = r.sortedErrs[r.sortedErrs.length >> 1];
     console.log(`[world] plane-anchored drift over ${r.outs.length - r.A - 1} frames: median ${median.toFixed(2)} px, max ${r.maxErr.toFixed(2)} px`);
     expect(median).toBeLessThan(1.0);
     expect(r.maxErr).toBeLessThan(3);
@@ -205,6 +209,15 @@ describe("VisionEngine + WorldAnchor: placed object stays fixed (Phase 4, 修正
     expect(sw.mapCandidate?.reject).toBeNull();
     expect(sw.planeCandidate?.reject).toBeNull();
     expect(sw.sourceDeltaTranslation * r.anchor.frame!.scale).toBeLessThan(0.02);
+    // 指示書「空間固定性」§8 / §10-D: the switch touches neither the world
+    // transform (the anchor is the same object with the same values — only
+    // created / ba_correction / init_stage / map_reset may change it) nor
+    // the placed objects' screen positions beyond the simulated motion.
+    expect(r.anchor.frame).toBe(r.anchorFrameAtPlacement);
+    const errAt = (B: number) => r.errs.slice((B - r.A - 1) * 3, (B - r.A) * 3);
+    const beforeSwitch = Math.max(...errAt(switchFrame - 1));
+    const atSwitch = Math.max(...errAt(switchFrame));
+    expect(Math.abs(atSwitch - beforeSwitch)).toBeLessThan(1.0);
     console.log(`[world] MAP → PLANE at frame ${switchFrame}: map/plane Δ ${(sw.sourceDeltaTranslation * r.anchor.frame!.scale * 100).toFixed(2)} cm / ${sw.sourceDeltaRotationDeg.toFixed(2)}°`);
 
     expect(r.heights[0]).toBeCloseTo(0.5, 3);

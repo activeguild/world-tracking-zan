@@ -6,7 +6,7 @@ import { validateInitStage, validateKeyframeRepose, type InitStageLimits, type I
  * reprojection error alone never accepts an init stage; the pose change,
  * the landmark change, the spread, the depths and finiteness are judged too.
  */
-const limits: InitStageLimits = { minGainFraction: 0.15, minLandmarks: 30, minSpatialCells: 4, maxRotationDeg: 3, maxShiftDepthRatio: 0.05, maxShiftedFraction: 0.1 };
+const limits: InitStageLimits = { minGainFraction: 0.15, minLandmarks: 30, minSpatialCells: 4, maxRotationDeg: 3, maxShiftDepthRatio: 0.05, maxShiftedFraction: 0.1, maxReferenceErrorPx: 2.5 };
 const good: InitStageMeasures = {
   finite: true,
   errorBeforePx: 1.0,
@@ -18,6 +18,8 @@ const good: InitStageMeasures = {
   cameraShift: 0.1,
   medianDepth: 15,
   shiftedFraction: 0.0,
+  referenceErrorPx: 0.3,
+  converged: true,
 };
 
 describe("validateInitStage (指示書 §6)", () => {
@@ -76,6 +78,24 @@ describe("validateInitStage (指示書 §6)", () => {
     expect(validateInitStage({ ...good, errorAfterPx: NaN }, limits).reason).toBe("invalid");
     expect(validateInitStage({ ...good, cameraShift: Infinity }, limits).reason).toBe("invalid");
     expect(validateInitStage({ ...good, medianDepth: NaN }, limits).reason).toBe("invalid");
+  });
+
+  it("§6.2: a gain in the current view alone — the fixed reference view got worse than the triangulation gate — is reference_error", () => {
+    // Both-view mean 1.36 → 0.36 px as in recording 41, but the reference view now at 3.1 px: the landmarks left the view that defines them.
+    expect(validateInitStage({ ...good, errorBeforePx: 1.36, errorAfterPx: 0.36, referenceErrorPx: 3.1 }, limits).reason).toBe("reference_error");
+    expect(validateInitStage({ ...good, referenceErrorPx: 2.5 }, limits).accepted).toBe(true);
+    expect(validateInitStage({ ...good, referenceErrorPx: NaN }, limits).reason).toBe("invalid");
+    // A limit of 0 disables the check (then only the mean error decides).
+    expect(validateInitStage({ ...good, referenceErrorPx: 3.1 }, { ...limits, maxReferenceErrorPx: 0 }).accepted).toBe(true);
+    // Reference error is judged before the gain: a candidate failing both names reference_error.
+    expect(validateInitStage({ ...good, errorAfterPx: 0.95, referenceErrorPx: 3.1 }, limits).reason).toBe("reference_error");
+  });
+
+  it("§6.3: an unconverged solve is judged by the same limits — accepted when they all pass, rejected by whichever fails", () => {
+    expect(validateInitStage({ ...good, converged: false }, limits).accepted).toBe(true);
+    expect(validateInitStage({ ...good, converged: false, referenceErrorPx: 3.1 }, limits).reason).toBe("reference_error");
+    expect(validateInitStage({ ...good, converged: false, rotationDeg: 4.7 }, limits).reason).toBe("pose_jump");
+    expect(validateInitStage({ ...good, converged: false, errorAfterPx: 0.95 }, limits).reason).toBe("no_gain");
   });
 
   it("small parallax / an unconstrained solve shows up as a pose jump or a shift, never as an acceptance by error alone", () => {

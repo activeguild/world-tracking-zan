@@ -7,7 +7,7 @@ import { ransacHomography, type Rng } from "./OutlierRejection";
 import { MapTracker, type InitStageCandidate } from "./MapTracker";
 import { validateInitStage, validateKeyframeRepose, type KeyframeReposeSkip } from "./InitStageValidation";
 import type { LandmarkMap } from "./LandmarkMap";
-import type { Keyframe } from "./Keyframe";
+import { copyPyramidInto, type Keyframe, type KeyframeObservation } from "./Keyframe";
 import { PlaneDetector } from "./PlaneDetector";
 import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./PlaneRecovery";
 import { PlaneTracker } from "./PlaneTracker";
@@ -103,6 +103,15 @@ export class VisionEngine {
   // Phase 2: two-view pose relative to a reference frame.
   private readonly poseEstimator: PoseEstimator;
   private referenceFrameId = -1;
+  /**
+   * 指示書「座標系整合性と空間固定性」§3: the image of the two-view reference
+   * frame, kept while no map exists so that the map's origin keyframe can be
+   * the reference view itself (identity pose, the map frame). Two slots: the
+   * reference may be renewed in the very frame the map initializes from the
+   * previous one (the estimate uses the old reference, then renews).
+   */
+  private readonly referenceSlots: { pyramid: ImagePyramid; frameId: number; timestamp: number }[] = [];
+  private referenceSlotNext = 0;
   /** R_ref←origin: rotation accumulated across reference renewals. */
   private referenceRotation: Mat3 = mat3Identity();
   /** Last R_cur←ref, used when the reference is renewed. */
@@ -406,7 +415,14 @@ export class VisionEngine {
     const invC = invertTransform(correction);
     const plans: { kf: Keyframe; pose: RigidTransform; outcome: "reposed" | "propagated"; skip: KeyframeReposeSkip }[] = [];
     let finite = true;
+    let fixed = 0;
     for (const kf of this.relocalizer.keyframes) {
+      // 指示書 §3: the origin keyframe is the reference view the stage held
+      // fixed — it defines the map frame and is never re-posed nor carried.
+      if (kf.origin) {
+        fixed++;
+        continue;
+      }
       // Expected pose in the refined frame from the rigid part alone.
       const expected = composeTransforms(kf.pose, invC);
       const pts: number[] = [], ox: number[] = [], oy: number[] = [], px: number[] = [], py: number[] = [];
@@ -440,7 +456,7 @@ export class VisionEngine {
       for (let i = 0; finite && i < 3; i++) if (!Number.isFinite(pose.translation[i])) finite = false;
       plans.push({ kf, pose, outcome: skip === "none" ? "reposed" : "propagated", skip });
     }
-    return { plans, finite };
+    return { plans, finite, fixed };
   }
 
   /**
@@ -482,6 +498,8 @@ export class VisionEngine {
         cameraShift: dPose.translation,
         medianDepth: c.medianDepth,
         shiftedFraction: c.ids.length ? c.shifted / c.ids.length : 1,
+        referenceErrorPx: c.referenceErrorAfterPx,
+        converged: c.converged,
       },
       {
         minGainFraction: cfgBa.minGainFraction,
@@ -490,6 +508,10 @@ export class VisionEngine {
         maxRotationDeg,
         maxShiftDepthRatio: cfgBa.posePriorTranslationDepthRatio * cfgBa.maxPoseJumpPriorRatio,
         maxShiftedFraction: cfgBa.maxShiftedFraction,
+        // §6.2: the solved landmarks must still reproject in the fixed
+        // reference view within the two-view triangulation gate (the same
+        // residual that admitted them into the map).
+        maxReferenceErrorPx: cfgLm.maxTriangulationErrorPx,
       },
     );
     const st: InitStageOutput = {
@@ -516,6 +538,7 @@ export class VisionEngine {
       removed: 0,
       keyframesReposed: 0,
       keyframesPropagated: 0,
+      keyframesFixed: 0,
       correctionRotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
       correctionTranslation: new Float64Array(3),
       anchorFitLandmarks: 0,
@@ -525,7 +548,7 @@ export class VisionEngine {
     };
     if (!verdict.accepted) {
       tracker.recordInitStage(st);
-      log(`REJECTED (${verdict.reason}): ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u (limits ${maxRotationDeg.toFixed(1)}° / ${verdict.maxShift.toFixed(3)} u), cells ${spatialCells}, behind ${c.behindCamera}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%`);
+      log(`REJECTED (${verdict.reason}): ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px (reference view ${st.referenceErrorAfterPx.toFixed(2)} px, limit ${cfgLm.maxTriangulationErrorPx} px)${c.converged ? "" : ", not converged"}, pose ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u (limits ${maxRotationDeg.toFixed(1)}° / ${verdict.maxShift.toFixed(3)} u), cells ${spatialCells}, behind ${c.behindCamera}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%`);
       return;
     }
     // ---- Prepare (temporary storage only) ----
@@ -539,17 +562,26 @@ export class VisionEngine {
     // Views of an unsolved landmark, all in the refined frame: the reference
     // view (init landmarks), the planned keyframe poses and the current track.
     const kfViews = new Map<number, { pose: RigidTransform; x: number; y: number }[]>();
-    for (const p of kfPlan.plans) {
-      for (const o of p.kf.observations) {
-        let v = kfViews.get(o.landmarkId);
-        if (!v) kfViews.set(o.landmarkId, (v = []));
-        v.push({ pose: p.pose, x: o.x, y: o.y });
-      }
+    const addView = (pose: RigidTransform, o: KeyframeObservation) => {
+      let v = kfViews.get(o.landmarkId);
+      if (!v) kfViews.set(o.landmarkId, (v = []));
+      v.push({ pose, x: o.x, y: o.y });
+    };
+    // The origin keyframe (reference view, fixed) first: its observations are
+    // the init landmarks' reference pixels.
+    let hasOrigin = false;
+    for (const kf of this.relocalizer.keyframes) {
+      if (!kf.origin) continue;
+      hasOrigin = true;
+      for (const o of kf.observations) addView(kf.pose, o);
     }
+    for (const p of kfPlan.plans) for (const o of p.kf.observations) addView(p.pose, o);
     const reference: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
     const plan = tracker.planRebuild(k, solved, (lm) => {
       const v = kfViews.get(lm.id)?.slice() ?? [];
-      if (tracker.isInitLandmark(lm.id)) v.unshift({ pose: reference, x: lm.anchorX, y: lm.anchorY });
+      // Without a reference-view origin keyframe (not expected), the init
+      // landmarks' anchor pixels stand in for its observations.
+      if (!hasOrigin && tracker.isInitLandmark(lm.id)) v.unshift({ pose: reference, x: lm.anchorX, y: lm.anchorY });
       const t = trackOf.get(lm.id);
       if (t) v.push({ pose: c.poseAfter, x: t.x, y: t.y });
       return v;
@@ -604,6 +636,7 @@ export class VisionEngine {
       if (p.outcome === "reposed") st.keyframesReposed++;
       else st.keyframesPropagated++;
     }
+    st.keyframesFixed = kfPlan.fixed;
     st.applied = true;
     st.rebuilt = rb.rebuilt;
     st.removed = rb.removed;
@@ -633,7 +666,6 @@ export class VisionEngine {
     // the map frame) counts as a view of the init landmarks it anchored.
     const counts = new Map<number, number>();
     for (const kf of kfs) for (const o of kf.observations) if (map.get(o.landmarkId)) counts.set(o.landmarkId, (counts.get(o.landmarkId) ?? 0) + 1);
-    for (const lm of map.values()) if (this.mapTracker.isInitLandmark(lm.id) && lm.anchorPose) counts.set(lm.id, (counts.get(lm.id) ?? 0) + 1);
     const index = new Map<number, number>();
     const ids: number[] = [];
     for (const [id, c] of counts) {
@@ -655,32 +687,19 @@ export class VisionEngine {
     // v21: landmarks a keyframe contradicts (an observation beyond the
     // outlier gate) are removed from the map after the run.
     const inconsistent = new Set<number>();
-    const identityPose: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
-    // Gauge (指示書 §3): the solve holds the map frame itself fixed — the
-    // two-view reference camera (identity), observing the init landmarks at
-    // their anchor pixels — and every stored keyframe is free. The map frame
-    // is then never written by any solver (the init stages hold the same
-    // view fixed). Only when the reference view has too few observations
-    // left does the origin keyframe take over as the fixed one.
-    const refViews: { li: number; x: number; y: number }[] = [];
-    for (let i = 0; i < ids.length; i++) {
-      const lm = map.get(ids[i])!;
-      if (!this.mapTracker.isInitLandmark(lm.id) || !lm.anchorPose) continue;
-      const X = positions[i * 3], Y = positions[i * 3 + 1], Z = positions[i * 3 + 2];
-      const x = (lm.anchorX - k.cx) / k.fx, y = (lm.anchorY - k.cy) / k.fy;
-      if (!(Z > 1e-6) || !(Math.hypot(X / Z - x, Y / Z - y) <= maxErr)) {
-        outliers++;
-        inconsistent.add(lm.id);
-        continue;
-      }
-      refViews.push({ li: i, x, y });
-    }
-    const gauge: BundleAdjustmentOutput["gauge"] = refViews.length >= this.config.landmarks.minPnPInliers ? "reference" : "origin";
-    const originIndex = Math.max(0, kfs.findIndex((kf) => kf.origin));
-    // Problem keyframes: [reference (fixed), ...stored (free)] or [...stored (origin fixed)].
-    const problemKeyframes = gauge === "reference" ? [{ pose: identityPose, fixed: true }, ...kfs.map((kf) => ({ pose: kf.pose, fixed: false }))] : kfs.map((kf, i) => ({ pose: kf.pose, fixed: i === originIndex }));
-    const kfOffset = gauge === "reference" ? 1 : 0;
-    if (gauge === "reference") for (const v of refViews) observations.push({ keyframe: 0, landmark: v.li, x: v.x, y: v.y });
+    // Gauge (指示書 §3, §7.1): the origin keyframe — the two-view reference
+    // view, identity pose, the map frame itself — is the one fixed pose of
+    // the solve and every other stored keyframe is free. The init stages
+    // hold the same view fixed, so no solver ever writes the map frame.
+    // (`gauge: "reference"` = that origin is the reference view; `"origin"`
+    // = a keyframe set without a reference-view origin, in which case the
+    // first stored keyframe is held, as before 指示書「座標系整合性」.)
+    const flaggedIndex = kfs.findIndex((kf) => kf.origin);
+    const fixedIndex = Math.max(0, flaggedIndex);
+    const fixedKf = kfs[fixedIndex];
+    const fixedIsIdentity = fixedKf.pose.rotation[0] === 1 && fixedKf.pose.rotation[4] === 1 && fixedKf.pose.rotation[8] === 1 && fixedKf.pose.translation[0] === 0 && fixedKf.pose.translation[1] === 0 && fixedKf.pose.translation[2] === 0;
+    const gauge: BundleAdjustmentOutput["gauge"] = flaggedIndex >= 0 && fixedIsIdentity ? "reference" : "origin";
+    const problemKeyframes = kfs.map((kf, i) => ({ pose: kf.pose, fixed: i === fixedIndex }));
     for (let ki = 0; ki < kfs.length; ki++) {
       const kf = kfs[ki];
       const r = kf.pose.rotation, t = kf.pose.translation;
@@ -705,13 +724,12 @@ export class VisionEngine {
           inconsistent.add(o.landmarkId);
           continue;
         }
-        observations.push({ keyframe: ki + kfOffset, landmark: li, x, y });
+        observations.push({ keyframe: ki, landmark: li, x, y });
       }
     }
     if (observations.length < 12) return false;
     // Scale gauge: the median depth, in the fixed view, of the landmarks it
     // observes (a stable set across runs).
-    const fixedIndex = gauge === "reference" ? 0 : originIndex;
     const gaugeLandmarks: number[] = [];
     for (const o of observations) if (o.keyframe === fixedIndex) gaugeLandmarks.push(o.landmark);
     // Depth of every landmark in the fixed view: the priors and the shift
@@ -749,7 +767,7 @@ export class VisionEngine {
     let jumpKeyframeId = -1, jumpRotationDeg = 0, jumpShift = 0, jumpRatio = 0;
     const sigmaRot = (cfg.posePriorRotationDeg * Math.PI) / 180;
     const sigmaTrans = cfg.posePriorTranslationDepthRatio * medianDepth;
-    const isFree = (i: number) => gauge === "reference" || i !== originIndex;
+    const isFree = (i: number) => i !== fixedIndex;
     for (let i = 0; i < kfs.length; i++) {
       if (!isFree(i)) continue;
       const rot = rotationDistance(savedPoses[i].rotation, kfs[i].pose.rotation);
@@ -863,7 +881,7 @@ export class VisionEngine {
         if (index.has(lm.id)) continue;
         const c = corrections.get(lm.refKeyframeId);
         if (!c) {
-          // Reference keyframe gone (or the fixed origin under the origin gauge).
+          // Reference keyframe gone, or the fixed origin (no correction: it did not move).
           lm.baMode = "none";
           untouched++;
           continue;
@@ -914,7 +932,7 @@ export class VisionEngine {
       keyframes: kfs.length,
       freeKeyframes: res.freeKeyframes,
       gauge,
-      referenceObservations: gauge === "reference" ? refViews.length : 0,
+      referenceObservations: gauge === "reference" ? gaugeLandmarks.length : 0,
       landmarks: ids.length,
       observations: observations.length,
       outliers,
@@ -925,7 +943,7 @@ export class VisionEngine {
       jumpKeyframeId,
       jumpRotationDeg,
       jumpShift,
-      excludedKeyframes: rejectReason === "pose_jump" ? stored.filter((kf, i) => i > 0 && this.baExcludedKeyframes.has(kf.id)).length : excludedKeyframes,
+      excludedKeyframes: rejectReason === "pose_jump" ? stored.filter((kf) => !kf.origin && this.baExcludedKeyframes.has(kf.id)).length : excludedKeyframes,
       propagated,
       untouched,
       correctionRotation: correction.rotation,
@@ -1196,9 +1214,24 @@ export class VisionEngine {
           this.worldEstablished = false;
           this.relocTimeline = null;
           this.relocPreparedFrame = -1;
-          // The initialization frame is the first keyframe; the landmarks
-          // triangulated in the initialization reference it (Phase 7 v18).
-          const kf0 = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, null, 0, true);
+          // 指示書 §3: the origin keyframe is the two-view *reference* view —
+          // the map frame itself (identity pose), its stored image and the
+          // init landmarks at their reference pixels. It is never re-posed:
+          // the init stages and the keyframe BA hold it fixed, so one and
+          // the same view is the immutable gauge of every solver.
+          const refSlot = this.referenceSlots.find((s) => s.frameId === this.lastRelativeRefFrame);
+          if (refSlot) {
+            const obs: KeyframeObservation[] = [];
+            for (const lm of tracker.map.values()) obs.push({ landmarkId: lm.id, x: lm.anchorX, y: lm.anchorY });
+            const identity: RigidTransform = { rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) };
+            this.relocalizer.createWithObservations(refSlot.pyramid, identity, obs, refSlot.frameId, refSlot.timestamp, null, 0, true);
+          }
+          // The initialization frame is a normal (free) keyframe; the
+          // landmarks triangulated in the initialization reference it as
+          // their newest view (Phase 7 v18). Without a stored reference image
+          // (not expected: the reference is always one of the two slots) it
+          // takes the origin role as before.
+          const kf0 = this.relocalizer.create(this.curPyramid, tracker.pose, this.tracks, frameId, input.timestamp, null, 0, !refSlot);
           tracker.referenceKeyframeId = kf0.id;
           for (const lm of tracker.map.values()) lm.refKeyframeId = kf0.id;
           this.relocStatus.keyframes = this.relocalizer.count;
@@ -2006,7 +2039,7 @@ export class VisionEngine {
     this.lastRelative = null;
     if (this.referenceFrameId < 0) {
       // First frame with features becomes the reference.
-      if (this.tracks.length >= cfg.minCorrespondences) this.renewReference(frameId, mat3Identity());
+      if (this.tracks.length >= cfg.minCorrespondences) this.renewReference(frameId, mat3Identity(), input.timestamp);
       this.lastPose = null;
       return null;
     }
@@ -2028,7 +2061,7 @@ export class VisionEngine {
       // Lost the link to the reference: start a new reference, carrying the
       // last relative rotation into the accumulated rotation.
       if (this.tracks.length >= cfg.minCorrespondences) {
-        this.renewReference(frameId, this.lastRelativeRotation);
+        this.renewReference(frameId, this.lastRelativeRotation, input.timestamp);
       } else {
         this.lastPose = null;
       }
@@ -2074,16 +2107,28 @@ export class VisionEngine {
     // Renew the reference once the baseline is large (keeps the two-view
     // problem bounded; Phase 3 will turn these into keyframes).
     if (rel.parallaxPx > cfg.maxReferenceParallaxPx && rel.confidence > 0.5) {
-      this.renewReference(frameId, rel.rotation);
+      this.renewReference(frameId, rel.rotation, input.timestamp);
     }
     return this.lastPose;
   }
 
   /** Make the current frame the reference for all live tracks. */
-  private renewReference(frameId: number, relativeRotation: Mat3): void {
+  private renewReference(frameId: number, relativeRotation: Mat3, timestamp: number): void {
     this.referenceRotation = mat3Multiply(relativeRotation, this.referenceRotation);
     this.lastRelativeRotation = mat3Identity();
     this.referenceFrameId = frameId;
+    // Keep this frame's image while no map exists: if the map initializes
+    // against this reference, it becomes the origin keyframe (指示書 §3).
+    if (!this.mapTracker.initialized) {
+      if (this.referenceSlots.length < 2) {
+        this.referenceSlots.push({ pyramid: new ImagePyramid(this.width, this.height, this.config.tracker.pyramidLevels), frameId: -1, timestamp: 0 });
+      }
+      const slot = this.referenceSlots[this.referenceSlotNext % this.referenceSlots.length];
+      this.referenceSlotNext = (this.referenceSlotNext + 1) % 2;
+      copyPyramidInto(slot.pyramid, this.curPyramid);
+      slot.frameId = frameId;
+      slot.timestamp = timestamp;
+    }
     for (const t of this.tracks) {
       t.refX = t.x;
       t.refY = t.y;

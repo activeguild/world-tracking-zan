@@ -41,8 +41,18 @@ export interface WorldTrackingDiagnostics {
   /** World origin move (meters) and world-axes rotation (deg) since the previous frame; 0 when nothing changed. */
   anchorPositionDelta: number;
   anchorRotationDeltaDeg: number;
+  /**
+   * The world transform's *values* (origin, axes, scale) differ from the
+   * previous frame's (指示書「座標系整合性と空間固定性」§9: not object
+   * identity — the session replaces the frame object on every correction,
+   * including an identity one).
+   */
   worldTransformChanged: boolean;
+  /** The frame object was replaced this frame, whether or not its values changed (diagnostic). */
+  worldFrameReplaced: boolean;
   worldTransformChangeReason: WorldTransformChangeReason;
+  /** The session named a reason but the values did not change (e.g. an identity correction); nothing moved. */
+  worldChangeReasonWithoutChange: boolean;
   /** Angle between this frame's and the previous frame's plane normal (deg); 0 without two consecutive planes. */
   planeNormalDeltaDeg: number;
   planeConfidence: number;
@@ -114,11 +124,25 @@ export interface WorldDiagnosticsInput {
   changeReason: WorldTransformChangeReason;
 }
 
+/**
+ * Whether two world frames differ in value (origin, rotation, scale), beyond
+ * floating-point noise. Null vs a frame is a change (created / dropped).
+ */
+export function worldFrameValuesDiffer(a: WorldFrame | null, b: WorldFrame | null, epsilon = 1e-12): boolean {
+  if (a === b) return false;
+  if (!a || !b) return true;
+  if (Math.abs(a.scale - b.scale) > epsilon * Math.max(1, Math.abs(a.scale))) return true;
+  for (let k = 0; k < 3; k++) if (Math.abs(a.plane.origin[k] - b.plane.origin[k]) > epsilon * Math.max(1, Math.abs(a.plane.origin[k]))) return true;
+  for (let k = 0; k < 9; k++) if (Math.abs(a.rotation[k] - b.rotation[k]) > epsilon) return true;
+  return false;
+}
+
 export function buildWorldDiagnostics(i: WorldDiagnosticsInput): WorldTrackingDiagnostics {
   const m = i.mapPose;
   const scale = i.world?.scale ?? 0;
   const frameDelta = worldFrameDelta(i.previousWorld, i.world);
-  const changed = i.previousWorld !== i.world;
+  const replaced = i.previousWorld !== i.world;
+  const changed = worldFrameValuesDiffer(i.previousWorld, i.world);
   const fresh = !!m && m.framesSinceTracked === 0 && m.source !== "propagated";
   // The candidate that was chosen (or would have been) and why it was not used.
   const reject = m ? (m.planeCandidate?.reject ?? m.mapCandidate?.reject ?? null) : null;
@@ -144,7 +168,9 @@ export function buildWorldDiagnostics(i: WorldDiagnosticsInput): WorldTrackingDi
     anchorPositionDelta: Number.isFinite(frameDelta.positionDelta) ? frameDelta.positionDelta : 0,
     anchorRotationDeltaDeg: Number.isFinite(frameDelta.rotationDeltaDeg) ? frameDelta.rotationDeltaDeg : 0,
     worldTransformChanged: changed,
+    worldFrameReplaced: replaced,
     worldTransformChangeReason: changed ? i.changeReason : "none",
+    worldChangeReasonWithoutChange: !changed && i.changeReason !== "none",
     planeNormalDeltaDeg: planeNormalDeltaDeg(i.previousPlaneNormal, i.plane?.normal ?? null),
     planeConfidence: i.plane?.confidence ?? 0,
     planeAccepted: !!i.plane?.found,

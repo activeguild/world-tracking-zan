@@ -20,6 +20,8 @@ export type InitStageRejectReason =
   | "pose_jump"
   /** More than `maxShiftedFraction` of the landmarks moved beyond `maxShiftDepthRatio` × depth. */
   | "shift"
+  /** The solved landmarks reproject in the fixed reference view worse than `maxReferenceErrorPx` (the current view alone improved). */
+  | "reference_error"
   /** The error did not drop by at least `minGainFraction`. */
   | "no_gain"
   /** The post-processing (keyframe poses, rebuilt landmarks, correction) produced a non-finite value. */
@@ -42,6 +44,19 @@ export interface InitStageMeasures {
   medianDepth: number;
   /** Fraction of the landmarks that moved by more than `maxShiftDepthRatio` × their depth. */
   shiftedFraction: number;
+  /**
+   * Mean reprojection error of the solved landmarks in the *fixed* reference
+   * view after the solve (px). `errorAfterPx` averages both views; this one
+   * says whether the gain came from the current view alone (指示書 §6.2).
+   */
+  referenceErrorPx: number;
+  /**
+   * The solver stopped on its convergence criterion rather than on the
+   * iteration cap. Not a rejection by itself (指示書 §6.3): an unconverged
+   * solve is judged by the same geometric and error limits as a converged
+   * one, which is what makes it safe to accept.
+   */
+  converged: boolean;
 }
 
 export interface InitStageLimits {
@@ -52,6 +67,8 @@ export interface InitStageLimits {
   /** Camera-centre move allowed, as a fraction of the median depth. */
   maxShiftDepthRatio: number;
   maxShiftedFraction: number;
+  /** Reference-view error allowed after the solve (px; the engine passes the two-view triangulation gate). */
+  maxReferenceErrorPx: number;
 }
 
 export interface InitStageVerdict {
@@ -63,20 +80,23 @@ export interface InitStageVerdict {
 
 /**
  * Decide a stage. Order: invalid → few_landmarks → spread → depth →
- * pose_jump → shift → no_gain, so the reason names the first hard failure.
- * The camera-centre move is compared as a length (not a direction angle: a
- * direction is meaningless when the translation is nearly zero).
+ * pose_jump → shift → reference_error → no_gain, so the reason names the
+ * first hard failure. The camera-centre move is compared as a length (not a
+ * direction angle: a direction is meaningless when the translation is nearly
+ * zero). `converged` is recorded by the caller and does not decide: an
+ * unconverged solve passes or fails on exactly the same limits.
  */
 export function validateInitStage(m: InitStageMeasures, l: InitStageLimits): InitStageVerdict {
   const maxShift = l.maxShiftDepthRatio * Math.max(m.medianDepth, 1e-9);
   const fail = (reason: InitStageRejectReason): InitStageVerdict => ({ accepted: false, reason, maxShift });
-  const nums = [m.errorBeforePx, m.errorAfterPx, m.rotationDeg, m.cameraShift, m.medianDepth, m.shiftedFraction];
+  const nums = [m.errorBeforePx, m.errorAfterPx, m.rotationDeg, m.cameraShift, m.medianDepth, m.shiftedFraction, m.referenceErrorPx];
   if (!m.finite || nums.some((v) => !Number.isFinite(v))) return fail("invalid");
   if (m.landmarks < l.minLandmarks) return fail("few_landmarks");
   if (m.spatialCells < l.minSpatialCells) return fail("spread");
   if (m.behindCamera > 0) return fail("depth");
   if (m.rotationDeg > l.maxRotationDeg || m.cameraShift > maxShift) return fail("pose_jump");
   if (m.shiftedFraction > l.maxShiftedFraction) return fail("shift");
+  if (l.maxReferenceErrorPx > 0 && !(m.referenceErrorPx <= l.maxReferenceErrorPx)) return fail("reference_error");
   if (l.minGainFraction > 0 && !(m.errorAfterPx <= m.errorBeforePx * (1 - l.minGainFraction))) return fail("no_gain");
   if (l.minGainFraction <= 0 && !(m.errorAfterPx < m.errorBeforePx)) return fail("no_gain");
   return { accepted: true, reason: "none", maxShift };

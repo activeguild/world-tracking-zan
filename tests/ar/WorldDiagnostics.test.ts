@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WorldAnchor } from "../../src/ar/WorldAnchor";
-import { buildWorldDiagnostics, planeNormalDeltaDeg, worldFrameDelta } from "../../src/ar/WorldDiagnostics";
+import { buildWorldDiagnostics, planeNormalDeltaDeg, worldFrameDelta, worldFrameValuesDiffer } from "../../src/ar/WorldDiagnostics";
 import { rotationAxisAngle } from "../../src/math/Pose";
 import { emptyBundleAdjustment, emptyRelinkStats, emptyReprojectionBreakdown, type MapPoseOutput, type PlaneOutput } from "../../src/vision/types";
 import { emptyQuality } from "../../src/vision/TrackingQuality";
@@ -82,7 +82,45 @@ describe("world-tracking diagnostics (指示書 §8)", () => {
     expect(planeNormalDeltaDeg(planeNormal, tilted)).toBeCloseTo(3, 6);
   });
 
-  it("buildWorldDiagnostics: changed only when the frame object differs, with the session's reason; a reason without a change is dropped", () => {
+  it("§9: change detection is by value — a replaced frame object with identical values is not a change, a changed value always is", () => {
+    const anchor = new WorldAnchor({ assumedPlaneDistanceMeters: 0.5 });
+    anchor.create(plane, mapPose());
+    const w0 = anchor.frame!;
+    const base = { frameId: 3, quality: emptyQuality(), mapPose: mapPose(), plane, previousPlaneNormal: planeNormal, planeRecovery: null, bundleAdjustment: emptyBundleAdjustment() };
+    // Identity correction: the session replaces the object, the values are the same.
+    anchor.applyMapCorrection({ rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array(3) });
+    const w1 = anchor.frame!;
+    expect(w1).not.toBe(w0);
+    expect(worldFrameValuesDiffer(w0, w1)).toBe(false);
+    const same = buildWorldDiagnostics({ ...base, previousWorld: w0, world: w1, changeReason: "ba_correction" });
+    expect(same.worldTransformChanged).toBe(false);
+    expect(same.worldFrameReplaced).toBe(true);
+    expect(same.worldTransformChangeReason).toBe("none");
+    expect(same.worldChangeReasonWithoutChange).toBe(true);
+    expect(same.anchorPositionDelta).toBe(0);
+    // A real move is a change whatever the object identity; without a reason it is the unexplained case.
+    anchor.applyMapCorrection({ rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]), translation: new Float64Array([1e-6, 0, 0]) });
+    const w2 = anchor.frame!;
+    expect(worldFrameValuesDiffer(w1, w2)).toBe(true);
+    const moved = buildWorldDiagnostics({ ...base, previousWorld: w1, world: w2, changeReason: "ba_correction" });
+    expect(moved.worldTransformChanged).toBe(true);
+    expect(moved.worldTransformChangeReason).toBe("ba_correction");
+    expect(moved.worldChangeReasonWithoutChange).toBe(false);
+    const unexplained = buildWorldDiagnostics({ ...base, previousWorld: w1, world: w2, changeReason: "none" });
+    expect(unexplained.worldTransformChanged).toBe(true);
+    expect(unexplained.worldTransformChangeReason).toBe("none");
+    // A scale change alone is a change too; rotation noise below 1e-12 is not.
+    expect(worldFrameValuesDiffer(w2, { ...w2, scale: w2.scale * (1 + 1e-9) })).toBe(true);
+    const jitter = { ...w2, rotation: Float64Array.from(w2.rotation) };
+    jitter.rotation[0] += 1e-15;
+    expect(worldFrameValuesDiffer(w2, jitter)).toBe(false);
+    // Null ↔ frame is created / dropped.
+    expect(worldFrameValuesDiffer(null, w2)).toBe(true);
+    expect(worldFrameValuesDiffer(w2, null)).toBe(true);
+    expect(worldFrameValuesDiffer(null, null)).toBe(false);
+  });
+
+  it("buildWorldDiagnostics: changed only when the frame values differ, with the session's reason; a reason without a change is dropped", () => {
     const anchor = new WorldAnchor({ assumedPlaneDistanceMeters: 0.5 });
     anchor.create(plane, mapPose());
     const w = anchor.frame!;

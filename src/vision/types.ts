@@ -585,6 +585,8 @@ export interface InitStageOutput {
   /** Stored keyframes whose pose was re-solved by PnP on the solved landmarks only, and those carried by the rigid pose correction instead (§4). */
   keyframesReposed: number;
   keyframesPropagated: number;
+  /** Origin keyframes (the reference view, 指示書 §3) left exactly as they were. */
+  keyframesFixed: number;
   /**
    * Rigid transform old map → new map near the placed objects (rotation
    * from the current pose's correction, translation from the init landmarks
@@ -619,14 +621,14 @@ export interface BundleAdjustmentOutput {
   keyframes: number;
   freeKeyframes: number;
   /**
-   * What the solve held fixed (指示書 §3): `reference` = the two-view
-   * reference camera (identity, the map frame itself, observing the init
-   * landmarks at their anchor pixels; every stored keyframe is free),
-   * `origin` = the origin keyframe, used only when the reference view has
-   * fewer than `landmarks.minPnPInliers` observations left.
+   * What the solve held fixed (指示書 §3): `reference` = the origin keyframe
+   * *is* the two-view reference view (identity pose, the map frame itself,
+   * observing the init landmarks at their reference pixels; every other
+   * stored keyframe is free), `origin` = a keyframe set without such an
+   * origin, where the first stored keyframe is held instead.
    */
   gauge: "reference" | "origin";
-  /** Observations of the reference view in the solve (0 with the origin gauge). */
+  /** Observations of the fixed reference view in the solve (0 with the origin gauge). */
   referenceObservations: number;
   /** Landmarks refined (observed by ≥ minLandmarkObservations keyframes). */
   landmarks: number;

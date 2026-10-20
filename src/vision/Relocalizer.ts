@@ -904,6 +904,25 @@ export class Relocalizer {
     for (const t of tracks) {
       if (t.landmarkId >= 0) observations.push({ landmarkId: t.landmarkId, x: t.x, y: t.y });
     }
+    return this.createWithObservations(pyramid, pose, observations, frameId, timestamp, map, sceneDepth, origin);
+  }
+
+  /**
+   * Store a keyframe from an explicit observation list (指示書 §3: the origin
+   * keyframe is the two-view reference view — its image is the reference
+   * frame's, its pose the identity, its observations the init landmarks at
+   * their reference pixels, none of which is a live track at that point).
+   */
+  createWithObservations(
+    pyramid: ImagePyramid,
+    pose: RigidTransform,
+    observations: KeyframeObservation[],
+    frameId: number,
+    timestamp: number,
+    map: LandmarkMap | null = null,
+    sceneDepth = 0,
+    origin = false,
+  ): Keyframe {
     const coarseSrc = pyramid.levels[Math.min(2, pyramid.levels.length - 1)];
     const coarse = downsampleToCoarse(coarseSrc);
     const kf: Keyframe = {

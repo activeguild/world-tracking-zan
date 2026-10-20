@@ -136,8 +136,9 @@ describe("init stages are atomic and keep one map frame (指示書 §3–§5)", 
       const st = o.initRefinement?.lastStage;
       if (!st || st.frameId !== f || !st.applied) continue;
       const tracker = engine.mapTrackerForTests();
-      // Every keyframe was either re-posed (PnP on solved landmarks) or carried by the rigid correction — none skipped.
-      expect(st.keyframesReposed + st.keyframesPropagated).toBe(engine.keyframes.length);
+      // Every keyframe was re-posed (PnP on solved landmarks), carried by the rigid correction, or is the fixed origin — none skipped.
+      expect(st.keyframesFixed).toBe(1);
+      expect(st.keyframesReposed + st.keyframesPropagated + st.keyframesFixed).toBe(engine.keyframes.length);
       // All finite.
       for (const lm of engine.landmarkMap.values()) for (const v of lm.position) expect(Number.isFinite(v)).toBe(true);
       for (const kf of engine.keyframes) for (const v of [...kf.pose.rotation, ...kf.pose.translation]) expect(Number.isFinite(v)).toBe(true);
@@ -219,31 +220,34 @@ describe("init stages are atomic and keep one map frame (指示書 §3–§5)", 
 });
 
 describe("keyframe BA gauge (指示書 §3)", () => {
-  it("holds the reference view fixed with every stored keyframe free; falls back to the origin keyframe (bit-identical) only without reference observations", () => {
+  it("holds the origin keyframe (the reference view, identity) fixed with every other stored keyframe free — also once its landmarks are gone", () => {
     const engine = new VisionEngine(W, H, resolveConfig(), createRng(5));
     let last: VisionOutput | null = null;
     for (let f = 0; f < 100; f++) last = engine.process(input(f));
     const ba = last!.bundleAdjustment;
     expect(ba.runs).toBeGreaterThanOrEqual(2);
     expect(ba.gauge).toBe("reference");
-    expect(ba.freeKeyframes).toBe(ba.keyframes);
+    expect(ba.freeKeyframes).toBe(ba.keyframes - 1);
+    expect(ba.referenceObservations).toBeGreaterThanOrEqual(12);
     expect(engine.keyframes.filter((kf) => kf.origin).length).toBe(1);
     expect(engine.keyframes[0].origin).toBe(true);
+    const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+    expect([...engine.keyframes[0].pose.rotation, ...engine.keyframes[0].pose.translation]).toEqual(identity);
     // The reference view still explains the init landmarks after the runs.
     const ref = referenceViewError(engine);
     expect(ref.n).toBeGreaterThan(30);
     expect(ref.meanPx).toBeLessThan(1.0);
-    // Remove the init landmarks: the reference view has nothing to observe → the origin keyframe is the gauge and does not move.
+    // Remove the init landmarks: the origin keyframe has nothing left to observe, is still the fixed one and does not move.
     const tracker = engine.mapTrackerForTests();
     const initIds = [...engine.landmarkMap.values()].filter((lm) => tracker.isInitLandmark(lm.id)).map((lm) => lm.id);
     tracker.purgeLandmarks(initIds, engine.tracksForTests());
     const origin = engine.keyframes.find((kf) => kf.origin)!;
-    const originPose = [...origin.pose.rotation, ...origin.pose.translation];
     expect(engine.runBundleAdjustment(TP_K)).toBe(true);
     const b2 = engine.bundleAdjustment;
-    expect(b2.gauge).toBe("origin");
+    expect(b2.gauge).toBe("reference");
     expect(b2.referenceObservations).toBe(0);
     expect(b2.freeKeyframes).toBe(b2.keyframes - 1);
-    expect([...origin.pose.rotation, ...origin.pose.translation]).toEqual(originPose);
+    expect(Number.isFinite(b2.errorAfterPx)).toBe(true);
+    expect([...origin.pose.rotation, ...origin.pose.translation]).toEqual(identity);
   });
 });
