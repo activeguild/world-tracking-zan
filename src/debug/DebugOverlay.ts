@@ -578,7 +578,11 @@ export class DebugOverlay {
     if (s.phase) {
       rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
     }
-    if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
+    // The build's commit hash on this always-visible row: the `Build` row at
+    // the end is below the fold on every phone recording, and iPhone
+    // recording 44 turned out to be a stale cached bundle (no InitMV / ObjFlr rows).
+    const buildHash = s.build ? s.build.split(" ")[1] ?? "" : "";
+    if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}${buildHash ? `  build ${buildHash}` : ""}`));
     // 指示書「空間固定性」§8: did the world transform change this frame, and
     // why. Any change outside created / ba_correction / map_reset is a bug
     // (orange). Up here because the WORLD section is below the fold once the
@@ -662,22 +666,6 @@ export class DebugOverlay {
           "Vis",
           `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)}${et.ba > 0 ? ` ba ${ms(et.ba)}` : ""} = ${ms(et.total)}ms`,
           et.total > 33 ? "hud-warn" : undefined,
-        ),
-      );
-    }
-    // v16: the rest of the frame's wall time (main thread + worker transport).
-    // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this
-    // row says whether the grab, the display copy, the result waiting for a
-    // busy main thread (q↓), the Three.js update or the HUD itself is to blame.
-    const mt = s.mainTiming;
-    if (mt) {
-      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
-      const overhead = mt.roundTripMs - mt.engineMs;
-      rows.push(
-        row(
-          "Main",
-          `grab ${ms(mt.grabMs)} cap ${ms(mt.captureMs)} q↑ ${ms(mt.queueInMs)} eng ${ms(mt.engineMs)} q↓ ${ms(mt.queueOutMs)} rtt ${ms(mt.roundTripMs)}  world ${ms(mt.worldMs)} show ${ms(mt.presentMs)} ovl ${ms(mt.overlayMs)} hud ${ms(s.hudMs ?? 0)}  every ${ms(mt.resultIntervalMs)}ms`,
-          overhead > 20 ? "hud-warn" : undefined,
         ),
       );
     }
@@ -1138,6 +1126,25 @@ export class DebugOverlay {
     rows.push(section("TIMING"));
     if (s.timing) {
       rows.push(row("Pose", `age ${s.timing.ageMs.toFixed(0)}ms${s.timing.stale ? "  STALE" : ""}`, s.timing.stale ? "hud-warn" : undefined));
+    }
+    // v16: the rest of the frame's wall time (main thread + worker transport).
+    // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this
+    // row says whether the grab, the display copy, the result waiting for a
+    // busy main thread (q↓), the Three.js update or the HUD itself is to blame.
+    // It sat under `Vis` while the Android grab path was being diagnosed
+    // (resolved: WebGL grab); moved here so InitMV / ObjFlr stay above the
+    // fold of the iPhone HUD.
+    const mt = s.mainTiming;
+    if (mt) {
+      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
+      const overhead = mt.roundTripMs - mt.engineMs;
+      rows.push(
+        row(
+          "Main",
+          `grab ${ms(mt.grabMs)} cap ${ms(mt.captureMs)} q↑ ${ms(mt.queueInMs)} eng ${ms(mt.engineMs)} q↓ ${ms(mt.queueOutMs)} rtt ${ms(mt.roundTripMs)}  world ${ms(mt.worldMs)} show ${ms(mt.presentMs)} ovl ${ms(mt.overlayMs)} hud ${ms(s.hudMs ?? 0)}  every ${ms(mt.resultIntervalMs)}ms`,
+          overhead > 20 ? "hud-warn" : undefined,
+        ),
+      );
     }
     rows.push(row("Proc", `FAST ${s.fastThreshold}  ${s.processingSize}  [${s.backend}]`));
     if (s.build) rows.push(row("Build", s.build));
