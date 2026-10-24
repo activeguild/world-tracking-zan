@@ -461,7 +461,7 @@ export interface HudStats {
   /** Whether the objects are shown and why not (v13 §15–§16). */
   objectVisibility?: { visible: boolean; reason: string } | null;
   /** Frame capture time, pose arrival time, render-time pose age (ms). */
-  timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
+  timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean; poseFrameId?: number; presentedFrameId?: number; presentMisses?: number; frameSync?: boolean } | null;
   reloc?: {
     keyframes: number;
     /** Keyframes created / evicted so far (v15 churn). */
@@ -1125,7 +1125,11 @@ export class DebugOverlay {
     // ---- TIMING ----
     rows.push(section("TIMING"));
     if (s.timing) {
-      rows.push(row("Pose", `age ${s.timing.ageMs.toFixed(0)}ms${s.timing.stale ? "  STALE" : ""}`, s.timing.stale ? "hud-warn" : undefined));
+      // §5 (傾斜時の回転ずれ): the pose's frame id vs the frame on screen; a
+      // miss means the previous image stayed under a newer pose.
+      const t = s.timing;
+      const sync = t.poseFrameId !== undefined ? `  frame ${t.poseFrameId} shown ${t.presentedFrameId === -1 ? "live" : t.presentedFrameId}${t.frameSync === false ? " MISMATCH" : ""}${t.presentMisses ? ` miss ${t.presentMisses}` : ""}` : "";
+      rows.push(row("Pose", `age ${t.ageMs.toFixed(0)}ms${t.stale ? "  STALE" : ""}${sync}`, t.stale || t.frameSync === false ? "hud-warn" : undefined));
     }
     // v16: the rest of the frame's wall time (main thread + worker transport).
     // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this

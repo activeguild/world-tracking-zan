@@ -151,6 +151,18 @@ export interface ARStats {
   poseAgeMs: number;
   /** poseAgeMs above `debug.poseStaleMs`. */
   poseStale: boolean;
+  /**
+   * 修正指示書「傾斜時の回転ずれ」§5: frame ↔ pose correspondence. The Three.js
+   * camera is set from the result of `poseFrameId`; with synchronized display
+   * the image on screen is the frame `presentedFrameId` (−1 = live video).
+   * `presentMisses` counts results whose frame had already left the
+   * presenter's ring (the previous image stayed under a newer pose).
+   */
+  poseFrameId: number;
+  presentedFrameId: number;
+  presentMisses: number;
+  /** True when the displayed frame is the one the current pose belongs to (or display sync is off). */
+  frameSync: boolean;
   /** Three.js camera position in world meters (null before the world exists). */
   cameraWorldPosition: number[] | null;
   /** How long tracking has been lost (ms), 0 while tracking. */
@@ -297,6 +309,9 @@ export class ARSession {
   private lastGravity: number[] | null = null;
   private visionMs = 0;
   private poseAgeMs = 0;
+  private poseFrameId = -1;
+  private presentedFrameId = -1;
+  private presentMisses = 0;
   private frameTimestampMs = 0;
   private poseTimestampMs = 0;
   private translationHeldLogged = false;
@@ -558,6 +573,10 @@ export class ARSession {
       poseTimestampMs: this.poseTimestampMs,
       poseAgeMs: this.poseAgeMs,
       poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
+      poseFrameId: this.poseFrameId,
+      presentedFrameId: this.presentedFrameId,
+      presentMisses: this.presentMisses,
+      frameSync: !this.syncActive || this.presentedFrameId === this.poseFrameId,
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
       lostMs: this.world.lostDurationMs(performance.now()),
       objectVisibility: this.objectVisibility,
@@ -783,7 +802,14 @@ export class ARSession {
 
   /** Show the frame the result belongs to, time-aligned with the pose. */
   private presentFrame(frameId: number): void {
-    if (!this.presenter?.present(frameId)) return;
+    if (!this.presenter?.present(frameId)) {
+      // The frame left the ring (resize, or more frames captured than the
+      // ring holds while this one was processed): the previous image stays
+      // on screen under the new pose. Counted for the HUD (§5).
+      this.presentMisses++;
+      return;
+    }
+    this.presentedFrameId = frameId;
     // Hide the live video once a synchronized frame is on screen.
     if (this.video.style.opacity !== "0") this.video.style.opacity = "0";
   }
@@ -792,6 +818,7 @@ export class ARSession {
     if (!this.running) return;
     this.grabber?.release(r.grayBuffer);
     this.framesProcessed++;
+    this.poseFrameId = r.frameId;
     const arrived = performance.now();
     this.visionFpsCounter.tick(arrived);
     this.visionMs = r.processingMs;

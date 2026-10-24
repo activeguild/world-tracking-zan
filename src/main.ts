@@ -506,7 +506,7 @@ function refreshHud(): void {
     cameraWorld: s.cameraWorldPosition,
     objects: s.objects,
     objectVisibility: s.objectVisibility,
-    timing: s.frameTimestampMs > 0 ? { frameMs: s.frameTimestampMs, poseMs: s.poseTimestampMs, ageMs: s.poseAgeMs, stale: s.poseStale } : null,
+    timing: s.frameTimestampMs > 0 ? { frameMs: s.frameTimestampMs, poseMs: s.poseTimestampMs, ageMs: s.poseAgeMs, stale: s.poseStale, poseFrameId: s.poseFrameId, presentedFrameId: s.presentedFrameId, presentMisses: s.presentMisses, frameSync: s.frameSync } : null,
     reloc: s.relocalization
       ? {
           keyframes: s.relocalization.keyframes,
