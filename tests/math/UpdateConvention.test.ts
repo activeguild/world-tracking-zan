@@ -73,7 +73,7 @@ const cases: { name: string; pose: RigidTransform }[] = [
   { name: "camera at the origin, yaw 30°", pose: poseFromCenter(rotationAxisAngle([0, 1, 0], 0.52), [0, 0, 0]) },
   { name: "camera 3.7 u from the origin, identity", pose: poseFromCenter(I3, [2, -1, 3]) },
   { name: "camera 3.7 u from the origin, yaw 30° pitch −10°", pose: poseFromCenter(mat3Multiply(rotationAxisAngle([0, 1, 0], 0.52), rotationAxisAngle([1, 0, 0], -0.17)), [2, -1, 3]) },
-  { name: "camera 11 u from the origin, roll 20° pitch 15°", pose: poseFromCenter(mat3Multiply(rotationAxisAngle([0, 0, 1], 0.35), rotationAxisAngle([1, 0, 0], 0.26)), [-6, 4, 8]) },
+  { name: "camera 10.8 u from the origin, roll 20° pitch 15°", pose: poseFromCenter(mat3Multiply(rotationAxisAngle([0, 0, 1], 0.35), rotationAxisAngle([1, 0, 0], 0.26)), [-6, 4, 8]) },
 ];
 const points = [
   [0, 0, 2.0],

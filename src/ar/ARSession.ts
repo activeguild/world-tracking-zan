@@ -455,6 +455,9 @@ export class ARSession {
     this.worldAnchor.reset();
     this.world.setWorldReady(false);
     this.presenter?.clear();
+    this.poseFrameId = -1;
+    this.presentedFrameId = -1;
+    this.presentMisses = 0;
     this.video.style.opacity = "";
     this.emit("stopped");
   }
@@ -802,7 +805,8 @@ export class ARSession {
 
   /** Show the frame the result belongs to, time-aligned with the pose. */
   private presentFrame(frameId: number): void {
-    if (!this.presenter?.present(frameId)) {
+    if (!this.presenter) return;
+    if (!this.presenter.present(frameId)) {
       // The frame left the ring (resize, or more frames captured than the
       // ring holds while this one was processed): the previous image stays
       // on screen under the new pose. Counted for the HUD (§5).
