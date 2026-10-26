@@ -1,6 +1,7 @@
 import { ARSession } from "./ar/ARSession";
 import { ARError } from "./ar/ARState";
 import { GUIDANCE_TEXT_JA, getGuidance, worldPhase } from "./ar/Guidance";
+import { GestureRecognizer, type GestureEvent } from "./ar/ObjectGestures";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type * as THREE from "three";
 import { DebugOverlay, type HudCandidate, type HudRelocDiagnostics } from "./debug/DebugOverlay";
@@ -166,7 +167,9 @@ function refreshGuidance(): void {
     sidewaysGuidanceDelayMs: session.config.world.sidewaysGuidanceDelayMs,
   });
   let text = GUIDANCE_TEXT_JA[key];
-  if (key === "TAP_TO_PLACE" && placed) text = "";
+  // Once something is placed, the placement hint gives way to the
+  // manipulation hint for a few seconds, then to nothing.
+  if (key === "TAP_TO_PLACE" && placed) text = performance.now() < manipulationHintUntil ? MANIPULATION_HINT : "";
   if (text !== lastGuidanceText) {
     lastGuidanceText = text;
     messageEl.textContent = text;
@@ -177,18 +180,42 @@ session.on("trackingStateChanged", refreshGuidance);
 
 // Phase 4: tap → hit test → place / move the object (spec §27, §68).
 // The first tap places the cube (or the GLB when ?model= is given), later
-// taps move it. Objects are fixed in world space; only the camera moves.
+// taps move it. User manipulation: dragging the object slides it over the
+// plane (hit test under the finger), a two-finger twist turns it about the
+// plane normal. Objects are fixed in world space otherwise; only the camera
+// moves.
+const MANIPULATION_HINT = "ドラッグで移動、2 本指のひねりで回転できます";
+const MANIPULATION_HINT_MS = 5000;
 let placed: ARObject | undefined;
+let manipulationHintUntil = 0;
+let dragging: ARObject | null = null;
+let rotating: ARObject | null = null;
+/** The object a gesture at (x, y) addresses: the one under the finger, else the only one placed. */
+function targetObjectAt(x: number, y: number): ARObject | null {
+  const picked = session.pickObject(x, y);
+  if (picked) return picked;
+  const all = session.placedObjects;
+  return all.length === 1 ? all[0] : null;
+}
+const gestures = new GestureRecognizer();
 session.on("worldLost", () => {
   placed = undefined;
+  dragging = null;
+  rotating = null;
+  gestures.reset();
   lastGuidanceText = null; // re-evaluate on the next frame
 });
-app.addEventListener("pointerup", async (ev) => {
-  if ((ev.target as HTMLElement).tagName === "BUTTON") return;
-  if (!session.isRunning) return;
-  const rect = video.getBoundingClientRect();
-  const hit = session.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
+session.on("stopped", () => {
+  dragging = null;
+  rotating = null;
+  gestures.reset();
+});
+
+async function placeOrMoveAt(x: number, y: number): Promise<void> {
+  const hit = session.hitTest(x, y);
   if (!hit) return;
+  // An object placed through the session API (test hook) counts as placed too.
+  if (!placed && session.placedObjects.length === 1) placed = session.placedObjects[0];
   if (placed) {
     session.moveObject(placed, hit);
   } else if (modelPromise) {
@@ -198,11 +225,74 @@ app.addEventListener("pointerup", async (ev) => {
     } catch {
       placed = session.placeCube(hit);
     }
+    manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   } else {
     placed = session.placeCube(hit);
+    manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   }
   if (walk) startWalking(placed);
   refreshGuidance();
+}
+
+function handleGestures(events: GestureEvent[]): void {
+  for (const g of events) {
+    switch (g.kind) {
+      case "tap":
+        void placeOrMoveAt(g.x, g.y);
+        break;
+      case "dragStart":
+        // Only a press on the object (or near it) starts a drag; a press on
+        // empty floor that moves is nothing, and a tap there still moves.
+        dragging = session.pickObject(g.x, g.y);
+        break;
+      case "drag": {
+        if (!dragging) break;
+        const hit = session.hitTest(g.x, g.y);
+        if (hit) session.moveObject(dragging, hit);
+        break;
+      }
+      case "dragEnd":
+        dragging = null;
+        break;
+      case "rotateStart":
+        rotating = targetObjectAt(g.cx, g.cy);
+        break;
+      case "rotate":
+        // Screen angle grows clockwise (y down); a clockwise twist seen from
+        // above the plane is a negative yaw about the world up axis.
+        if (rotating) session.rotateObject(rotating, -g.deltaRad);
+        break;
+      case "rotateEnd":
+        rotating = null;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function pointerXY(ev: PointerEvent): [number, number] {
+  const rect = video.getBoundingClientRect();
+  return [ev.clientX - rect.left, ev.clientY - rect.top];
+}
+app.addEventListener("pointerdown", (ev) => {
+  if ((ev.target as HTMLElement).tagName === "BUTTON") return;
+  if (!session.isRunning) return;
+  const [x, y] = pointerXY(ev);
+  handleGestures(gestures.down(ev.pointerId, x, y, ev.timeStamp));
+});
+app.addEventListener("pointermove", (ev) => {
+  if (!session.isRunning) return;
+  const [x, y] = pointerXY(ev);
+  handleGestures(gestures.move(ev.pointerId, x, y, ev.timeStamp));
+});
+app.addEventListener("pointerup", (ev) => {
+  if (!session.isRunning) return;
+  const [x, y] = pointerXY(ev);
+  handleGestures(gestures.up(ev.pointerId, x, y, ev.timeStamp));
+});
+app.addEventListener("pointercancel", (ev) => {
+  handleGestures(gestures.cancel(ev.pointerId));
 });
 
 // Object motion test (修正指示書 Test D / E): the object walks along world X

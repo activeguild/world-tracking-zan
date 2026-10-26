@@ -342,6 +342,49 @@ describe("Phase 1 browser smoke test", () => {
       return out;
     })) as { pos: number[]; camera: number[] | null; source: string | null; planeIn: number | null; age: number }[];
     console.log("[browser-smoke] object trace " + JSON.stringify(objectTrace));
+    // User manipulation: a one-finger drag starting on the cube slides it over
+    // the plane (hit test under the finger), a two-finger twist turns it.
+    // Synthetic pointer events on #app, exactly what a phone sends.
+    const manipulation = (await page.evaluate(async () => {
+      const app = document.getElementById("app")!;
+      const rect = document.getElementById("video")!.getBoundingClientRect();
+      const fire = (type: string, id: number, x: number, y: number) =>
+        app.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: rect.left + x, clientY: rect.top + y, bubbles: true, pointerType: "touch", isPrimary: id === 1 }));
+      const wait = () => new Promise((r) => setTimeout(r, 30));
+      const cx = rect.width / 2, cy = rect.height * 0.6; // where the cube was placed
+      const before = window.__ar.stats().objects[0];
+      // Drag: press on the cube, move 80 px right in a few steps, release.
+      fire("pointerdown", 1, cx, cy);
+      await wait();
+      for (const dx of [20, 40, 60]) {
+        fire("pointermove", 1, cx + dx, cy);
+        await wait();
+      }
+      // The last move and the reference hit test share one pose (the synthetic camera keeps moving between ticks).
+      fire("pointermove", 1, cx + 80, cy);
+      const expected = window.__ar.session.hitTest(cx + 80, cy);
+      await wait();
+      fire("pointerup", 1, cx + 80, cy);
+      await wait();
+      const afterDrag = window.__ar.stats().objects[0];
+      // Twist: two fingers around the cube, rotated 90° clockwise on screen.
+      const ncx = cx + 80;
+      fire("pointerdown", 1, ncx - 40, cy);
+      fire("pointerdown", 2, ncx + 40, cy);
+      await wait();
+      for (let k = 1; k <= 6; k++) {
+        const a = (Math.PI / 2) * (k / 6);
+        fire("pointermove", 2, ncx + 40 * Math.cos(a), cy + 40 * Math.sin(a));
+        fire("pointermove", 1, ncx - 40 * Math.cos(a), cy - 40 * Math.sin(a));
+        await wait();
+      }
+      fire("pointerup", 2, ncx, cy + 40);
+      fire("pointerup", 1, ncx, cy - 40);
+      await wait();
+      const afterTwist = window.__ar.stats().objects[0];
+      return { before, afterDrag, afterTwist, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
+    })) as { before: { position: number[]; yaw: number }; afterDrag: { position: number[]; yaw: number }; afterTwist: { position: number[]; yaw: number }; expected: number[] | null; placed: number };
+    console.log("[browser-smoke] manipulation " + JSON.stringify(manipulation));
     await context.close();
 
     const avg = (f: (s: Stats) => number) => samples.reduce((a, s) => a + f(s), 0) / samples.length;
@@ -465,6 +508,17 @@ describe("Phase 1 browser smoke test", () => {
     for (const s of objectTrace) {
       expect(s.pos, "object world position must not change with camera motion").toEqual(first);
     }
+    // Manipulation: the drag moved the cube to the plane point under the
+    // finger (still one object, no re-placement), the twist turned it by
+    // −90° about the plane normal without moving it.
+    expect(manipulation.placed).toBe(1);
+    expect(manipulation.expected).not.toBeNull();
+    const dragMove = Math.hypot(manipulation.afterDrag.position[0] - manipulation.before.position[0], manipulation.afterDrag.position[2] - manipulation.before.position[2]);
+    expect(dragMove).toBeGreaterThan(0.02);
+    for (let i = 0; i < 3; i++) expect(Math.abs(manipulation.afterDrag.position[i] - manipulation.expected![i])).toBeLessThan(1e-6);
+    expect(Math.abs(manipulation.afterDrag.yaw - manipulation.before.yaw)).toBeLessThan(1e-9);
+    expect(manipulation.afterTwist.yaw - manipulation.afterDrag.yaw).toBeCloseTo(-Math.PI / 2, 1);
+    for (let i = 0; i < 3; i++) expect(manipulation.afterTwist.position[i]).toBeCloseTo(manipulation.afterDrag.position[i], 9);
     const cameraMoved = objectTrace.some(
       (s) => s.camera && objectTrace[0].camera && Math.hypot(s.camera[0] - objectTrace[0].camera![0], s.camera[2] - objectTrace[0].camera![2]) > 1e-4,
     );

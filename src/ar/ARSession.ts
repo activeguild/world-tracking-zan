@@ -503,10 +503,68 @@ export class ARSession {
     return obj;
   }
 
-  /** Move an already placed object to a new hit. */
+  /** Move an already placed object to a new hit, keeping its yaw. */
   moveObject(obj: ARObject, hit: ARHitResult): void {
-    obj.place([hit.position.x, hit.position.y, hit.position.z]);
+    obj.place([hit.position.x, hit.position.y, hit.position.z], obj.yaw);
     this.renderNow();
+  }
+
+  /** The objects currently placed in the world (in placement order). */
+  get placedObjects(): ARObject[] {
+    return this.world.objects.filter((o) => o.placed);
+  }
+
+  /** Turn a placed object about the world up axis by `deltaRad` (user gesture). */
+  rotateObject(obj: ARObject, deltaRad: number): void {
+    if (!Number.isFinite(deltaRad) || deltaRad === 0) return;
+    obj.setYaw(obj.yaw + deltaRad);
+    this.renderNow();
+  }
+
+  /**
+   * The placed object under a screen point (`x, y` in CSS pixels relative to
+   * the video element, like `hitTest`): a ray through the point hitting the
+   * object's meshes, or, failing that, the object whose projected position is
+   * within `tolerancePx` (a 10 cm cube is a small target on a phone). Null
+   * when nothing is placed or the world is not ready.
+   */
+  pickObject(x: number, y: number, tolerancePx = 44): ARObject | null {
+    if (!this.worldAnchor.isReady) return null;
+    const rect = this.video.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    const camera = this.arCamera.camera;
+    camera.updateMatrixWorld(true);
+    const ndc = new THREE.Vector2((x / rect.width) * 2 - 1, 1 - (y / rect.height) * 2);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, camera);
+    let best: ARObject | null = null;
+    let bestDistance = Infinity;
+    for (const obj of this.world.objects) {
+      if (!obj.placed) continue;
+      obj.root.updateWorldMatrix(true, true);
+      const hits = raycaster.intersectObject(obj.root, true);
+      if (hits.length && hits[0].distance < bestDistance) {
+        best = obj;
+        bestDistance = hits[0].distance;
+      }
+    }
+    if (best) return best;
+    // Fallback: nearest projected object position within the tolerance.
+    let bestPx = tolerancePx;
+    const p = new THREE.Vector3();
+    for (const obj of this.world.objects) {
+      if (!obj.placed) continue;
+      obj.root.getWorldPosition(p).project(camera);
+      if (!(p.z < 1) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const sx = ((p.x + 1) / 2) * rect.width;
+      const sy = ((1 - p.y) / 2) * rect.height;
+      const d = Math.hypot(sx - x, sy - y);
+      if (d <= bestPx) {
+        bestPx = d;
+        best = obj;
+      }
+    }
+    return best;
   }
 
   private renderNow(): void {

@@ -677,6 +677,16 @@ v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Reloca
 - **結論**: 合成では「傾けながら移動すると回転が徐々にずれる」は再現しない。数式（§1–§2）、補正の向きと適用回数（§3）、PlaneTracker の経路（§4）、表示同期（§5）のいずれにも不整合はなく、修正すべき箇所は見つからなかった。実機の症状は 15–41 本目で追ってきた観測側 / カメラモデル側の問題（初期化直後 0.5 px → 小さな動きで一様に 2 px、視点で往復）が World の向きとして見えているものと考えられ、次の実機録画では **`Wdiag`（World が動いたか）、`ObjFlr`（配置面が床か）、`Pose … frame/shown`（映像と姿勢の対応）** を同じ録画で読む。§6-C の実機（iOS Safari / Android Chrome）は未実施
 - テスト 355 件（+11）、ブラウザ 3 件、`tsc` / `npm run build` OK
 
+### 配置物のユーザー操作 — ドラッグ移動 / 2 本指ひねり回転（2026-10-26、実機確認待ち）
+
+ユーザー要望「オブジェクトを移動したり、回転できるようにしたい（ユーザーの操作で）」。**エンジン / Anchor / Vision は不変**。配置物は従来どおり World 座標でのみ動く（`ARObject.place / setYaw`。カメラの動きでは動かない、§29–§30）。
+
+- **ジェスチャ認識（`src/ar/ObjectGestures.ts`、純粋な状態機械、DOM 非依存）**: `GestureRecognizer.down / move / up / cancel(pointerId, x, y, t)` → `GestureEvent[]`。**tap**（1 本指、`tapSlopPx` 12 px 以内・`tapMaxMs` 400 ms 以内で離す。位置は押した点）/ **drag**（1 本指が slop を超えたら `dragStart`（押した位置）→ 毎 move に `drag { x, y, dx, dy }` → `dragEnd`）/ **rotate**（2 本指: `rotateStart { cx, cy }` → 2 点の角度の変化 `rotate { deltaRad }`（画面座標 y 下向きなので時計回りが正、±π で wrap）→ `rotateEnd`）。2 本目の指はドラッグを終了してひねりに移り、ひねりの後に残った指は全部離すまで **dead**（タップ / ドラッグにならない = 2 本指操作の後に誤配置しない）。3 本目以降は無視。`reset()` でセッション停止 / World 消失時に忘れる
+- **操作の意味（`main.ts`）**: tap = 従来どおり（未配置なら配置、配置済みなら移動。移動で yaw は保持）。dragStart = `ARSession.pickObject(x, y)`（Three.js `Raycaster` で配置物のメッシュを当て、外れたら投影位置から 44 px 以内の最寄り。10 cm の Cube はスマホで小さいため）で掴んだオブジェクトだけを、drag ごとに `hitTest` → `moveObject`（指の下の平面上の点へ。yaw 保持）。床の何もない所から始まるドラッグは何もしない。rotateStart = ひねりの中心の下のオブジェクト（なければ唯一の配置物）を対象に、rotate で `rotateObject(obj, −deltaRad)`（画面上の時計回り = 上から見て時計回り = World up まわりの負の yaw）。配置直後 5 s だけ誘導文「ドラッグで移動、2 本指のひねりで回転できます」（`TAP_TO_PLACE` の枠を流用、Guidance モジュールは不変）
+- **ARSession API**: `pickObject(x, y, tolerancePx = 44): ARObject | null`（`hitTest` と同じ CSS px 基準）、`rotateObject(obj, deltaRad)`、`placedObjects`、`moveObject` は yaw を保持するよう変更（従来は `place()` で 0 にリセット）。`setPointerCapture` は使わず `#app` の pointer イベント（`touch-action: none` は既存）
+- テスト 361 件（+6、`tests/ar/ObjectGestures.test.ts`: tap の slop / 時間、drag の開始位置とデルタ、ひねり 90° の合計と符号・残った指の dead・その後のタップ復帰、ドラッグ中の 2 本目で `dragEnd → rotateStart`、±π の wrap、cancel はタップにならない、3 本目は無視、reset）。ブラウザテスト（既存の Phase 4 配置の続き）: `#app` に合成 PointerEvent を投げて Cube を 80 px 右へドラッグ → 位置が最後の指の下の `hitTest` と 1e-6 で一致・yaw 不変・配置数 1 のまま、2 本指を 90° 時計回りにひねる → yaw −π/2・位置不変。3 件合格、`tsc` / `npm run build` OK
+- **実機で確認するもの**: Cube に指を置いてドラッグすると床の上を滑ること（指が Cube から外れた位置で押し始めると動かない）、2 本指のひねりで回る向きが直感と合うこと（逆なら `rotate` の符号を反転）、タップでの配置 / 移動が従来どおりなこと、HUD（☰）のボタンに触れても配置されないこと
+
 ### Phase 5 — 実装済み（承認待ち）
 
 - `src/vision/Keyframe.ts`: Keyframe（姿勢、画像ピラミッドのコピー、粗画像、Landmark 観測）
