@@ -72,7 +72,7 @@ interface Stats {
   poseAgeMs: number;
   poseStale: boolean;
   cameraWorldPosition: number[] | null;
-  objects: { id: number; position: number[]; yaw: number }[];
+  objects: { id: number; position: number[]; yaw: number; scale: number }[];
   plane: {
     normal: number[];
     inlierCount: number;
@@ -382,8 +382,28 @@ describe("Phase 1 browser smoke test", () => {
       fire("pointerup", 1, ncx, cy - 40);
       await wait();
       const afterTwist = window.__ar.stats().objects[0];
-      return { before, afterDrag, afterTwist, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
-    })) as { before: { position: number[]; yaw: number }; afterDrag: { position: number[]; yaw: number }; afterTwist: { position: number[]; yaw: number }; expected: number[] | null; placed: number };
+      // Pinch: two fingers 40 px apart spread to 100 px (×2.5) around the cube.
+      fire("pointerdown", 1, ncx - 20, cy);
+      fire("pointerdown", 2, ncx + 20, cy);
+      await wait();
+      for (const half of [30, 40, 50]) {
+        fire("pointermove", 1, ncx - half, cy);
+        fire("pointermove", 2, ncx + half, cy);
+        await wait();
+      }
+      fire("pointerup", 1, ncx - 50, cy);
+      fire("pointerup", 2, ncx + 50, cy);
+      await wait();
+      const afterPinch = window.__ar.stats().objects[0];
+      return { before, afterDrag, afterTwist, afterPinch, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
+    })) as {
+      before: { position: number[]; yaw: number; scale: number };
+      afterDrag: { position: number[]; yaw: number; scale: number };
+      afterTwist: { position: number[]; yaw: number; scale: number };
+      afterPinch: { position: number[]; yaw: number; scale: number };
+      expected: number[] | null;
+      placed: number;
+    };
     console.log("[browser-smoke] manipulation " + JSON.stringify(manipulation));
     await context.close();
 
@@ -519,6 +539,11 @@ describe("Phase 1 browser smoke test", () => {
     expect(Math.abs(manipulation.afterDrag.yaw - manipulation.before.yaw)).toBeLessThan(1e-9);
     expect(manipulation.afterTwist.yaw - manipulation.afterDrag.yaw).toBeCloseTo(-Math.PI / 2, 1);
     for (let i = 0; i < 3; i++) expect(manipulation.afterTwist.position[i]).toBeCloseTo(manipulation.afterDrag.position[i], 9);
+    // Pinch: ×2.5 uniform scale, position and yaw untouched; drag and twist left the scale at 1.
+    expect(manipulation.afterTwist.scale).toBeCloseTo(1, 9);
+    expect(manipulation.afterPinch.scale).toBeCloseTo(2.5, 6);
+    expect(manipulation.afterPinch.yaw).toBeCloseTo(manipulation.afterTwist.yaw, 9);
+    for (let i = 0; i < 3; i++) expect(manipulation.afterPinch.position[i]).toBeCloseTo(manipulation.afterTwist.position[i], 9);
     const cameraMoved = objectTrace.some(
       (s) => s.camera && objectTrace[0].camera && Math.hypot(s.camera[0] - objectTrace[0].camera![0], s.camera[2] - objectTrace[0].camera![2]) > 1e-4,
     );

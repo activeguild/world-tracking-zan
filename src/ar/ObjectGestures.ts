@@ -12,6 +12,8 @@
  *                position, drag on every move, dragEnd on release
  *   rotate       two pointers: the change of the angle between them, in
  *                screen radians (y down, so clockwise on screen is positive)
+ *   pinch        two pointers: the ratio of their distance to the previous
+ *                one (reported alongside rotate on every two-finger move)
  *
  * A second pointer ends a drag and starts a twist; after a twist the pointer
  * that remains is dead (no tap, no drag) until everything is released, so a
@@ -24,6 +26,8 @@ export type GestureEvent =
   | { kind: "dragEnd" }
   | { kind: "rotateStart"; cx: number; cy: number }
   | { kind: "rotate"; deltaRad: number; cx: number; cy: number }
+  /** Two-finger pinch: the ratio of the current finger distance to the previous one (> 1 = spread). */
+  | { kind: "pinch"; scale: number; cx: number; cy: number }
   | { kind: "rotateEnd" };
 
 export interface GestureOptions {
@@ -51,6 +55,7 @@ export class GestureRecognizer {
   private order: number[] = [];
   private mode: Mode = "idle";
   private lastAngle = 0;
+  private lastDistance = 0;
   private readonly opts: GestureOptions;
 
   constructor(opts: Partial<GestureOptions> = {}) {
@@ -74,6 +79,7 @@ export class GestureRecognizer {
       this.mode = "rotate";
       const [a, b] = this.pair();
       this.lastAngle = angleOf(a, b);
+      this.lastDistance = distanceOf(a, b);
       out.push({ kind: "rotateStart", cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 });
     }
     // A third pointer changes nothing: the first two keep defining the twist.
@@ -103,10 +109,17 @@ export class GestureRecognizer {
       case "rotate": {
         if (this.order.indexOf(id) > 1) break; // a third pointer does not steer
         const [a, b] = this.pair();
+        const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
         const angle = angleOf(a, b);
         const delta = wrapAngle(angle - this.lastAngle);
         this.lastAngle = angle;
-        if (delta !== 0) out.push({ kind: "rotate", deltaRad: delta, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 });
+        if (delta !== 0) out.push({ kind: "rotate", deltaRad: delta, cx, cy });
+        const distance = distanceOf(a, b);
+        // Fingers (nearly) on top of each other define neither a scale nor an angle: skip until they separate.
+        if (distance > MIN_PINCH_DISTANCE_PX && this.lastDistance > MIN_PINCH_DISTANCE_PX && distance !== this.lastDistance) {
+          out.push({ kind: "pinch", scale: distance / this.lastDistance, cx, cy });
+        }
+        if (distance > MIN_PINCH_DISTANCE_PX) this.lastDistance = distance;
         break;
       }
       default:
@@ -167,8 +180,15 @@ export class GestureRecognizer {
   }
 }
 
+/** Below this finger distance (px) a pinch ratio would be noise. */
+const MIN_PINCH_DISTANCE_PX = 8;
+
 function angleOf(a: Pointer, b: Pointer): number {
   return Math.atan2(b.y - a.y, b.x - a.x);
+}
+
+function distanceOf(a: Pointer, b: Pointer): number {
+  return Math.hypot(b.x - a.x, b.y - a.y);
 }
 
 export function wrapAngle(rad: number): number {

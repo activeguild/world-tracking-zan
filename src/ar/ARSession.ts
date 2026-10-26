@@ -168,7 +168,7 @@ export interface ARStats {
   /** How long tracking has been lost (ms), 0 while tracking. */
   lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
-  objects: { id: number; position: number[]; yaw: number }[];
+  objects: { id: number; position: number[]; yaw: number; scale: number }[];
   /** Whether the placed objects are shown, and why not (v13 §15–§16). */
   objectVisibility: { visible: boolean; reason: ObjectVisibilityReason };
   /** Focal length in processing pixels. */
@@ -522,6 +522,19 @@ export class ARSession {
   }
 
   /**
+   * Multiply a placed object's uniform scale by `factor` (user pinch),
+   * clamped to [`minScale`, `maxScale`] relative to its placed size. Returns
+   * the scale now in effect.
+   */
+  scaleObject(obj: ARObject, factor: number, minScale = 0.25, maxScale = 4): number {
+    if (Number.isFinite(factor) && factor > 0 && factor !== 1) {
+      obj.setScale(Math.min(maxScale, Math.max(minScale, obj.scale * factor)));
+      this.renderNow();
+    }
+    return obj.scale;
+  }
+
+  /**
    * The placed object under a screen point (`x, y` in CSS pixels relative to
    * the video element, like `hitTest`): a ray through the point hitting the
    * object's meshes, or, failing that, the object whose projected position is
@@ -646,7 +659,7 @@ export class ARSession {
       objectFloor: this.objectFloor,
       objects: this.world.objects
         .filter((o) => o.placed)
-        .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
+        .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,

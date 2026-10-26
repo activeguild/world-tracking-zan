@@ -182,9 +182,11 @@ session.on("trackingStateChanged", refreshGuidance);
 // The first tap places the cube (or the GLB when ?model= is given), later
 // taps move it. User manipulation: dragging the object slides it over the
 // plane (hit test under the finger), a two-finger twist turns it about the
-// plane normal. Objects are fixed in world space otherwise; only the camera
-// moves.
-const MANIPULATION_HINT = "ドラッグで移動、2 本指のひねりで回転できます";
+// plane normal and a pinch scales it. Objects are fixed in world space
+// otherwise; only the camera moves.
+const MANIPULATION_HINT = "ドラッグで移動、2 本指のひねりで回転、ピンチで拡大縮小";
+const OBJECT_SCALE_MIN = 0.25;
+const OBJECT_SCALE_MAX = 4;
 const MANIPULATION_HINT_MS = 5000;
 let placed: ARObject | undefined;
 let manipulationHintUntil = 0;
@@ -261,6 +263,9 @@ function handleGestures(events: GestureEvent[]): void {
         // Screen angle grows clockwise (y down); a clockwise twist seen from
         // above the plane is a negative yaw about the world up axis.
         if (rotating) session.rotateObject(rotating, -g.deltaRad);
+        break;
+      case "pinch":
+        if (rotating) session.scaleObject(rotating, g.scale, OBJECT_SCALE_MIN, OBJECT_SCALE_MAX);
         break;
       case "rotateEnd":
         rotating = null;

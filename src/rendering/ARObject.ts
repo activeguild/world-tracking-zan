@@ -72,6 +72,16 @@ export class ARObject {
     this.root.rotation.y = yawRad;
   }
 
+  /** Uniform scale about the object's own origin (its footprint on the plane). 1 = as placed. */
+  get scale(): number {
+    return this.root.scale.x;
+  }
+
+  setScale(s: number): void {
+    if (!Number.isFinite(s) || s <= 0) return;
+    this.root.scale.setScalar(s);
+  }
+
   /**
    * Advance the object's own animation by `dtSec`. Pure world-space
    * integration; the camera is not an input.

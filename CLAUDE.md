@@ -686,6 +686,7 @@ v11 のコードレビュー指摘への対応。**PnP / LK / Jump Gate / Reloca
 - **ARSession API**: `pickObject(x, y, tolerancePx = 44): ARObject | null`（`hitTest` と同じ CSS px 基準）、`rotateObject(obj, deltaRad)`、`placedObjects`、`moveObject` は yaw を保持するよう変更（従来は `place()` で 0 にリセット）。`setPointerCapture` は使わず `#app` の pointer イベント（`touch-action: none` は既存）
 - テスト 361 件（+6、`tests/ar/ObjectGestures.test.ts`: tap の slop / 時間、drag の開始位置とデルタ、ひねり 90° の合計と符号・残った指の dead・その後のタップ復帰、ドラッグ中の 2 本目で `dragEnd → rotateStart`、±π の wrap、cancel はタップにならない、3 本目は無視、reset）。ブラウザテスト（既存の Phase 4 配置の続き）: `#app` に合成 PointerEvent を投げて Cube を 80 px 右へドラッグ → 位置が最後の指の下の `hitTest` と 1e-6 で一致・yaw 不変・配置数 1 のまま、2 本指を 90° 時計回りにひねる → yaw −π/2・位置不変。3 件合格、`tsc` / `npm run build` OK
 - **実機で確認するもの**: Cube に指を置いてドラッグすると床の上を滑ること（指が Cube から外れた位置で押し始めると動かない）、2 本指のひねりで回る向きが直感と合うこと（逆なら `rotate` の符号を反転）、タップでの配置 / 移動が従来どおりなこと、HUD（☰）のボタンに触れても配置されないこと
+- **ピンチ拡大縮小（同日、ユーザー要望）**: 2 本指の距離の比を `pinch { scale, cx, cy }` として毎 move に出す（ひねりと併発。指が 8 px 未満に重なった間は出さず、離れ直した最初の move も比を取らない）。`ARObject.scale / setScale`（root の均一スケール。配置・移動・回転では触らない）、`ARSession.scaleObject(obj, factor, min, max)`（配置時の大きさに対して 0.25〜4 倍にクランプ、`main.ts` の `OBJECT_SCALE_MIN / MAX`）、`ARStats.objects[].scale`。対象はひねりと同じ `rotateStart` で決めたオブジェクト。誘導文に「ピンチで拡大縮小」を追加。テスト 362 件（+1: 広げて ×2 / 縮めて ×0.75 / 回転と同時 / 重なり中は出ない）、ブラウザテスト: 40 → 100 px のピンチで `scale` 2.5、位置・yaw 不変
 
 ### Phase 5 — 実装済み（承認待ち）
 
