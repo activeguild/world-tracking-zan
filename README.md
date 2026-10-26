@@ -176,6 +176,10 @@ camera lost in the map (PnP fails) → RELOCALIZING, world kept, objects hold 1.
 
 Placing a GLB instead of the cube: `?model=URL&size=0.15` (same-origin or
 CORS-enabled URL); in code `ar.placeObject(gltf.scene, hit, 0.15)`.
+Placing a video as a standing screen: `?video=1` (the bundled
+`public/sample.mp4` / `.webm`) or `?video=URL`, `?size=` = screen width in
+meters (default 0.3); in code `ar.placeVideo(videoElement, hit, 0.3)` and
+`videoElement.play()` from the tap (muted / playsinline).
 
 ## Phase 4 — world coordinate, hit test, Three.js placement
 
@@ -283,6 +287,7 @@ Query parameters:
 | `?hud=0`    | hide the HUD                                |
 | `?gravity=x,y,z` | override the gravity direction (camera frame) |
 | `?model=URL&size=0.15` | place this GLB (footprint in meters) instead of the cube |
+| `?video=1` / `?video=URL` | place the bundled sample video (or this video) as a standing screen; `?size=` = width in meters (0.3) |
 | `?fov=66`   | camera field of view along the long side (degrees) |
 | `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
 | `?sync=0`   | show the live video instead of the pose-synchronized frame |

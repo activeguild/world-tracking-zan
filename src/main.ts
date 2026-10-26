@@ -24,6 +24,9 @@ import "./style.css";
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
+ *   ?video=1          place the bundled sample video (public/sample.mp4 / .webm) as a
+ *                     standing screen instead of the cube; ?video=URL plays that video
+ *                     (same-origin or CORS-enabled). ?size= is the screen width (default 0.3 m)
  *   ?fov=66           camera field of view along the long side (degrees)
  *   ?sync=0           show the live video instead of the pose-synchronized frame
  *   ?grab=2d|gl|auto  frame grabber: 2D canvas readback, WebGL shader, or auto (default: measure, then pick)
@@ -47,6 +50,9 @@ const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
+// Sample video (ユーザー要望): ?video=1 → the bundled sample, ?video=URL → that file.
+const videoParam = params.get("video");
+const videoWidth = Number(params.get("size") ?? "") || 0.3;
 const fovDeg = Number(params.get("fov") ?? "") || undefined;
 const syncVideo = params.get("sync") !== "0";
 // Frame grabber (v16): auto picks canvas2d or webgl from the measured grab time; ?grab=2d / ?grab=gl force one.
@@ -72,6 +78,42 @@ const purgeInconsistent = params.get("purge") !== "0";
 const reanchorProbe = params.get("reanchor") !== "0";
 // Phase 2: what moves the world anchor after a BA run (?anchor=local|kf|none).
 const anchorParam = ({ local: "local", kf: "keyframe", none: "none" } as const)[params.get("anchor") ?? ""];
+
+// The sample video is created up front so its metadata (aspect) is known by
+// the time it is placed. Muted + playsinline so that `play()` from the tap
+// is allowed on iOS Safari / Android Chrome; it loops like a signage screen.
+let sampleVideo: HTMLVideoElement | null = null;
+let sampleVideoFailed = false;
+if (videoParam) {
+  sampleVideo = document.createElement("video");
+  sampleVideo.muted = true;
+  sampleVideo.defaultMuted = true;
+  sampleVideo.loop = true;
+  sampleVideo.playsInline = true;
+  sampleVideo.setAttribute("playsinline", "");
+  sampleVideo.setAttribute("muted", "");
+  sampleVideo.preload = "auto";
+  sampleVideo.crossOrigin = "anonymous";
+  sampleVideo.style.display = "none";
+  if (videoParam === "1") {
+    // Both encodings of the same clip: H.264 for Safari and most Androids,
+    // VP9 WebM for browsers without H.264 (e.g. the headless test Chromium).
+    for (const [file, type] of [["sample.mp4", "video/mp4"], ["sample.webm", "video/webm"]] as const) {
+      const source = document.createElement("source");
+      source.src = new URL(`./${file}`, document.baseURI).href;
+      source.type = type;
+      sampleVideo.appendChild(source);
+    }
+  } else {
+    sampleVideo.src = videoParam;
+  }
+  sampleVideo.addEventListener("error", () => {
+    sampleVideoFailed = true;
+    console.warn("[AR] sample video failed to load, falling back to the cube");
+  });
+  document.body.appendChild(sampleVideo);
+  sampleVideo.load();
+}
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -167,9 +209,10 @@ function refreshGuidance(): void {
     sidewaysGuidanceDelayMs: session.config.world.sidewaysGuidanceDelayMs,
   });
   let text = GUIDANCE_TEXT_JA[key];
-  // Once something is placed, the placement hint gives way to the
+  // Once something is placed (AR_ACTIVE → "NONE"; "TAP_TO_PLACE" for a frame
+  // or when placed through the API), the placement hint gives way to the
   // manipulation hint for a few seconds, then to nothing.
-  if (key === "TAP_TO_PLACE" && placed) text = performance.now() < manipulationHintUntil ? MANIPULATION_HINT : "";
+  if ((key === "TAP_TO_PLACE" || key === "NONE") && placed) text = performance.now() < manipulationHintUntil ? MANIPULATION_HINT : "";
   if (text !== lastGuidanceText) {
     lastGuidanceText = text;
     messageEl.textContent = text;
@@ -220,6 +263,11 @@ async function placeOrMoveAt(x: number, y: number): Promise<void> {
   if (!placed && session.placedObjects.length === 1) placed = session.placedObjects[0];
   if (placed) {
     session.moveObject(placed, hit);
+  } else if (sampleVideo && !sampleVideoFailed) {
+    // Synchronous on purpose: play() must run inside the tap's user activation.
+    placed = session.placeVideo(sampleVideo, hit, videoWidth);
+    sampleVideo.play().catch((e) => console.warn("[AR] video play() was refused:", e));
+    manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   } else if (modelPromise) {
     try {
       const model = await modelPromise;
@@ -657,6 +705,8 @@ declare global {
       start: () => Promise<void>;
       /** Compare the 2D and WebGL grabbers on the current frame (v16 test hook). */
       grabCompare: () => ReturnType<ARSession["compareGrabbers"]>;
+      /** The sample video element when ?video= is given (test hook). */
+      sampleVideo: () => HTMLVideoElement | null;
     };
   }
 }
@@ -665,4 +715,5 @@ window.__ar = {
   stats: () => session.getStats(),
   start: () => session.start(),
   grabCompare: () => session.compareGrabbers(),
+  sampleVideo: () => sampleVideo,
 };

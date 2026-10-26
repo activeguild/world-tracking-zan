@@ -8,7 +8,7 @@ import { FeatureRenderer } from "../debug/FeatureRenderer";
 import { PlaneRenderer } from "../debug/PlaneRenderer";
 import { viewportIntrinsics, worldToMap, type WorldFrame } from "../math/CoordinateSystem";
 import { ARCamera } from "../rendering/ARCamera";
-import type { ARObject } from "../rendering/ARObject";
+import { yawFacing, type ARObject, type ARObjectKind, type VideoLike } from "../rendering/ARObject";
 import { ARRenderer } from "../rendering/ARRenderer";
 import { ARWorld } from "../rendering/ARWorld";
 import { FramePresenter } from "../rendering/FramePresenter";
@@ -168,7 +168,7 @@ export interface ARStats {
   /** How long tracking has been lost (ms), 0 while tracking. */
   lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
-  objects: { id: number; position: number[]; yaw: number; scale: number }[];
+  objects: { id: number; kind: ARObjectKind; position: number[]; yaw: number; scale: number }[];
   /** Whether the placed objects are shown, and why not (v13 §15–§16). */
   objectVisibility: { visible: boolean; reason: ObjectVisibilityReason };
   /** Focal length in processing pixels. */
@@ -503,6 +503,20 @@ export class ARSession {
     return obj;
   }
 
+  /**
+   * Place a video panel (`width` m wide, standing on the plane) at a hit,
+   * turned so that its screen faces the camera at placement time; a twist
+   * gesture turns it afterwards like any object. Playback is not started
+   * here: call `video.play()` from the user gesture (muted / playsinline).
+   */
+  placeVideo(video: VideoLike, hit: ARHitResult, width: number): ARObject {
+    const obj = this.world.addVideo(video, width);
+    const cam = this.arCamera.camera.position;
+    obj.place([hit.position.x, hit.position.y, hit.position.z], yawFacing(hit.position.x, hit.position.z, cam.x, cam.z));
+    this.renderNow();
+    return obj;
+  }
+
   /** Move an already placed object to a new hit, keeping its yaw. */
   moveObject(obj: ARObject, hit: ARHitResult): void {
     obj.place([hit.position.x, hit.position.y, hit.position.z], obj.yaw);
@@ -659,7 +673,7 @@ export class ARSession {
       objectFloor: this.objectFloor,
       objects: this.world.objects
         .filter((o) => o.placed)
-        .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
+        .map((o) => ({ id: o.id, kind: o.kind, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,

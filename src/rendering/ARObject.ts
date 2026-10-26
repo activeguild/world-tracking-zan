@@ -11,9 +11,33 @@ import * as THREE from "three";
  * The world frame is the plane frame (plane = Y 0, origin = plane center),
  * so "plane-local" coordinates are simply world (x, z).
  */
+/** What a placed object is (HUD / stats / tests); it does not change how it is tracked. */
+export type ARObjectKind = "cube" | "model" | "video" | "object";
+
+/**
+ * The minimum of HTMLVideoElement a video panel needs (so it can be built
+ * and unit-tested without a DOM). `videoWidth / videoHeight` are 0 until
+ * the metadata has loaded; the panel listens for `loadedmetadata` then.
+ */
+export interface VideoLike {
+  videoWidth: number;
+  videoHeight: number;
+  addEventListener(type: "loadedmetadata", listener: () => void, options?: { once?: boolean }): void;
+}
+
+/** Yaw (about world Y) that turns an object's +Z face toward a point, e.g. the camera. */
+export function yawFacing(objectX: number, objectZ: number, targetX: number, targetZ: number): number {
+  const dx = targetX - objectX;
+  const dz = targetZ - objectZ;
+  if (!Number.isFinite(dx) || !Number.isFinite(dz) || dx * dx + dz * dz < 1e-12) return 0;
+  return Math.atan2(dx, dz);
+}
+
 export class ARObject {
   readonly root = new THREE.Group();
   private _placed = false;
+  /** Media behind a video panel (paused on dispose); null for other objects. */
+  private media: { pause(): void } | null = null;
 
   /** Own motion in world units per second (plane-local when y = 0). */
   readonly velocity = new THREE.Vector3();
@@ -25,6 +49,7 @@ export class ARObject {
   constructor(
     readonly id: number,
     readonly object: THREE.Object3D,
+    readonly kind: ARObjectKind = "object",
   ) {
     this.root.add(object);
     this.root.visible = false;
@@ -99,13 +124,58 @@ export class ARObject {
   }
 
   dispose(): void {
+    this.media?.pause();
+    this.media = null;
     this.root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
       const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
-      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-      else mat?.dispose();
+      const mats = Array.isArray(mat) ? mat : mat ? [mat] : [];
+      for (const m of mats) {
+        (m as THREE.MeshBasicMaterial).map?.dispose();
+        m.dispose();
+      }
     });
+  }
+
+  /**
+   * A video panel standing upright on the plane: a `width` m wide screen
+   * (height from the video's aspect, 16:9 until the metadata is known)
+   * showing `video` through a VideoTexture, with a thin dark back so it
+   * reads as a screen from behind. Its +Z face shows the picture; the bottom
+   * edge is at Y = 0. Playback (`play()`, muted / playsinline) is the
+   * caller's job — it must start from a user gesture on phones.
+   */
+  static videoPanel(id: number, video: VideoLike, width: number, fallbackAspect = 16 / 9): ARObject {
+    const holder = new THREE.Group();
+    const texture = new THREE.VideoTexture(video as unknown as HTMLVideoElement);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const screen = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, toneMapped: false }),
+    );
+    screen.name = "screen";
+    const depth = Math.max(0.002, width * 0.015);
+    const back = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0x202020, roughness: 0.8, metalness: 0.1 }),
+    );
+    back.name = "back";
+    holder.add(back, screen);
+    const layout = () => {
+      const aspect = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : fallbackAspect;
+      const height = width / aspect;
+      screen.scale.set(width, height, 1);
+      screen.position.set(0, height / 2, depth / 2 + 1e-4);
+      back.scale.set(width, height, depth);
+      back.position.set(0, height / 2, 0);
+    };
+    layout();
+    // The aspect is only known once the metadata has loaded; relayout then.
+    video.addEventListener("loadedmetadata", layout, { once: true });
+    const obj = new ARObject(id, holder, "video");
+    obj.media = typeof (video as { pause?: unknown }).pause === "function" ? (video as unknown as { pause(): void }) : null;
+    return obj;
   }
 
   /**
@@ -128,7 +198,7 @@ export class ARObject {
     box.getCenter(center);
     model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
     holder.add(model);
-    return new ARObject(id, holder);
+    return new ARObject(id, holder, "model");
   }
 
   /** Demo cube standing on the plane (its bottom face at Y = 0). */
@@ -142,6 +212,6 @@ export class ARObject {
       new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 }),
     );
     mesh.add(edges);
-    return new ARObject(id, mesh);
+    return new ARObject(id, mesh, "cube");
   }
 }
