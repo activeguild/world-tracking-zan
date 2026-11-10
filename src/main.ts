@@ -10,6 +10,7 @@ import type { RelocalizationDiagnostics } from "./vision/Relocalizer";
 import type { PoseCandidateReport } from "./vision/types";
 import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
+import { GyroProvider } from "./sensors/GyroProvider";
 import "./style.css";
 
 /**
@@ -48,6 +49,8 @@ const hudParam = params.get("hud");
 const showHud = hudParam !== null ? hudParam === "1" : debugLog;
 const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
+// Phase 6 step 0: the gyro is only compared with the vision rotation (HUD `Gyro` rows).
+const gyroProvider = new GyroProvider();
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 // Sample video (ユーザー要望): ?video=1 → the bundled sample, ?video=URL → that file.
@@ -169,6 +172,7 @@ const session = new ARSession({
     },
   },
   gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
+  gyroSource: gyroProvider,
 });
 
 // Debug HUD on/off (v7 §15–§18): UI state only. The engine, its diagnostics
@@ -372,6 +376,8 @@ startButton.addEventListener("click", async () => {
   try {
     // Gravity needs a user gesture on iOS; start it from the click handler.
     if (!gravityOverride) await gravityProvider.start();
+    // Same DeviceMotion permission (requested just above on iOS).
+    gyroProvider.start();
     await session.start();
     startButton.style.display = "none";
   } catch (e) {
@@ -536,6 +542,8 @@ function refreshHud(): void {
     engineTiming: s.engineTiming,
     bundleAdjustment: s.bundleAdjustment,
     mainTiming: s.mainTiming,
+    gyro: s.gyro,
+    gyroWarnDeg: session.config.debug.gyroWarnDeg,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
     processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,

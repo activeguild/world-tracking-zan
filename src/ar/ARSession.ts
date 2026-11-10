@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { GyroComparer, formatGyroSegment, type GyroDiagnostics } from "./GyroDiagnostics";
+import type { GyroSource } from "../sensors/GyroProvider";
 import { CameraManager, type CameraOptions } from "../camera/CameraManager";
 import { FrameGrabber, type FrameGrabberKind, type FrameSource } from "../camera/CameraFrame";
 import { WebGLFrameGrabber } from "../camera/WebGLFrameGrabber";
@@ -64,6 +66,11 @@ export interface ARSessionOptions {
    * frame (any scale) or null. Used for the plane horizontality test.
    */
   gravitySource?: () => ArrayLike<number> | null;
+  /**
+   * Optional gyro, for the vision ↔ gyro rotation diagnostic only (Phase 6
+   * step 0): the tracker does not read it.
+   */
+  gyroSource?: GyroSource;
   /**
    * Canvas that shows the camera frame the current pose was computed on
    * (time-aligned with the rendering). When given and
@@ -192,6 +199,8 @@ export interface ARStats {
    * 43: cube size vs floor texture). Empty before the world exists.
    */
   objectFloor: ObjectFloorRecord[];
+  /** Vision rotation vs gyro rotation over the same interval (diagnostics only); null without a gyro. */
+  gyro: GyroDiagnostics | null;
 }
 
 /**
@@ -233,6 +242,9 @@ export class ARSession {
   private readonly renderer: FeatureRenderer | null;
   private readonly planeRenderer: PlaneRenderer | null;
   private readonly gravitySource: (() => ArrayLike<number> | null) | null;
+  private readonly gyroSource: GyroSource | null;
+  private readonly gyroComparer: GyroComparer;
+  private gyroDiagnostics: GyroDiagnostics | null = null;
   private readonly logger: ARLogger;
 
   // Phase 4: world anchor + Three.js
@@ -335,6 +347,19 @@ export class ARSession {
     this.renderer = options.overlayCanvas ? new FeatureRenderer(options.overlayCanvas) : null;
     this.planeRenderer = options.overlayCanvas ? new PlaneRenderer(options.overlayCanvas) : null;
     this.gravitySource = options.gravitySource ?? null;
+    this.gyroSource = options.gyroSource ?? null;
+    const dbg = this.config.debug;
+    this.gyroComparer = new GyroComparer({
+      windowsMs: dbg.gyroWindowsMs,
+      stillRateDegPerSec: dbg.gyroStillRateDegPerSec,
+      stillMinMs: dbg.gyroStillMinMs,
+      segmentMinDeg: dbg.gyroSegmentMinDeg,
+      lagMaxMs: dbg.gyroLagMaxMs,
+      lagStepMs: dbg.gyroLagStepMs,
+      lagWindowMs: dbg.gyroLagWindowMs,
+      lagMinMotionDeg: dbg.gyroLagMinMotionDeg,
+      lagEveryFrames: dbg.gyroLagEveryFrames,
+    });
     this.logger = new ARLogger(this.config.debug.log, this.config.debug.logIntervalMs);
     this.frameCanvas = options.frameCanvas ?? null;
 
@@ -671,6 +696,7 @@ export class ARSession {
       worldDiagnostics: this.worldDiagnostics,
       initRefinement: this.initRefinement,
       objectFloor: this.objectFloor,
+      gyro: this.gyroDiagnostics,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, kind: o.kind, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
@@ -939,6 +965,8 @@ export class ARSession {
       // v18: the map moved under the camera; move the world frame with it so
       // that placed objects stay put relative to the local map (no hop).
       let anchorMoved = false;
+      // The pose was rebased by this rotation without the camera moving (gyro diagnostic).
+      if (!b.rejected) this.gyroComparer.applyMapCorrection(b.correctionRotation);
       if (!b.rejected && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
         anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: b.correctionRotation, translation: b.correctionTranslation });
         if (anchorMoved) this.worldChangeReason = "ba_correction";
@@ -960,6 +988,7 @@ export class ARSession {
     const st = r.initRefinement?.lastStage;
     if (st && st.frameId === r.frameId) {
       let anchorMoved = false;
+      if (st.applied) this.gyroComparer.applyMapCorrection(st.correctionRotation);
       if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
         anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
         if (anchorMoved) this.worldChangeReason = "init_stage";
@@ -970,6 +999,13 @@ export class ARSession {
           `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
         );
       }
+    }
+    // Phase 6 step 0: vision rotation vs gyro rotation (diagnostics only).
+    if (this.gyroSource) {
+      const m = r.mapPose;
+      const before = this.gyroComparer.lastSegmentTime;
+      this.gyroDiagnostics = this.gyroComparer.update(r.frameId, r.timestamp, m ? m.rotation : null, !!m && m.framesSinceTracked === 0, m ? m.mapFrameId : -1, this.gyroSource);
+      if (this.gyroComparer.lastSegmentTime !== before && this.gyroDiagnostics.segment) this.logger.info(formatGyroSegment(this.gyroDiagnostics.segment));
     }
     this.worldEstablished = r.worldEstablished;
     // v16 guidance: how long the plane search has been stuck at one stage

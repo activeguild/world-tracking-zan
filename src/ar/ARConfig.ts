@@ -700,6 +700,26 @@ export interface DebugConfig {
   objectFloorHeightWindowDepthRatio: number;
   objectFloorMinLandmarks: number;
   objectFloorYoungFrames: number;
+  /**
+   * Vision ↔ gyro rotation diagnostic (HUD `Gyro` rows, Phase 6 step 0;
+   * nothing feeds the tracker). Sliding windows `gyroWindowsMs`; a hold is
+   * the gyro rate below `gyroStillRateDegPerSec` for `gyroStillMinMs`, and a
+   * hold → move → hold segment is reported when the gyro turned at least
+   * `gyroSegmentMinDeg`. The frame ↔ gyro time offset is searched over
+   * ± `gyroLagMaxMs` in `gyroLagStepMs` steps on the last `gyroLagWindowMs`
+   * of motion (needs `gyroLagMinMotionDeg`), every `gyroLagEveryFrames`
+   * results. Disagreements of `gyroWarnDeg` or more are highlighted.
+   */
+  gyroWindowsMs: number[];
+  gyroStillRateDegPerSec: number;
+  gyroStillMinMs: number;
+  gyroSegmentMinDeg: number;
+  gyroLagMaxMs: number;
+  gyroLagStepMs: number;
+  gyroLagWindowMs: number;
+  gyroLagMinMotionDeg: number;
+  gyroLagEveryFrames: number;
+  gyroWarnDeg: number;
 }
 
 /**
@@ -1145,6 +1165,16 @@ export const DEFAULT_CONFIG: ARConfig = {
     objectFloorHeightWindowDepthRatio: 0.25,
     objectFloorMinLandmarks: 5,
     objectFloorYoungFrames: 30,
+    gyroWindowsMs: [1000, 3000],
+    gyroStillRateDegPerSec: 3,
+    gyroStillMinMs: 250,
+    gyroSegmentMinDeg: 3,
+    gyroLagMaxMs: 200,
+    gyroLagStepMs: 10,
+    gyroLagWindowMs: 2000,
+    gyroLagMinMotionDeg: 5,
+    gyroLagEveryFrames: 5,
+    gyroWarnDeg: 0.5,
   },
   useWorker: true,
 };
@@ -1175,7 +1205,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
       rotationSmoothing: { ...base.world.rotationSmoothing, ...overrides.world?.rotationSmoothing },
     },
     state: { ...base.state, ...overrides.state },
-    debug: { ...base.debug, ...overrides.debug },
+    debug: { ...base.debug, ...overrides.debug, gyroWindowsMs: (overrides.debug?.gyroWindowsMs as number[] | undefined) ?? base.debug.gyroWindowsMs },
     useWorker: overrides.useWorker ?? base.useWorker,
   };
 }

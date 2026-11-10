@@ -11,6 +11,8 @@
  * rows are the map PnP candidate of the current frame, `RELOC` rows are the
  * relocalization attempt / its best keyframe candidate.
  */
+import type { GyroDiagnostics } from "../ar/GyroDiagnostics";
+
 export interface HudCandidate {
   inliers: number;
   errorPx: number;
@@ -110,6 +112,9 @@ export interface HudStats {
   visionMs: number;
   /** Camera frames skipped because the vision backend was still busy. */
   framesDropped?: number;
+  /** Vision ↔ gyro rotation comparison (Phase 6 step 0); null without a gyro. */
+  gyro?: GyroDiagnostics | null;
+  gyroWarnDeg?: number;
   /** Per-stage vision engine time of the last frame (ms, v16). */
   engineTiming?: { pyramid: number; track: number; ransac: number; detect: number; pose: number; map: number; plane: number; reloc: number; ba: number; total: number } | null;
   /** Phase 7: last local bundle adjustment on the current map (null before the first frame). */
@@ -645,6 +650,42 @@ export class DebugOverlay {
         return `${label} h ${pct(f.heightRatio)}±${(f.heightSpread * 100).toFixed(1)}${gen} (n${f.neighbors}/${f.planeFlagged}pl)${tilt}${ratio}${depth}`;
       });
       rows.push(row("ObjFlr", parts.join("  |  "), warn ? "hud-warn" : undefined));
+    }
+    // Phase 6 step 0: vision rotation vs gyro rotation over the same interval.
+    if (s.gyro) {
+      const g = s.gyro;
+      const warnDeg = s.gyroWarnDeg ?? 0.5;
+      const sg2 = (v: number) => (v >= 0 ? "+" : "") + v.toFixed(2);
+      const axis = (a: [number, number, number]) => `p ${sg2(a[0])} y ${sg2(a[1])} r ${sg2(a[2])}`;
+      if (!g.available) {
+        rows.push(row("Gyro", "no samples (DeviceMotion unavailable / not permitted)", "hud-warn"));
+      } else {
+        const lag = Number.isFinite(g.lagMs) ? `  lag ${g.lagMs >= 0 ? "+" : ""}${g.lagMs.toFixed(0)}ms (rms ${g.lagRmsZeroDeg.toFixed(2)} → ${g.lagRmsBestDeg.toFixed(2)}°)` : "  lag ?";
+        const f = g.frame ? `  f ${g.frame.visionDeg.toFixed(2)}/${g.frame.gyroDeg.toFixed(2)}° Δ${g.frame.diffDeg.toFixed(2)}` : "";
+        rows.push(row("Gyro", `${g.sampleHz.toFixed(0)}Hz ${g.rateDegPerSec.toFixed(1)}°/s bias ${g.biasDegPerSec.toFixed(2)}°/s${g.still ? " STILL" : ""}${lag}${f}`));
+        for (const w of g.windows) {
+          const best = Number.isFinite(w.diffLagDeg) ? Math.min(w.diffDeg, w.diffLagDeg) : w.diffDeg;
+          rows.push(
+            row(
+              `Gy${(w.windowMs / 1000).toFixed(0)}s`,
+              `vis ${w.visionDeg.toFixed(2)}° gyro ${w.gyroDeg.toFixed(2)}° Δ${w.diffDeg.toFixed(2)}°${Number.isFinite(w.diffLagDeg) ? ` @lag ${w.diffLagDeg.toFixed(2)}°` : ""} (${axis(w.diffAxisDeg)})`,
+              best >= warnDeg ? "hud-warn" : undefined,
+            ),
+          );
+        }
+        if (g.segment) {
+          const sg = g.segment;
+          rows.push(
+            row(
+              "GyHold",
+              `×${g.segmentCount} ${(g.segmentAgeMs / 1000).toFixed(0)}s ago, ${(sg.durationMs / 1000).toFixed(1)}s: vis ${sg.visionDeg.toFixed(2)}° gyro ${sg.gyroDeg.toFixed(2)}° Δ${sg.diffDeg.toFixed(2)}° (${axis(sg.diffAxisDeg)})  max ${g.segmentMaxDiffDeg.toFixed(2)} mean ${g.segmentMeanDiffDeg.toFixed(2)}°`,
+              sg.diffDeg >= warnDeg ? "hud-warn" : undefined,
+            ),
+          );
+        } else {
+          rows.push(row("GyHold", "— (hold still, tilt, hold still)"));
+        }
+      }
     }
     // v18: the processing size / grabber / flags were only in the TIMING
     // section, below the fold of the iPhone recording — repeat them here.
