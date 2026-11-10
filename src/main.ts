@@ -1,6 +1,7 @@
 import { ARSession } from "./ar/ARSession";
 import { ARError } from "./ar/ARState";
 import { GUIDANCE_TEXT_JA, getGuidance, worldPhase } from "./ar/Guidance";
+import { GestureRecognizer, type GestureEvent } from "./ar/ObjectGestures";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type * as THREE from "three";
 import { DebugOverlay, type HudCandidate, type HudRelocDiagnostics } from "./debug/DebugOverlay";
@@ -9,6 +10,7 @@ import type { RelocalizationDiagnostics } from "./vision/Relocalizer";
 import type { PoseCandidateReport } from "./vision/types";
 import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
+import { GyroProvider, detectGyroAxes, type GyroAxes } from "./sensors/GyroProvider";
 import "./style.css";
 
 /**
@@ -21,8 +23,13 @@ import "./style.css";
  *   ?worker=0         run the vision engine on the main thread
  *   ?hud=0 / ?hud=1   force the initial HUD state independently of ?debug
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
+ *   ?localfloor=0     hit tests land on the world plane, not on the floor around the tap (A/B)
+ *   ?gyroaxes=w3c|webkit  what rotationRate alpha/beta/gamma are about (default: webkit on iOS)
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
+ *   ?video=1          place the bundled sample video (public/sample.mp4 / .webm) as a
+ *                     standing screen instead of the cube; ?video=URL plays that video
+ *                     (same-origin or CORS-enabled). ?size= is the screen width (default 0.3 m)
  *   ?fov=66           camera field of view along the long side (degrees)
  *   ?sync=0           show the live video instead of the pose-synchronized frame
  *   ?grab=2d|gl|auto  frame grabber: 2D canvas readback, WebGL shader, or auto (default: measure, then pick)
@@ -44,8 +51,18 @@ const hudParam = params.get("hud");
 const showHud = hudParam !== null ? hudParam === "1" : debugLog;
 const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
+// Phase 6 step 0: the gyro is only compared with the vision rotation (HUD `Gyro` rows).
+// ?gyroaxes=w3c|webkit overrides the per-platform axis convention (iOS = webkit).
+const gyroAxesParam = params.get("gyroaxes");
+const gyroAxes: GyroAxes = gyroAxesParam === "w3c" || gyroAxesParam === "webkit" ? gyroAxesParam : detectGyroAxes();
+// ?gyrobias=1 subtracts the bias learned during holds (off by default, see debug.gyroBiasCorrection).
+const gyroBiasCorrection = params.get("gyrobias") === "1";
+const gyroProvider = new GyroProvider({ correctBias: gyroBiasCorrection }, gyroAxes);
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
+// Sample video (ユーザー要望): ?video=1 → the bundled sample, ?video=URL → that file.
+const videoParam = params.get("video");
+const videoWidth = Number(params.get("size") ?? "") || 0.3;
 const fovDeg = Number(params.get("fov") ?? "") || undefined;
 const syncVideo = params.get("sync") !== "0";
 // Frame grabber (v16): auto picks canvas2d or webgl from the measured grab time; ?grab=2d / ?grab=gl force one.
@@ -62,12 +79,51 @@ const bundleAdjustmentParam = params.get("ba");
 const relinkVerify = params.get("relinkverify") !== "0";
 // 指示書「空間固定性」§7: two-view BA refinement of the initialization; `?initba=0` for A/B.
 const initRefineWithBA = params.get("initba") !== "0";
+// v25: multi-view stages of the init refinement; `?initstages=0` keeps the two-view one only.
+const initStagesParam = params.get("initstages");
+const initRefineStages = initStagesParam !== null && Number.isFinite(Number(initStagesParam)) ? Math.max(0, Number(initStagesParam)) : null;
 // v21: removal of landmarks a keyframe contradicts, off with ?purge=0 for A/B.
 const purgeInconsistent = params.get("purge") !== "0";
 // v24: the re-anchor probe (diagnostics), off with ?reanchor=0.
 const reanchorProbe = params.get("reanchor") !== "0";
 // Phase 2: what moves the world anchor after a BA run (?anchor=local|kf|none).
 const anchorParam = ({ local: "local", kf: "keyframe", none: "none" } as const)[params.get("anchor") ?? ""];
+
+// The sample video is created up front so its metadata (aspect) is known by
+// the time it is placed. Muted + playsinline so that `play()` from the tap
+// is allowed on iOS Safari / Android Chrome; it loops like a signage screen.
+let sampleVideo: HTMLVideoElement | null = null;
+let sampleVideoFailed = false;
+if (videoParam) {
+  sampleVideo = document.createElement("video");
+  sampleVideo.muted = true;
+  sampleVideo.defaultMuted = true;
+  sampleVideo.loop = true;
+  sampleVideo.playsInline = true;
+  sampleVideo.setAttribute("playsinline", "");
+  sampleVideo.setAttribute("muted", "");
+  sampleVideo.preload = "auto";
+  sampleVideo.crossOrigin = "anonymous";
+  sampleVideo.style.display = "none";
+  if (videoParam === "1") {
+    // Both encodings of the same clip: H.264 for Safari and most Androids,
+    // VP9 WebM for browsers without H.264 (e.g. the headless test Chromium).
+    for (const [file, type] of [["sample.mp4", "video/mp4"], ["sample.webm", "video/webm"]] as const) {
+      const source = document.createElement("source");
+      source.src = new URL(`./${file}`, document.baseURI).href;
+      source.type = type;
+      sampleVideo.appendChild(source);
+    }
+  } else {
+    sampleVideo.src = videoParam;
+  }
+  sampleVideo.addEventListener("error", () => {
+    sampleVideoFailed = true;
+    console.warn("[AR] sample video failed to load, falling back to the cube");
+  });
+  document.body.appendChild(sampleVideo);
+  sampleVideo.load();
+}
 
 // Start loading the GLB early; placement waits for it.
 let modelPromise: Promise<THREE.Object3D> | null = null;
@@ -96,7 +152,7 @@ const session = new ARSession({
   frameCanvas,
   threeCanvas,
   config: {
-    debug: { log: debugLog, overlay: true },
+    debug: { log: debugLog, overlay: true, gyroBiasCorrection },
     useWorker,
     processing: {
       ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),
@@ -110,6 +166,7 @@ const session = new ARSession({
       relinkVerify,
       purgeInconsistent,
       initRefineWithBA,
+      ...(initRefineStages !== null ? { initRefineStages } : {}),
       ...(reanchorProbe ? {} : { reanchorProbeEveryFrames: 0 }),
     },
     bundleAdjustment: {
@@ -118,10 +175,12 @@ const session = new ARSession({
     },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
+      ...(params.get("localfloor") === "0" ? { localFloor: false } : {}),
       ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
     },
   },
   gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
+  gyroSource: gyroProvider,
 });
 
 // Debug HUD on/off (v7 §15–§18): UI state only. The engine, its diagnostics
@@ -162,7 +221,10 @@ function refreshGuidance(): void {
     sidewaysGuidanceDelayMs: session.config.world.sidewaysGuidanceDelayMs,
   });
   let text = GUIDANCE_TEXT_JA[key];
-  if (key === "TAP_TO_PLACE" && placed) text = "";
+  // Once something is placed (AR_ACTIVE → "NONE"; "TAP_TO_PLACE" for a frame
+  // or when placed through the API), the placement hint gives way to the
+  // manipulation hint for a few seconds, then to nothing.
+  if ((key === "TAP_TO_PLACE" || key === "NONE") && placed) text = performance.now() < manipulationHintUntil ? MANIPULATION_HINT : "";
   if (text !== lastGuidanceText) {
     lastGuidanceText = text;
     messageEl.textContent = text;
@@ -173,20 +235,51 @@ session.on("trackingStateChanged", refreshGuidance);
 
 // Phase 4: tap → hit test → place / move the object (spec §27, §68).
 // The first tap places the cube (or the GLB when ?model= is given), later
-// taps move it. Objects are fixed in world space; only the camera moves.
+// taps move it. User manipulation: dragging the object slides it over the
+// plane (hit test under the finger), a two-finger twist turns it about the
+// plane normal and a pinch scales it. Objects are fixed in world space
+// otherwise; only the camera moves.
+const MANIPULATION_HINT = "ドラッグで移動、2 本指のひねりで回転、ピンチで拡大縮小";
+const OBJECT_SCALE_MIN = 0.25;
+const OBJECT_SCALE_MAX = 4;
+const MANIPULATION_HINT_MS = 5000;
 let placed: ARObject | undefined;
+let manipulationHintUntil = 0;
+let dragging: ARObject | null = null;
+let rotating: ARObject | null = null;
+/** The object a gesture at (x, y) addresses: the one under the finger, else the only one placed. */
+function targetObjectAt(x: number, y: number): ARObject | null {
+  const picked = session.pickObject(x, y);
+  if (picked) return picked;
+  const all = session.placedObjects;
+  return all.length === 1 ? all[0] : null;
+}
+const gestures = new GestureRecognizer();
 session.on("worldLost", () => {
   placed = undefined;
+  dragging = null;
+  rotating = null;
+  gestures.reset();
   lastGuidanceText = null; // re-evaluate on the next frame
 });
-app.addEventListener("pointerup", async (ev) => {
-  if ((ev.target as HTMLElement).tagName === "BUTTON") return;
-  if (!session.isRunning) return;
-  const rect = video.getBoundingClientRect();
-  const hit = session.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
+session.on("stopped", () => {
+  dragging = null;
+  rotating = null;
+  gestures.reset();
+});
+
+async function placeOrMoveAt(x: number, y: number): Promise<void> {
+  const hit = session.hitTest(x, y);
   if (!hit) return;
+  // An object placed through the session API (test hook) counts as placed too.
+  if (!placed && session.placedObjects.length === 1) placed = session.placedObjects[0];
   if (placed) {
     session.moveObject(placed, hit);
+  } else if (sampleVideo && !sampleVideoFailed) {
+    // Synchronous on purpose: play() must run inside the tap's user activation.
+    placed = session.placeVideo(sampleVideo, hit, videoWidth);
+    sampleVideo.play().catch((e) => console.warn("[AR] video play() was refused:", e));
+    manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   } else if (modelPromise) {
     try {
       const model = await modelPromise;
@@ -194,11 +287,78 @@ app.addEventListener("pointerup", async (ev) => {
     } catch {
       placed = session.placeCube(hit);
     }
+    manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   } else {
     placed = session.placeCube(hit);
+    manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   }
   if (walk) startWalking(placed);
   refreshGuidance();
+}
+
+function handleGestures(events: GestureEvent[]): void {
+  for (const g of events) {
+    switch (g.kind) {
+      case "tap":
+        void placeOrMoveAt(g.x, g.y);
+        break;
+      case "dragStart":
+        // Only a press on the object (or near it) starts a drag; a press on
+        // empty floor that moves is nothing, and a tap there still moves.
+        dragging = session.pickObject(g.x, g.y);
+        break;
+      case "drag": {
+        if (!dragging) break;
+        // Slide at the height the object already has (the floor is estimated on a tap, not per drag event).
+        const hit = session.hitTest(g.x, g.y, { height: dragging.position.y });
+        if (hit) session.moveObject(dragging, hit);
+        break;
+      }
+      case "dragEnd":
+        dragging = null;
+        break;
+      case "rotateStart":
+        rotating = targetObjectAt(g.cx, g.cy);
+        break;
+      case "rotate":
+        // Screen angle grows clockwise (y down); a clockwise twist seen from
+        // above the plane is a negative yaw about the world up axis.
+        if (rotating) session.rotateObject(rotating, -g.deltaRad);
+        break;
+      case "pinch":
+        if (rotating) session.scaleObject(rotating, g.scale, OBJECT_SCALE_MIN, OBJECT_SCALE_MAX);
+        break;
+      case "rotateEnd":
+        rotating = null;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function pointerXY(ev: PointerEvent): [number, number] {
+  const rect = video.getBoundingClientRect();
+  return [ev.clientX - rect.left, ev.clientY - rect.top];
+}
+app.addEventListener("pointerdown", (ev) => {
+  if ((ev.target as HTMLElement).tagName === "BUTTON") return;
+  if (!session.isRunning) return;
+  const [x, y] = pointerXY(ev);
+  handleGestures(gestures.down(ev.pointerId, x, y, ev.timeStamp));
+});
+app.addEventListener("pointermove", (ev) => {
+  if (!session.isRunning) return;
+  const [x, y] = pointerXY(ev);
+  handleGestures(gestures.move(ev.pointerId, x, y, ev.timeStamp));
+});
+app.addEventListener("pointerup", (ev) => {
+  if (!session.isRunning) return;
+  const [x, y] = pointerXY(ev);
+  handleGestures(gestures.up(ev.pointerId, x, y, ev.timeStamp));
+});
+app.addEventListener("pointercancel", (ev) => {
+  handleGestures(gestures.cancel(ev.pointerId));
 });
 
 // Object motion test (修正指示書 Test D / E): the object walks along world X
@@ -225,6 +385,8 @@ startButton.addEventListener("click", async () => {
   try {
     // Gravity needs a user gesture on iOS; start it from the click handler.
     if (!gravityOverride) await gravityProvider.start();
+    // Same DeviceMotion permission (requested just above on iOS).
+    gyroProvider.start();
     await session.start();
     startButton.style.display = "none";
   } catch (e) {
@@ -389,9 +551,12 @@ function refreshHud(): void {
     engineTiming: s.engineTiming,
     bundleAdjustment: s.bundleAdjustment,
     mainTiming: s.mainTiming,
+    gyro: s.gyro,
+    lastHit: s.lastHit,
+    gyroWarnDeg: session.config.debug.gyroWarnDeg,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}${params.get("localfloor") === "0" ? " planeHit" : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {
@@ -488,6 +653,7 @@ function refreshHud(): void {
     world: { ready: s.worldReady, scale: s.worldScale, placed: s.placedObjects },
     worldDiag: s.worldDiagnostics,
     initRefine: s.initRefinement,
+    objectFloor: s.objectFloor,
     planePose: s.planePose
       ? {
           tracked: s.planePose.tracked,
@@ -501,7 +667,7 @@ function refreshHud(): void {
     cameraWorld: s.cameraWorldPosition,
     objects: s.objects,
     objectVisibility: s.objectVisibility,
-    timing: s.frameTimestampMs > 0 ? { frameMs: s.frameTimestampMs, poseMs: s.poseTimestampMs, ageMs: s.poseAgeMs, stale: s.poseStale } : null,
+    timing: s.frameTimestampMs > 0 ? { frameMs: s.frameTimestampMs, poseMs: s.poseTimestampMs, ageMs: s.poseAgeMs, stale: s.poseStale, poseFrameId: s.poseFrameId, presentedFrameId: s.presentedFrameId, presentMisses: s.presentMisses, frameSync: s.frameSync } : null,
     reloc: s.relocalization
       ? {
           keyframes: s.relocalization.keyframes,
@@ -557,6 +723,8 @@ declare global {
       start: () => Promise<void>;
       /** Compare the 2D and WebGL grabbers on the current frame (v16 test hook). */
       grabCompare: () => ReturnType<ARSession["compareGrabbers"]>;
+      /** The sample video element when ?video= is given (test hook). */
+      sampleVideo: () => HTMLVideoElement | null;
     };
   }
 }
@@ -565,4 +733,5 @@ window.__ar = {
   stats: () => session.getStats(),
   start: () => session.start(),
   grabCompare: () => session.compareGrabbers(),
+  sampleVideo: () => sampleVideo,
 };

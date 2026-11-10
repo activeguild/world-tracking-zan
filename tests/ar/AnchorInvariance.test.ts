@@ -167,6 +167,11 @@ function runScenario(config: Parameters<typeof resolveConfig>[0] = {}) {
     if (b.ranThisFrame && !b.rejected && anchor.isReady && o.mapPose && anchor.attachedMapFrameId === o.mapPose.mapFrameId) {
       if (anchor.applyMapCorrection({ rotation: b.correctionRotation, translation: b.correctionTranslation })) reason = "ba_correction";
     }
+    // ARSession.handleResult: an accepted multi-view init stage (v25) moves the anchor once too.
+    const st = o.initRefinement?.lastStage;
+    if (st && st.applied && st.frameId === f && anchor.isReady && o.mapPose && anchor.attachedMapFrameId === o.mapPose.mapFrameId) {
+      if (anchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation })) reason = "init_stage";
+    }
     // ARSession.updateWorld: drop with the map, create on the first found plane.
     if (anchor.checkMap(o.mapPose)) reason = "map_reset";
     if (!anchor.isReady && o.plane?.found && o.mapPose && anchor.create(o.plane, o.mapPose)) {
@@ -209,6 +214,7 @@ function runScenario(config: Parameters<typeof resolveConfig>[0] = {}) {
       previousPlaneNormal: prevNormal,
       planeRecovery: o.planeRecovery,
       bundleAdjustment: o.bundleAdjustment,
+      initStage: o.initRefinement?.lastStage ?? null,
       previousWorld: prevWorld,
       world: anchor.frame,
       changeReason: reason,
@@ -340,9 +346,15 @@ describe("anchor invariance through the §9.2 scenario", () => {
     expect(unexplained).toEqual([]);
     expect(changes.filter((r) => r.diag.worldTransformChangeReason === "created").map((r) => r.f)).toEqual([A]);
     expect(changes.some((r) => r.diag.worldTransformChangeReason === "map_reset")).toBe(false);
-    // Every other change is an accepted BA run of this very frame, and it is small
-    // (a consistent synthetic map needs only refinements, not repairs).
+    // Every other change is an accepted BA run or an accepted init stage of
+    // this very frame, and it is small (a consistent synthetic map needs only
+    // refinements, not repairs).
     for (const r of changes) {
+      if (r.diag.worldTransformChangeReason === "init_stage") {
+        expect(r.diag.anchorPositionDelta).toBeLessThan(0.05); // m
+        expect(r.diag.anchorRotationDeltaDeg).toBeLessThan(2);
+        continue;
+      }
       if (r.diag.worldTransformChangeReason !== "ba_correction") continue;
       expect(r.diag.baExecuted && r.diag.baAccepted).toBe(true);
       expect(r.diag.anchorPositionDelta).toBeLessThan(0.05); // m
@@ -367,7 +379,9 @@ describe("anchor invariance through the §9.2 scenario", () => {
     };
     const hops: number[] = [];
     for (let i = 1; i < tracked.length; i++) {
-      if (tracked[i].diag.baExecuted && tracked[i].diag.baAccepted && tracked[i].f === tracked[i - 1].f + 1) hops.push(Math.abs(tracked[i].placedErrPx - tracked[i - 1].placedErrPx));
+      const d = tracked[i].diag;
+      // BA frames and accepted init-stage frames alike (指示書 §9.4): the map frame changed, the objects must not hop.
+      if (((d.baExecuted && d.baAccepted) || (d.initStageExecuted && d.initStageAccepted)) && tracked[i].f === tracked[i - 1].f + 1) hops.push(Math.abs(tracked[i].placedErrPx - tracked[i - 1].placedErrPx));
     }
     console.log(
       `[anchor] placed-point error median ${median.toFixed(2)} / max ${max.toFixed(2)} px (yaw ${byPhase("yaw").toFixed(2)} pitch ${byPhase("pitch").toFixed(2)} return ${byPhase("return").toFixed(2)} translate ${byPhase("translate").toFixed(2)}); BA hops ${hops.map((h) => h.toFixed(2)).join(" ")} px`,

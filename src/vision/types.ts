@@ -5,6 +5,7 @@ import type { PoseRejection } from "./PoseValidation";
 import type { RelocalizationDiagnostics, RelocalizationRejectCode } from "./Relocalizer";
 import type { RelocalizationSearchStage, RelocalizationTimeline } from "./RelocalizationSchedule";
 import { emptyResidualField, type ResidualField } from "./ResidualField";
+import type { InitStageRejectReason } from "./InitStageValidation";
 
 /** A detected corner (before it becomes a track). */
 export interface Corner {
@@ -219,8 +220,12 @@ export interface PlanePoseOutput {
   confidence: number;
 }
 
-/** Packed landmark layout (Float32): [x, y, z, planeInlier] in the map frame. */
-export const LANDMARK_STRIDE = 4;
+/**
+ * Packed landmark layout (Float32): [x, y, z, planeInlier, age] in the map
+ * frame; `age` = frames since the landmark was triangulated (the session's
+ * object-floor diagnostic splits young / old generations by it).
+ */
+export const LANDMARK_STRIDE = 5;
 
 /**
  * Where the per-frame plane search stopped (修正指示書 v11 §21–§22, §37–§38):
@@ -515,6 +520,84 @@ export interface InitRefinementOutput {
   rotationDeg: number;
   directionDeg: number;
   applied: boolean;
+  /**
+   * Multi-view stages (v25): how many ran so far, how many are configured,
+   * the median parallax (px, from the reference view) of the tracked init
+   * landmarks at the last check, how many of them are still tracked, the
+   * parallax the next stage waits for, and what the last stage did.
+   */
+  stages: number;
+  maxStages: number;
+  currentParallaxPx: number;
+  trackedInitLandmarks: number;
+  /** Camera baseline from the reference view over the initialization baseline (current / needed for the next stage). */
+  currentBaselineRatio: number;
+  nextStageBaselineRatio: number;
+  lastStage: InitStageOutput | null;
+}
+
+/**
+ * One multi-view refinement stage of the initial map (v25, Android
+ * recordings 39/40): the two-view initialization is degenerate in the
+ * translation direction on a floor-dominant view with a short baseline (the
+ * refinement moved the direction 3.5° without changing the residual), so
+ * the depth structure of the first map is re-constrained once the camera
+ * has moved on — reference view fixed, current pose free, the init
+ * landmarks and their reference / current observations.
+ */
+export interface InitStageOutput {
+  /** 1-based stage index. */
+  stage: number;
+  frameId: number;
+  /** Median parallax (px) of the init landmarks from the reference view when the stage ran, and the baseline ratio that triggered it. */
+  parallaxPx: number;
+  baselineRatio: number;
+  /** Init landmarks in the solve. */
+  landmarks: number;
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  /** How far the stage moved the current pose (rotation / camera-centre direction from the origin, deg). */
+  rotationDeg: number;
+  directionDeg: number;
+  /** Largest landmark move (map units). */
+  maxLandmarkShift: number;
+  applied: boolean;
+  /**
+   * Why the stage was not applied (指示書 §6; `none` when applied). The
+   * solve is accepted only when it is finite, lowers the error by
+   * `bundleAdjustment.minGainFraction`, keeps the current pose within the BA
+   * pose-jump limits, spreads its observations over the image, leaves every
+   * landmark in front of both cameras and moves few of them far.
+   */
+  rejectReason: InitStageRejectReason;
+  /** Camera-centre move of the current pose by the solve (map units) and the median reference-view depth it was judged against. */
+  cameraShift: number;
+  medianDepth: number;
+  spatialCells: number;
+  shiftedFraction: number;
+  /** Mean reprojection error of the solved landmarks in the reference view after the solve (px; the map frame stayed the reference camera). */
+  referenceErrorAfterPx: number;
+  /** Landmarks not in the solve (triangulated after the initialization, or init landmarks without a track): re-triangulated from re-posed views / dropped (fewer than two views or failed gates). */
+  rebuilt: number;
+  removed: number;
+  /** Stored keyframes whose pose was re-solved by PnP on the solved landmarks only, and those carried by the rigid pose correction instead (§4). */
+  keyframesReposed: number;
+  keyframesPropagated: number;
+  /** Origin keyframes (the reference view, 指示書 §3) left exactly as they were. */
+  keyframesFixed: number;
+  /**
+   * Rigid transform old map → new map near the placed objects (rotation
+   * from the current pose's correction, translation from the init landmarks
+   * around the anchor points when enough, else the pose correction), which
+   * the session applies to the world anchor like a BA correction. Identity
+   * when not applied or no world. `anchorFitLandmarks` = landmarks the
+   * local translation fit used (0 = pose correction).
+   */
+  correctionRotation: Float64Array;
+  correctionTranslation: Float64Array;
+  anchorFitLandmarks: number;
 }
 
 /**
@@ -537,6 +620,16 @@ export interface BundleAdjustmentOutput {
   ranThisFrame: boolean;
   keyframes: number;
   freeKeyframes: number;
+  /**
+   * What the solve held fixed (指示書 §3): `reference` = the origin keyframe
+   * *is* the two-view reference view (identity pose, the map frame itself,
+   * observing the init landmarks at their reference pixels; every other
+   * stored keyframe is free), `origin` = a keyframe set without such an
+   * origin, where the first stored keyframe is held instead.
+   */
+  gauge: "reference" | "origin";
+  /** Observations of the fixed reference view in the solve (0 with the origin gauge). */
+  referenceObservations: number;
   /** Landmarks refined (observed by ≥ minLandmarkObservations keyframes). */
   landmarks: number;
   observations: number;
@@ -610,6 +703,8 @@ export function emptyBundleAdjustment(): BundleAdjustmentOutput {
     ranThisFrame: false,
     keyframes: 0,
     freeKeyframes: 0,
+    gauge: "reference",
+    referenceObservations: 0,
     landmarks: 0,
     observations: 0,
     outliers: 0,

@@ -72,7 +72,7 @@ interface Stats {
   poseAgeMs: number;
   poseStale: boolean;
   cameraWorldPosition: number[] | null;
-  objects: { id: number; position: number[]; yaw: number }[];
+  objects: { id: number; kind: string; position: number[]; yaw: number; scale: number }[];
   plane: {
     normal: number[];
     inlierCount: number;
@@ -269,6 +269,94 @@ describe("Phase 1 browser smoke test", () => {
     await context.close();
   });
 
+  it("places the bundled sample video as a standing screen with ?video=1 and starts it from the tap", async () => {
+    const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+    page.on("console", (m: ConsoleMessage) => {
+      if (m.type() === "error") errors.push(m.text());
+    });
+    await page.goto(URL + "&video=1", { waitUntil: "load" });
+    await page.click("#start");
+    await page.waitForFunction(() => window.__ar.stats().worldReady, null, { timeout: 60_000 });
+    // The sample's metadata (aspect) should be in by now; wait for it to be sure.
+    await page.waitForFunction(() => (window.__ar.sampleVideo()?.readyState ?? 0) >= 1, null, { timeout: 30_000 });
+    const result = (await page.evaluate(async () => {
+      const app = document.getElementById("app")!;
+      const rect = document.getElementById("video")!.getBoundingClientRect();
+      const fire = (type: string, id: number, x: number, y: number) =>
+        app.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: rect.left + x, clientY: rect.top + y, bubbles: true, pointerType: "touch", isPrimary: id === 1 }));
+      const cx = rect.width / 2, cy = rect.height * 0.6;
+      const v = window.__ar.sampleVideo()!;
+      const before = { paused: v.paused, time: v.currentTime, placed: window.__ar.stats().placedObjects };
+      // A tap: press and release without moving.
+      fire("pointerdown", 1, cx, cy);
+      await new Promise((r) => setTimeout(r, 30));
+      fire("pointerup", 1, cx, cy);
+      // Placement happens inside the pointerup handler; read the camera and
+      // pick in the same task (the synthetic camera keeps moving between ticks,
+      // and from straight above a standing screen is edge-on).
+      const camera = window.__ar.session.threeCamera.position.clone();
+      const picked = window.__ar.session.pickObject(cx, cy);
+      await new Promise((r) => setTimeout(r, 50));
+      const st = window.__ar.stats();
+      const t0 = v.currentTime;
+      await new Promise((r) => setTimeout(r, 700));
+      return {
+        before,
+        placed: st.placedObjects,
+        state: st.state,
+        object: st.objects[0],
+        camera: [camera.x, camera.y, camera.z],
+        videoWidth: v.videoWidth,
+        videoHeight: v.videoHeight,
+        paused: v.paused,
+        t0,
+        t1: v.currentTime,
+        pickedKind: picked?.kind ?? null,
+        guidance: document.getElementById("message")?.textContent ?? "",
+      };
+    })) as {
+      before: { paused: boolean; time: number; placed: number };
+      placed: number;
+      state: string;
+      object: { id: number; kind: string; position: number[]; yaw: number; scale: number };
+      camera: number[];
+      videoWidth: number;
+      videoHeight: number;
+      paused: boolean;
+      t0: number;
+      t1: number;
+      pickedKind: string | null;
+      guidance: string;
+    };
+    console.log("[browser-smoke] video placement " + JSON.stringify(result));
+    await context.close();
+    expect(errors).toEqual([]);
+    expect(result.before.placed).toBe(0);
+    expect(result.before.paused).toBe(true);
+    expect(result.placed).toBe(1);
+    expect(result.state).toBe("AR_ACTIVE");
+    expect(result.object.kind).toBe("video");
+    // On the floor the map knows around the tap (local-floor hit test): within 2 cm of the world plane here.
+    expect(Math.abs(result.object.position[1])).toBeLessThan(0.02);
+    expect(result.object.scale).toBe(1);
+    // The sample is a 16:9 clip (public/sample.mp4 / .webm).
+    expect(result.videoWidth / result.videoHeight).toBeCloseTo(16 / 9, 2);
+    // Facing the camera at placement: the panel's +Z axis points at the camera (horizontally).
+    const face = [Math.sin(result.object.yaw), Math.cos(result.object.yaw)];
+    const toCam = [result.camera[0] - result.object.position[0], result.camera[2] - result.object.position[2]];
+    const n = Math.hypot(toCam[0], toCam[1]);
+    expect((face[0] * toCam[0] + face[1] * toCam[1]) / n).toBeGreaterThan(0.999);
+    // The tap's user activation started playback and the clip advances.
+    expect(result.paused).toBe(false);
+    expect(result.t1).toBeGreaterThan(result.t0);
+    // The panel is a pickable object (drag / twist / pinch target).
+    expect(result.pickedKind).toBe("video");
+    expect(result.guidance).toContain("ドラッグ");
+  });
+
   it("tracks features from the camera through the worker pipeline", async () => {
     const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
     const page = await context.newPage();
@@ -342,6 +430,70 @@ describe("Phase 1 browser smoke test", () => {
       return out;
     })) as { pos: number[]; camera: number[] | null; source: string | null; planeIn: number | null; age: number }[];
     console.log("[browser-smoke] object trace " + JSON.stringify(objectTrace));
+    // User manipulation: a one-finger drag starting on the cube slides it over
+    // the plane (hit test under the finger), a two-finger twist turns it.
+    // Synthetic pointer events on #app, exactly what a phone sends.
+    const manipulation = (await page.evaluate(async () => {
+      const app = document.getElementById("app")!;
+      const rect = document.getElementById("video")!.getBoundingClientRect();
+      const fire = (type: string, id: number, x: number, y: number) =>
+        app.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: rect.left + x, clientY: rect.top + y, bubbles: true, pointerType: "touch", isPrimary: id === 1 }));
+      const wait = () => new Promise((r) => setTimeout(r, 30));
+      const cx = rect.width / 2, cy = rect.height * 0.6; // where the cube was placed
+      const before = window.__ar.stats().objects[0];
+      // Drag: press on the cube, move 80 px right in a few steps, release.
+      fire("pointerdown", 1, cx, cy);
+      await wait();
+      for (const dx of [20, 40, 60]) {
+        fire("pointermove", 1, cx + dx, cy);
+        await wait();
+      }
+      // The last move and the reference hit test share one pose (the synthetic camera keeps moving between ticks).
+      fire("pointermove", 1, cx + 80, cy);
+      // The drag slides at the height the cube was placed at (the floor is not re-estimated per drag event).
+      const expected = window.__ar.session.hitTest(cx + 80, cy, { height: before.position[1] });
+      await wait();
+      fire("pointerup", 1, cx + 80, cy);
+      await wait();
+      const afterDrag = window.__ar.stats().objects[0];
+      // Twist: two fingers around the cube, rotated 90° clockwise on screen.
+      const ncx = cx + 80;
+      fire("pointerdown", 1, ncx - 40, cy);
+      fire("pointerdown", 2, ncx + 40, cy);
+      await wait();
+      for (let k = 1; k <= 6; k++) {
+        const a = (Math.PI / 2) * (k / 6);
+        fire("pointermove", 2, ncx + 40 * Math.cos(a), cy + 40 * Math.sin(a));
+        fire("pointermove", 1, ncx - 40 * Math.cos(a), cy - 40 * Math.sin(a));
+        await wait();
+      }
+      fire("pointerup", 2, ncx, cy + 40);
+      fire("pointerup", 1, ncx, cy - 40);
+      await wait();
+      const afterTwist = window.__ar.stats().objects[0];
+      // Pinch: two fingers 40 px apart spread to 100 px (×2.5) around the cube.
+      fire("pointerdown", 1, ncx - 20, cy);
+      fire("pointerdown", 2, ncx + 20, cy);
+      await wait();
+      for (const half of [30, 40, 50]) {
+        fire("pointermove", 1, ncx - half, cy);
+        fire("pointermove", 2, ncx + half, cy);
+        await wait();
+      }
+      fire("pointerup", 1, ncx - 50, cy);
+      fire("pointerup", 2, ncx + 50, cy);
+      await wait();
+      const afterPinch = window.__ar.stats().objects[0];
+      return { before, afterDrag, afterTwist, afterPinch, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
+    })) as {
+      before: { position: number[]; yaw: number; scale: number };
+      afterDrag: { position: number[]; yaw: number; scale: number };
+      afterTwist: { position: number[]; yaw: number; scale: number };
+      afterPinch: { position: number[]; yaw: number; scale: number };
+      expected: number[] | null;
+      placed: number;
+    };
+    console.log("[browser-smoke] manipulation " + JSON.stringify(manipulation));
     await context.close();
 
     const avg = (f: (s: Stats) => number) => samples.reduce((a, s) => a + f(s), 0) / samples.length;
@@ -443,7 +595,7 @@ describe("Phase 1 browser smoke test", () => {
 
     // Phase 4
     expect(placement.hit, "hit test on the found plane").not.toBeNull();
-    expect(Math.abs(placement.hit!.y)).toBeLessThan(1e-6);
+    expect(Math.abs(placement.hit!.y)).toBeLessThan(0.02 * placement.hit!.distance);
     expect(placement.hit!.distance).toBeGreaterThan(0.1);
     expect(placement.placed).toBe(1);
     expect(placement.state).toBe("AR_ACTIVE");
@@ -465,6 +617,22 @@ describe("Phase 1 browser smoke test", () => {
     for (const s of objectTrace) {
       expect(s.pos, "object world position must not change with camera motion").toEqual(first);
     }
+    // Manipulation: the drag moved the cube to the plane point under the
+    // finger (still one object, no re-placement), the twist turned it by
+    // −90° about the plane normal without moving it.
+    expect(manipulation.placed).toBe(1);
+    expect(manipulation.expected).not.toBeNull();
+    const dragMove = Math.hypot(manipulation.afterDrag.position[0] - manipulation.before.position[0], manipulation.afterDrag.position[2] - manipulation.before.position[2]);
+    expect(dragMove).toBeGreaterThan(0.02);
+    for (let i = 0; i < 3; i++) expect(Math.abs(manipulation.afterDrag.position[i] - manipulation.expected![i])).toBeLessThan(1e-6);
+    expect(Math.abs(manipulation.afterDrag.yaw - manipulation.before.yaw)).toBeLessThan(1e-9);
+    expect(manipulation.afterTwist.yaw - manipulation.afterDrag.yaw).toBeCloseTo(-Math.PI / 2, 1);
+    for (let i = 0; i < 3; i++) expect(manipulation.afterTwist.position[i]).toBeCloseTo(manipulation.afterDrag.position[i], 9);
+    // Pinch: ×2.5 uniform scale, position and yaw untouched; drag and twist left the scale at 1.
+    expect(manipulation.afterTwist.scale).toBeCloseTo(1, 9);
+    expect(manipulation.afterPinch.scale).toBeCloseTo(2.5, 6);
+    expect(manipulation.afterPinch.yaw).toBeCloseTo(manipulation.afterTwist.yaw, 9);
+    for (let i = 0; i < 3; i++) expect(manipulation.afterPinch.position[i]).toBeCloseTo(manipulation.afterTwist.position[i], 9);
     const cameraMoved = objectTrace.some(
       (s) => s.camera && objectTrace[0].camera && Math.hypot(s.camera[0] - objectTrace[0].camera![0], s.camera[2] - objectTrace[0].camera![2]) > 1e-4,
     );

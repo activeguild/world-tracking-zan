@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { GyroComparer, formatGyroSegment, type GyroDiagnostics } from "./GyroDiagnostics";
+import type { GyroSource } from "../sensors/GyroProvider";
 import { CameraManager, type CameraOptions } from "../camera/CameraManager";
 import { FrameGrabber, type FrameGrabberKind, type FrameSource } from "../camera/CameraFrame";
 import { WebGLFrameGrabber } from "../camera/WebGLFrameGrabber";
@@ -8,7 +10,7 @@ import { FeatureRenderer } from "../debug/FeatureRenderer";
 import { PlaneRenderer } from "../debug/PlaneRenderer";
 import { viewportIntrinsics, worldToMap, type WorldFrame } from "../math/CoordinateSystem";
 import { ARCamera } from "../rendering/ARCamera";
-import type { ARObject } from "../rendering/ARObject";
+import { yawFacing, type ARObject, type ARObjectKind, type VideoLike } from "../rendering/ARObject";
 import { ARRenderer } from "../rendering/ARRenderer";
 import { ARWorld } from "../rendering/ARWorld";
 import { FramePresenter } from "../rendering/FramePresenter";
@@ -30,6 +32,7 @@ import type {
 import type { PoseRejectCode } from "../vision/PoseValidation";
 import { wallNow, type EngineTiming } from "../worker/protocol";
 import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
+import { objectFloorDiagnostics, type ObjectFloorRecord } from "./ObjectFloorDiagnostics";
 import { WorldAnchor } from "./WorldAnchor";
 import { buildWorldDiagnostics, formatWorldChange, type WorldTrackingDiagnostics, type WorldTransformChangeReason } from "./WorldDiagnostics";
 import {
@@ -64,6 +67,11 @@ export interface ARSessionOptions {
    */
   gravitySource?: () => ArrayLike<number> | null;
   /**
+   * Optional gyro, for the vision ↔ gyro rotation diagnostic only (Phase 6
+   * step 0): the tracker does not read it.
+   */
+  gyroSource?: GyroSource;
+  /**
    * Canvas that shows the camera frame the current pose was computed on
    * (time-aligned with the rendering). When given and
    * `processing.syncVideoToPose` is on, the live <video> is hidden behind it.
@@ -84,6 +92,10 @@ export interface ARHitResult {
   position: THREE.Vector3;
   normal: THREE.Vector3;
   distance: number;
+  /** "local": on the floor the map knows around the hit; "plane": on the world plane. */
+  surface?: "plane" | "local" | "fixed";
+  /** Height of that surface above the world plane (m). */
+  height?: number;
 }
 
 export interface ARSessionEvents {
@@ -150,12 +162,24 @@ export interface ARStats {
   poseAgeMs: number;
   /** poseAgeMs above `debug.poseStaleMs`. */
   poseStale: boolean;
+  /**
+   * 修正指示書「傾斜時の回転ずれ」§5: frame ↔ pose correspondence. The Three.js
+   * camera is set from the result of `poseFrameId`; with synchronized display
+   * the image on screen is the frame `presentedFrameId` (−1 = live video).
+   * `presentMisses` counts results whose frame had already left the
+   * presenter's ring (the previous image stayed under a newer pose).
+   */
+  poseFrameId: number;
+  presentedFrameId: number;
+  presentMisses: number;
+  /** True when the displayed frame is the one the current pose belongs to (or display sync is off). */
+  frameSync: boolean;
   /** Three.js camera position in world meters (null before the world exists). */
   cameraWorldPosition: number[] | null;
   /** How long tracking has been lost (ms), 0 while tracking. */
   lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
-  objects: { id: number; position: number[]; yaw: number }[];
+  objects: { id: number; kind: ARObjectKind; position: number[]; yaw: number; scale: number }[];
   /** Whether the placed objects are shown, and why not (v13 §15–§16). */
   objectVisibility: { visible: boolean; reason: ObjectVisibilityReason };
   /** Focal length in processing pixels. */
@@ -173,6 +197,27 @@ export interface ARStats {
   worldDiagnostics: WorldTrackingDiagnostics | null;
   /** Two-view refinement of the current map's initialization (指示書「空間固定性」§7); null without a map. */
   initRefinement: InitRefinementOutput | null;
+  /**
+   * Height of the floor the map knows around the world origin (id 0) and
+   * each placed object, relative to the world plane they sit on (recording
+   * 43: cube size vs floor texture). Empty before the world exists.
+   */
+  objectFloor: ObjectFloorRecord[];
+  /** Vision rotation vs gyro rotation over the same interval (diagnostics only); null without a gyro. */
+  gyro: GyroDiagnostics | null;
+  /** Surface the last hit test landed on (world plane or the local floor); null before the first one. */
+  lastHit: HitSurfaceInfo | null;
+}
+
+/** What the last hit test used (HUD `Hit` row). Ratios are relative to the hit's depth. */
+export interface HitSurfaceInfo {
+  surface: "plane" | "local" | "fixed";
+  heightRatio: number;
+  /** Height above the world plane (m). */
+  height: number;
+  neighbors: number;
+  spreadRatio: number;
+  fallback: string;
 }
 
 /**
@@ -214,6 +259,13 @@ export class ARSession {
   private readonly renderer: FeatureRenderer | null;
   private readonly planeRenderer: PlaneRenderer | null;
   private readonly gravitySource: (() => ArrayLike<number> | null) | null;
+  private readonly gyroSource: GyroSource | null;
+  private readonly gyroComparer: GyroComparer;
+  private gyroDiagnostics: GyroDiagnostics | null = null;
+  /** Landmarks of the last result (map frame), for the local-floor hit test. */
+  private lastLandmarks: Float32Array | null = null;
+  private lastLandmarkCount = 0;
+  private lastHit: HitSurfaceInfo | null = null;
   private readonly logger: ARLogger;
 
   // Phase 4: world anchor + Three.js
@@ -267,6 +319,7 @@ export class ARSession {
   private worldEstablished = false;
   private worldDiagnostics: WorldTrackingDiagnostics | null = null;
   private initRefinement: InitRefinementOutput | null = null;
+  private objectFloor: ObjectFloorRecord[] = [];
   /** World frame object of the previous frame: the anchor replaces it on every change, so identity says "changed". */
   private prevWorldFrame: WorldFrame | null = null;
   private prevPlaneNormal: number[] | null = null;
@@ -289,6 +342,9 @@ export class ARSession {
   private lastGravity: number[] | null = null;
   private visionMs = 0;
   private poseAgeMs = 0;
+  private poseFrameId = -1;
+  private presentedFrameId = -1;
+  private presentMisses = 0;
   private frameTimestampMs = 0;
   private poseTimestampMs = 0;
   private translationHeldLogged = false;
@@ -312,6 +368,19 @@ export class ARSession {
     this.renderer = options.overlayCanvas ? new FeatureRenderer(options.overlayCanvas) : null;
     this.planeRenderer = options.overlayCanvas ? new PlaneRenderer(options.overlayCanvas) : null;
     this.gravitySource = options.gravitySource ?? null;
+    this.gyroSource = options.gyroSource ?? null;
+    const dbg = this.config.debug;
+    this.gyroComparer = new GyroComparer({
+      windowsMs: dbg.gyroWindowsMs,
+      stillRateDegPerSec: dbg.gyroStillRateDegPerSec,
+      stillMinMs: dbg.gyroStillMinMs,
+      segmentMinDeg: dbg.gyroSegmentMinDeg,
+      lagMaxMs: dbg.gyroLagMaxMs,
+      lagStepMs: dbg.gyroLagStepMs,
+      lagWindowMs: dbg.gyroLagWindowMs,
+      lagMinMotionDeg: dbg.gyroLagMinMotionDeg,
+      lagEveryFrames: dbg.gyroLagEveryFrames,
+    });
     this.logger = new ARLogger(this.config.debug.log, this.config.debug.logIntervalMs);
     this.frameCanvas = options.frameCanvas ?? null;
 
@@ -432,6 +501,9 @@ export class ARSession {
     this.worldAnchor.reset();
     this.world.setWorldReady(false);
     this.presenter?.clear();
+    this.poseFrameId = -1;
+    this.presentedFrameId = -1;
+    this.presentMisses = 0;
     this.video.style.opacity = "";
     this.emit("stopped");
   }
@@ -439,21 +511,40 @@ export class ARSession {
   /**
    * Hit test (spec §27–§28, §54): `x, y` in CSS pixels relative to the video
    * element. Returns the point on the detected plane, or null when there is
-   * no world yet / the ray misses the plane.
+   * no world yet / the ray misses the plane. With `options.height` (meters
+   * above the world plane) the ray meets that height and the floor is not
+   * re-estimated: a drag keeps the object at the height it was placed at.
    */
-  hitTest(x: number, y: number): ARHitResult | null {
+  hitTest(x: number, y: number, options?: { height?: number }): ARHitResult | null {
     if (!this.worldAnchor.isReady || !this.lastMapPose || !this.intrinsics) return null;
     const rect = this.video.getBoundingClientRect();
     const vp = viewportIntrinsics(this.intrinsics, rect.width, rect.height);
     // CSS → processing pixels (inverse of the object-fit: cover mapping).
     const u = (x - vp.offsetX) / vp.scale;
     const v = (y - vp.offsetY) / vp.scale;
-    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose);
+    const w = this.config.world;
+    const local =
+      w.localFloor && this.lastLandmarks
+        ? {
+            landmarks: this.lastLandmarks,
+            landmarkCount: this.lastLandmarkCount,
+            config: {
+              radiusDepthRatio: w.localFloorRadiusDepthRatio,
+              heightWindowDepthRatio: w.localFloorHeightWindowDepthRatio,
+              minLandmarks: w.localFloorMinLandmarks,
+              maxSpreadDepthRatio: w.localFloorMaxSpreadDepthRatio,
+            },
+          }
+        : null;
+    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose, local, options?.height);
     if (!hit) return null;
+    this.lastHit = { surface: hit.surface, heightRatio: hit.heightRatio, height: hit.height, neighbors: hit.neighbors, spreadRatio: hit.spreadRatio, fallback: hit.fallback };
     return {
       position: new THREE.Vector3(hit.position[0], hit.position[1], hit.position[2]),
       normal: new THREE.Vector3(hit.normal[0], hit.normal[1], hit.normal[2]),
       distance: hit.distance,
+      surface: hit.surface,
+      height: hit.height,
     };
   }
 
@@ -477,10 +568,95 @@ export class ARSession {
     return obj;
   }
 
-  /** Move an already placed object to a new hit. */
-  moveObject(obj: ARObject, hit: ARHitResult): void {
-    obj.place([hit.position.x, hit.position.y, hit.position.z]);
+  /**
+   * Place a video panel (`width` m wide, standing on the plane) at a hit,
+   * turned so that its screen faces the camera at placement time; a twist
+   * gesture turns it afterwards like any object. Playback is not started
+   * here: call `video.play()` from the user gesture (muted / playsinline).
+   */
+  placeVideo(video: VideoLike, hit: ARHitResult, width: number): ARObject {
+    const obj = this.world.addVideo(video, width);
+    const cam = this.arCamera.camera.position;
+    obj.place([hit.position.x, hit.position.y, hit.position.z], yawFacing(hit.position.x, hit.position.z, cam.x, cam.z));
     this.renderNow();
+    return obj;
+  }
+
+  /** Move an already placed object to a new hit, keeping its yaw. */
+  moveObject(obj: ARObject, hit: ARHitResult): void {
+    obj.place([hit.position.x, hit.position.y, hit.position.z], obj.yaw);
+    this.renderNow();
+  }
+
+  /** The objects currently placed in the world (in placement order). */
+  get placedObjects(): ARObject[] {
+    return this.world.objects.filter((o) => o.placed);
+  }
+
+  /** Turn a placed object about the world up axis by `deltaRad` (user gesture). */
+  rotateObject(obj: ARObject, deltaRad: number): void {
+    if (!Number.isFinite(deltaRad) || deltaRad === 0) return;
+    obj.setYaw(obj.yaw + deltaRad);
+    this.renderNow();
+  }
+
+  /**
+   * Multiply a placed object's uniform scale by `factor` (user pinch),
+   * clamped to [`minScale`, `maxScale`] relative to its placed size. Returns
+   * the scale now in effect.
+   */
+  scaleObject(obj: ARObject, factor: number, minScale = 0.25, maxScale = 4): number {
+    if (Number.isFinite(factor) && factor > 0 && factor !== 1) {
+      obj.setScale(Math.min(maxScale, Math.max(minScale, obj.scale * factor)));
+      this.renderNow();
+    }
+    return obj.scale;
+  }
+
+  /**
+   * The placed object under a screen point (`x, y` in CSS pixels relative to
+   * the video element, like `hitTest`): a ray through the point hitting the
+   * object's meshes, or, failing that, the object whose projected position is
+   * within `tolerancePx` (a 10 cm cube is a small target on a phone). Null
+   * when nothing is placed or the world is not ready.
+   */
+  pickObject(x: number, y: number, tolerancePx = 44): ARObject | null {
+    if (!this.worldAnchor.isReady) return null;
+    const rect = this.video.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    const camera = this.arCamera.camera;
+    camera.updateMatrixWorld(true);
+    const ndc = new THREE.Vector2((x / rect.width) * 2 - 1, 1 - (y / rect.height) * 2);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, camera);
+    let best: ARObject | null = null;
+    let bestDistance = Infinity;
+    for (const obj of this.world.objects) {
+      if (!obj.placed) continue;
+      obj.root.updateWorldMatrix(true, true);
+      const hits = raycaster.intersectObject(obj.root, true);
+      if (hits.length && hits[0].distance < bestDistance) {
+        best = obj;
+        bestDistance = hits[0].distance;
+      }
+    }
+    if (best) return best;
+    // Fallback: nearest projected object position within the tolerance.
+    let bestPx = tolerancePx;
+    const p = new THREE.Vector3();
+    for (const obj of this.world.objects) {
+      if (!obj.placed) continue;
+      obj.root.getWorldPosition(p).project(camera);
+      if (!(p.z < 1) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const sx = ((p.x + 1) / 2) * rect.width;
+      const sy = ((1 - p.y) / 2) * rect.height;
+      const d = Math.hypot(sx - x, sy - y);
+      if (d <= bestPx) {
+        bestPx = d;
+        best = obj;
+      }
+    }
+    return best;
   }
 
   private renderNow(): void {
@@ -550,14 +726,21 @@ export class ARSession {
       poseTimestampMs: this.poseTimestampMs,
       poseAgeMs: this.poseAgeMs,
       poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
+      poseFrameId: this.poseFrameId,
+      presentedFrameId: this.presentedFrameId,
+      presentMisses: this.presentMisses,
+      frameSync: !this.syncActive || this.presentedFrameId === this.poseFrameId,
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
       lostMs: this.world.lostDurationMs(performance.now()),
       objectVisibility: this.objectVisibility,
       worldDiagnostics: this.worldDiagnostics,
       initRefinement: this.initRefinement,
+      objectFloor: this.objectFloor,
+      gyro: this.gyroDiagnostics,
+      lastHit: this.lastHit,
       objects: this.world.objects
         .filter((o) => o.placed)
-        .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
+        .map((o) => ({ id: o.id, kind: o.kind, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -774,7 +957,15 @@ export class ARSession {
 
   /** Show the frame the result belongs to, time-aligned with the pose. */
   private presentFrame(frameId: number): void {
-    if (!this.presenter?.present(frameId)) return;
+    if (!this.presenter) return;
+    if (!this.presenter.present(frameId)) {
+      // The frame left the ring (resize, or more frames captured than the
+      // ring holds while this one was processed): the previous image stays
+      // on screen under the new pose. Counted for the HUD (§5).
+      this.presentMisses++;
+      return;
+    }
+    this.presentedFrameId = frameId;
     // Hide the live video once a synchronized frame is on screen.
     if (this.video.style.opacity !== "0") this.video.style.opacity = "0";
   }
@@ -783,6 +974,7 @@ export class ARSession {
     if (!this.running) return;
     this.grabber?.release(r.grayBuffer);
     this.framesProcessed++;
+    this.poseFrameId = r.frameId;
     const arrived = performance.now();
     this.visionFpsCounter.tick(arrived);
     this.visionMs = r.processingMs;
@@ -814,6 +1006,8 @@ export class ARSession {
       // v18: the map moved under the camera; move the world frame with it so
       // that placed objects stay put relative to the local map (no hop).
       let anchorMoved = false;
+      // The pose was rebased by this rotation without the camera moving (gyro diagnostic).
+      if (!b.rejected) this.gyroComparer.applyMapCorrection(b.correctionRotation);
       if (!b.rejected && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
         anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: b.correctionRotation, translation: b.correctionTranslation });
         if (anchorMoved) this.worldChangeReason = "ba_correction";
@@ -830,6 +1024,30 @@ export class ARSession {
         );
       }
     }
+    // v25: an accepted multi-view init stage re-constrained the init map;
+    // the world anchor follows its correction the same way (once, this frame).
+    const st = r.initRefinement?.lastStage;
+    if (st && st.frameId === r.frameId) {
+      let anchorMoved = false;
+      if (st.applied) this.gyroComparer.applyMapCorrection(st.correctionRotation);
+      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
+        if (anchorMoved) this.worldChangeReason = "init_stage";
+      }
+      if (this.config.debug.log) {
+        const t = st.correctionTranslation;
+        this.logger.info(
+          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
+    }
+    // Phase 6 step 0: vision rotation vs gyro rotation (diagnostics only).
+    if (this.gyroSource) {
+      const m = r.mapPose;
+      const before = this.gyroComparer.lastSegmentTime;
+      this.gyroDiagnostics = this.gyroComparer.update(r.frameId, r.timestamp, m ? m.rotation : null, !!m && m.framesSinceTracked === 0, m ? m.mapFrameId : -1, this.gyroSource);
+      if (this.gyroComparer.lastSegmentTime !== before && this.gyroDiagnostics.segment) this.logger.info(formatGyroSegment(this.gyroDiagnostics.segment));
+    }
     this.worldEstablished = r.worldEstablished;
     // v16 guidance: how long the plane search has been stuck at one stage
     // (e.g. `extent` for 7 s on device while the user held the phone still).
@@ -842,6 +1060,8 @@ export class ARSession {
     this.planeAnchored = r.planeAnchor !== null;
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
+    this.lastLandmarks = r.landmarks;
+    this.lastLandmarkCount = r.landmarkCount;
     this.setState(r.state);
     const w0 = performance.now();
     this.updateWorld(r);
@@ -858,11 +1078,33 @@ export class ARSession {
       previousPlaneNormal: this.prevPlaneNormal,
       planeRecovery: r.planeRecovery,
       bundleAdjustment: r.bundleAdjustment,
+      initStage: r.initRefinement?.lastStage ?? null,
       previousWorld: this.prevWorldFrame,
       world: worldNow,
       changeReason: this.worldChangeReason,
     });
     if (this.worldDiagnostics.worldTransformChanged) this.logger.info(formatWorldChange(this.worldDiagnostics));
+    // Recording 43: the floor the map knows around the origin and the placed
+    // objects vs the plane they sit on (diagnostics only; a few ops per landmark).
+    if (worldNow && r.mapPose && r.mapPose.framesSinceTracked === 0) {
+      const d = this.config.debug;
+      this.objectFloor = objectFloorDiagnostics(
+        r.landmarks,
+        r.landmarkCount,
+        worldNow,
+        r.mapPose.rotation,
+        r.mapPose.cameraCenter,
+        this.world.objects.filter((o) => o.placed).map((o) => ({ id: o.id, position: o.position.toArray() })),
+        {
+          radiusDepthRatio: d.objectFloorRadiusDepthRatio,
+          heightWindowDepthRatio: d.objectFloorHeightWindowDepthRatio,
+          minLandmarks: d.objectFloorMinLandmarks,
+          youngFrames: d.objectFloorYoungFrames,
+        },
+      );
+    } else if (!worldNow) {
+      this.objectFloor = [];
+    }
     this.prevWorldFrame = worldNow;
     this.prevPlaneNormal = r.plane ? r.plane.normal : null;
     const w1 = performance.now();

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { ARObject } from "./ARObject";
+import { ARObject, type VideoLike } from "./ARObject";
 
 /**
  * World root of the AR scene (spec §29, §33, §44; 修正指示書 v13).
@@ -89,6 +89,11 @@ export class ARWorld {
   /** Add a loaded model normalized to `targetSize` meters (see ARObject.fromModel). */
   addModel(model: THREE.Object3D, targetSize: number): ARObject {
     return this.register(ARObject.fromModel(this.nextId++, model, targetSize));
+  }
+
+  /** Add a `width` m wide video panel standing on the plane (see ARObject.videoPanel). */
+  addVideo(video: VideoLike, width: number): ARObject {
+    return this.register(ARObject.videoPanel(this.nextId++, video, width));
   }
 
   private register(obj: ARObject): ARObject {

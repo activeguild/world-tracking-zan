@@ -11,6 +11,8 @@
  * rows are the map PnP candidate of the current frame, `RELOC` rows are the
  * relocalization attempt / its best keyframe candidate.
  */
+import type { GyroDiagnostics } from "../ar/GyroDiagnostics";
+
 export interface HudCandidate {
   inliers: number;
   errorPx: number;
@@ -110,6 +112,11 @@ export interface HudStats {
   visionMs: number;
   /** Camera frames skipped because the vision backend was still busy. */
   framesDropped?: number;
+  /** Surface of the last hit test (world plane or local floor); null before the first one. */
+  lastHit?: { surface: string; heightRatio: number; height: number; neighbors: number; spreadRatio: number; fallback: string } | null;
+  /** Vision ↔ gyro rotation comparison (Phase 6 step 0); null without a gyro. */
+  gyro?: GyroDiagnostics | null;
+  gyroWarnDeg?: number;
   /** Per-stage vision engine time of the last frame (ms, v16). */
   engineTiming?: { pyramid: number; track: number; ransac: number; detect: number; pose: number; map: number; plane: number; reloc: number; ba: number; total: number } | null;
   /** Phase 7: last local bundle adjustment on the current map (null before the first frame). */
@@ -118,6 +125,8 @@ export interface HudStats {
     lastFrameId: number;
     keyframes: number;
     freeKeyframes: number;
+    gauge?: string;
+    referenceObservations?: number;
     landmarks: number;
     observations: number;
     outliers: number;
@@ -389,19 +398,77 @@ export interface HudStats {
     baExecuted: boolean;
     baAccepted: boolean;
     baRejectReason: string;
+    initStageExecuted?: boolean;
+    initStageAccepted?: boolean;
+    initStageRejectReason?: string;
   } | null;
   /** 指示書「空間固定性」§7: two-view refinement of the map initialization. */
-  initRefine?: { errorBeforePx: number; errorAfterPx: number; iterations: number; converged: boolean; rotationDeg: number; directionDeg: number; applied: boolean } | null;
+  initRefine?: {
+    errorBeforePx: number;
+    errorAfterPx: number;
+    iterations: number;
+    converged: boolean;
+    rotationDeg: number;
+    directionDeg: number;
+    applied: boolean;
+    /** v25 multi-view stages. */
+    stages?: number;
+    maxStages?: number;
+    currentParallaxPx?: number;
+    trackedInitLandmarks?: number;
+    currentBaselineRatio?: number;
+    nextStageBaselineRatio?: number;
+    lastStage?: {
+      stage: number;
+      parallaxPx: number;
+      landmarks: number;
+      errorBeforePx: number;
+      errorAfterPx: number;
+      iterations: number;
+      converged: boolean;
+      rotationDeg: number;
+      directionDeg: number;
+      maxLandmarkShift: number;
+      applied: boolean;
+      rebuilt: number;
+      removed: number;
+      baselineRatio?: number;
+      keyframesReposed: number;
+      keyframesPropagated?: number;
+      rejectReason?: string;
+      cameraShift?: number;
+      spatialCells?: number;
+      referenceErrorAfterPx?: number;
+      correctionTranslation: Float64Array;
+      anchorFitLandmarks: number;
+    } | null;
+  } | null;
+  /** Recording 43: floor the map knows around the origin (id 0) / each object vs the world plane. */
+  objectFloor?: {
+    id: number;
+    depth: number;
+    depthMeters: number;
+    neighbors: number;
+    planeFlagged: number;
+    young: number;
+    old: number;
+    heightRatio: number;
+    heightSpread: number;
+    youngHeightRatio: number;
+    oldHeightRatio: number;
+    tiltDeg: number;
+    localDepthRatio: number;
+  }[];
   /** Plane-relative pose quality (experimental estimator). */
   planePose?: { tracked: boolean; inliers: number; candidates: number; ratio: number; errorPx: number; confidence: number } | null;
   /** Camera world position (m) once the world exists. */
   cameraWorld?: number[] | null;
   /** Placed objects' world positions (m); must not move with the camera. */
-  objects?: { id: number; position: number[] }[];
+  objects?: { id: number; kind?: string; position: number[] }[];
   /** Whether the objects are shown and why not (v13 §15–§16). */
   objectVisibility?: { visible: boolean; reason: string } | null;
   /** Frame capture time, pose arrival time, render-time pose age (ms). */
-  timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean } | null;
+  timing?: { frameMs: number; poseMs: number; ageMs: number; stale: boolean; poseFrameId?: number; presentedFrameId?: number; presentMisses?: number; frameSync?: boolean } | null;
   reloc?: {
     keyframes: number;
     /** Keyframes created / evicted so far (v15 churn). */
@@ -518,7 +585,11 @@ export class DebugOverlay {
     if (s.phase) {
       rows.push({ text: `Phase  ${s.phase}`, cls: s.phase === "WORLD_LOST" || s.phase === "RELOCALIZING" ? "hud-state hud-warn" : "hud-state" });
     }
-    if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}`));
+    // The build's commit hash on this always-visible row: the `Build` row at
+    // the end is below the fold on every phone recording, and iPhone
+    // recording 44 turned out to be a stale cached bundle (no InitMV / ObjFlr rows).
+    const buildHash = s.build ? s.build.split(" ")[1] ?? "" : "";
+    if (s.worldEstablished !== undefined) rows.push(row("World", `Established ${s.worldEstablished ? "YES" : "NO"}${buildHash ? `  build ${buildHash}` : ""}`));
     // 指示書「空間固定性」§8: did the world transform change this frame, and
     // why. Any change outside created / ba_correction / map_reset is a bug
     // (orange). Up here because the WORLD section is below the fold once the
@@ -529,7 +600,7 @@ export class DebugOverlay {
       rows.push(
         row(
           "Wdiag",
-          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}`,
+          `${d.worldTransformChanged ? `CHANGED ${d.worldTransformChangeReason} Δ ${(d.anchorPositionDelta * 100).toFixed(1)}cm/${d.anchorRotationDeltaDeg.toFixed(2)}°` : "fixed"}  pose ${d.poseSource.toUpperCase()} ${d.poseAccepted ? "ok" : d.poseRejectReason ?? "held"}  plane Δn ${d.planeNormalDeltaDeg.toFixed(1)}°${d.planeAccepted ? "" : " ✗"}${d.planeRecoveryActive ? " recov" : ""}${d.baExecuted ? `  BA ${d.baAccepted ? "ok" : d.baRejectReason}` : ""}${d.initStageExecuted ? `  init ${d.initStageAccepted ? "ok" : d.initStageRejectReason}` : ""}`,
           unexplained ? "hud-warn" : undefined,
         ),
       );
@@ -544,6 +615,103 @@ export class DebugOverlay {
           ir.applied ? undefined : "hud-warn",
         ),
       );
+      // v25: multi-view stages of the initial map (reference view fixed,
+      // current pose free) as the parallax from the reference grows.
+      if (ir.maxStages !== undefined && ir.maxStages > 0) {
+        const st = ir.lastStage;
+        const progress = `${ir.stages ?? 0}/${ir.maxStages}  base ×${(ir.currentBaselineRatio ?? 0).toFixed(2)}/${(ir.nextStageBaselineRatio ?? 0).toFixed(0)} par ${(ir.currentParallaxPx ?? 0).toFixed(0)}px (n ${ir.trackedInitLandmarks ?? 0})`;
+        rows.push(
+          row(
+            "InitMV",
+            st
+              ? `${progress}  last ×${(st.baselineRatio ?? 0).toFixed(2)} @${st.parallaxPx.toFixed(0)}px ${st.landmarks}lm ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)}px it ${st.iterations}${st.converged ? "" : "!"} moved ${st.rotationDeg.toFixed(2)}° / ${(st.cameraShift ?? 0).toFixed(3)}u Δlm ${st.maxLandmarkShift.toFixed(3)}u cells ${st.spatialCells ?? "-"} ${st.applied ? `applied ref ${(st.referenceErrorAfterPx ?? 0).toFixed(2)}px rebuilt ${st.rebuilt} −${st.removed}lm kf ${st.keyframesReposed}+${st.keyframesPropagated ?? 0} corr ${Math.hypot(st.correctionTranslation[0], st.correctionTranslation[1], st.correctionTranslation[2]).toFixed(3)}u${st.anchorFitLandmarks ? ` (n${st.anchorFitLandmarks})` : " (pose)"}` : `REJECTED ${st.rejectReason ?? ""}`}`
+              : progress,
+            st && !st.applied ? "hud-warn" : undefined,
+          ),
+        );
+      }
+    }
+    // Recording 43 ("the cube's size changes differently from the floor"):
+    // height of the floor the map knows around the origin (O) and each
+    // placed object, as a fraction of the object's depth, young / old
+    // generations apart, local tilt and the local surface depth along the
+    // camera → object ray (×1.00 = the object is on the surface).
+    if (s.objectFloor && s.objectFloor.length > 1) {
+      const pct = (v: number) => (Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%` : "-");
+      let warn = false;
+      const parts = s.objectFloor.map((f) => {
+        const label = f.id === 0 ? "O" : `${f.id}`;
+        if (!Number.isFinite(f.heightRatio)) return `${label} n${f.neighbors}`;
+        // Height ≥ 2 % of the depth, or a tilt ≥ 2° measured on enough points
+        // (a plane through a handful of triangulated points is a few degrees noisy).
+        if (f.id !== 0 && (Math.abs(f.heightRatio) >= 0.02 || (f.tiltDeg >= 2 && f.neighbors >= 15))) warn = true;
+        const gen = Number.isFinite(f.youngHeightRatio) || Number.isFinite(f.oldHeightRatio) ? ` y${pct(f.youngHeightRatio)} o${pct(f.oldHeightRatio)}` : "";
+        const tilt = Number.isFinite(f.tiltDeg) ? ` tilt ${f.tiltDeg.toFixed(1)}°` : "";
+        const ratio = Number.isFinite(f.localDepthRatio) ? ` ×${f.localDepthRatio.toFixed(3)}` : "";
+        const depth = f.id !== 0 && Number.isFinite(f.depth) ? ` Z ${f.depth.toFixed(2)}u/${f.depthMeters.toFixed(2)}m` : "";
+        return `${label} h ${pct(f.heightRatio)}±${(f.heightSpread * 100).toFixed(1)}${gen} (n${f.neighbors}/${f.planeFlagged}pl)${tilt}${ratio}${depth}`;
+      });
+      rows.push(row("ObjFlr", parts.join("  |  "), warn ? "hud-warn" : undefined));
+    }
+    // Where the last hit test landed: the floor around the tap, or the world plane.
+    if (s.lastHit) {
+      const h = s.lastHit;
+      const pc = (v: number) => (Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%` : "-");
+      rows.push(
+        row(
+          "Hit",
+          h.surface === "local"
+            ? `LOCAL floor h ${pc(h.heightRatio)} (${(h.height * 100).toFixed(1)}cm) n${h.neighbors} ±${(h.spreadRatio * 100).toFixed(1)}%`
+            : h.surface === "fixed"
+              ? `FIXED height ${(h.height * 100).toFixed(1)}cm (drag)`
+              : `PLANE (${h.fallback || "off"}${h.neighbors ? ` n${h.neighbors}` : ""}${Number.isFinite(h.spreadRatio) ? ` ±${(h.spreadRatio * 100).toFixed(1)}%` : ""})`,
+          h.surface === "plane" ? "hud-warn" : undefined,
+        ),
+      );
+    }
+    // Phase 6 step 0: vision rotation vs gyro rotation over the same interval.
+    if (s.gyro) {
+      const g = s.gyro;
+      const warnDeg = s.gyroWarnDeg ?? 0.5;
+      const sg2 = (v: number) => (v >= 0 ? "+" : "") + v.toFixed(2);
+      const axis = (a: [number, number, number]) => `p ${sg2(a[0])} y ${sg2(a[1])} r ${sg2(a[2])}`;
+      if (!g.available) {
+        rows.push(row("Gyro", "no samples (DeviceMotion unavailable / not permitted)", "hud-warn"));
+      } else {
+        const lag = Number.isFinite(g.lagMs) ? `  lag ${g.lagMs >= 0 ? "+" : ""}${g.lagMs.toFixed(0)}ms (rms ${g.lagRmsZeroDeg.toFixed(2)} → ${g.lagRmsBestDeg.toFixed(2)}°)` : "  lag ?";
+        const f = g.frame ? `  f ${g.frame.visionDeg.toFixed(2)}/${g.frame.gyroDeg.toFixed(2)}° Δ${g.frame.diffDeg.toFixed(2)}` : "";
+        const axesBad = g.axesBest !== "" && g.axesBest !== "ok";
+        const axes = g.axesBest === "" ? "" : axesBad ? `  AXES? ${g.axesRmsDeg.toFixed(2)}° vs ${g.axesBest} ${g.axesBestRmsDeg.toFixed(2)}°` : "  axes ok";
+        rows.push(
+          row(
+            "Gyro",
+            `${g.sampleHz.toFixed(0)}Hz${g.axes ? ` ${g.axes}` : ""} ${g.rateDegPerSec.toFixed(1)}°/s bias ${g.biasDegPerSec.toFixed(2)}°/s${g.biasCorrected ? "" : " (off)"}${g.still ? " STILL" : ""}${lag}${axes}${f}`,
+            axesBad ? "hud-warn" : undefined,
+          ),
+        );
+        for (const w of g.windows) {
+          const best = Number.isFinite(w.diffLagDeg) ? Math.min(w.diffDeg, w.diffLagDeg) : w.diffDeg;
+          rows.push(
+            row(
+              `Gy${(w.windowMs / 1000).toFixed(0)}s`,
+              `vis ${w.visionDeg.toFixed(2)}° gyro ${w.gyroDeg.toFixed(2)}° Δ${w.diffDeg.toFixed(2)}°${Number.isFinite(w.diffLagDeg) ? ` @lag ${w.diffLagDeg.toFixed(2)}°` : ""} (${axis(w.diffAxisDeg)})`,
+              best >= warnDeg ? "hud-warn" : undefined,
+            ),
+          );
+        }
+        if (g.segment) {
+          const sg = g.segment;
+          rows.push(
+            row(
+              "GyHold",
+              `×${g.segmentCount} ${(g.segmentAgeMs / 1000).toFixed(0)}s ago, ${(sg.durationMs / 1000).toFixed(1)}s: vis ${sg.visionDeg.toFixed(2)}° gyro ${sg.gyroDeg.toFixed(2)}° Δ${sg.diffDeg.toFixed(2)}° (${axis(sg.diffAxisDeg)})  max ${g.segmentMaxDiffDeg.toFixed(2)} mean ${g.segmentMeanDiffDeg.toFixed(2)}°`,
+              sg.diffDeg >= warnDeg ? "hud-warn" : undefined,
+            ),
+          );
+        } else {
+          rows.push(row("GyHold", "— (hold still, tilt, hold still)"));
+        }
+      }
     }
     // v18: the processing size / grabber / flags were only in the TIMING
     // section, below the fold of the iPhone recording — repeat them here.
@@ -565,22 +733,6 @@ export class DebugOverlay {
           "Vis",
           `pyr ${ms(et.pyramid)} lk ${ms(et.track)} rsc ${ms(et.ransac)} fast ${ms(et.detect)} 2view ${ms(et.pose)} map ${ms(et.map)} plane ${ms(et.plane)} reloc ${ms(et.reloc)}${et.ba > 0 ? ` ba ${ms(et.ba)}` : ""} = ${ms(et.total)}ms`,
           et.total > 33 ? "hud-warn" : undefined,
-        ),
-      );
-    }
-    // v16: the rest of the frame's wall time (main thread + worker transport).
-    // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this
-    // row says whether the grab, the display copy, the result waiting for a
-    // busy main thread (q↓), the Three.js update or the HUD itself is to blame.
-    const mt = s.mainTiming;
-    if (mt) {
-      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
-      const overhead = mt.roundTripMs - mt.engineMs;
-      rows.push(
-        row(
-          "Main",
-          `grab ${ms(mt.grabMs)} cap ${ms(mt.captureMs)} q↑ ${ms(mt.queueInMs)} eng ${ms(mt.engineMs)} q↓ ${ms(mt.queueOutMs)} rtt ${ms(mt.roundTripMs)}  world ${ms(mt.worldMs)} show ${ms(mt.presentMs)} ovl ${ms(mt.overlayMs)} hud ${ms(s.hudMs ?? 0)}  every ${ms(mt.resultIntervalMs)}ms`,
-          overhead > 20 ? "hud-warn" : undefined,
         ),
       );
     }
@@ -741,7 +893,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "BA",
-            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : ba.rejectReason === "invalid" ? "invalid (non-finite)" : "shift"}` : ""}  kf ${ba.freeKeyframes}+1/${ba.keyframes}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
+            `×${ba.runs}${ba.rejected ? ` REJECTED ${ba.rejectReason === "no_gain" ? "no gain" : ba.rejectReason === "pose_jump" ? `pose jump KF${ba.jumpKeyframeId} ${ba.jumpRotationDeg.toFixed(1)}°/${ba.jumpShift.toFixed(2)}u` : ba.rejectReason === "invalid" ? "invalid (non-finite)" : "shift"}` : ""}  kf ${ba.freeKeyframes}/${ba.keyframes}${ba.gauge === "origin" ? " fix origin" : ba.gauge === "reference" ? ` ref${ba.referenceObservations ?? 0}` : ""}${ba.excludedKeyframes ? ` (−${ba.excludedKeyframes} out)` : ""} lm ${ba.landmarks}${ba.propagated || ba.untouched ? ` +${ba.propagated} prop +${ba.untouched} none` : ""} obs ${ba.observations}${ba.outliers ? ` (+${ba.outliers} out)` : ""}${ba.purged ? ` purge ${ba.purged}` : ""}${ba.shifted ? ` shift ${ba.shifted}` : ""}  ${ba.errorBeforePx.toFixed(2)} → ${ba.errorAfterPx.toFixed(2)}px  it ${ba.iterations}${ba.converged ? "" : "!"}  ${ba.ms.toFixed(0)}ms  Δlm ${ba.maxLandmarkShift.toFixed(3)} kf ${ba.maxKeyframeShift.toFixed(3)}u/${ba.maxKeyframeRotationDeg.toFixed(1)}°  corr ${Math.hypot(ba.correctionTranslation[0], ba.correctionTranslation[1], ba.correctionTranslation[2]).toFixed(3)}u (kf ${ba.keyframeCorrectionShift.toFixed(3)}u/${ba.keyframeCorrectionDeg.toFixed(1)}° local ${ba.localFitLandmarks ? `${ba.localCorrectionShift.toFixed(3)}u/${ba.localCorrectionDeg.toFixed(1)}° n${ba.localFitLandmarks}` : "-"})`,
             (ba.rejected && ba.rejectReason !== "no_gain") || !ba.converged || ba.errorAfterPx > 2 ? "hud-warn" : undefined,
           ),
         );
@@ -1032,7 +1184,7 @@ export class DebugOverlay {
     }
     if (s.objects && s.objects.length) {
       // Transforms are kept while hidden (v13 §12); the HUD says "hidden" instead of a stale-looking position.
-      for (const o of s.objects.slice(0, 2)) rows.push(row(`Obj${o.id}`, ov && !ov.visible ? "hidden" : xyz(o.position)));
+      for (const o of s.objects.slice(0, 2)) rows.push(row(`Obj${o.id}`, ov && !ov.visible ? "hidden" : `${xyz(o.position)}${o.kind === "cube" ? "" : ` ${o.kind}`}`));
     } else {
       rows.push(row("Obj", "—"));
     }
@@ -1040,7 +1192,30 @@ export class DebugOverlay {
     // ---- TIMING ----
     rows.push(section("TIMING"));
     if (s.timing) {
-      rows.push(row("Pose", `age ${s.timing.ageMs.toFixed(0)}ms${s.timing.stale ? "  STALE" : ""}`, s.timing.stale ? "hud-warn" : undefined));
+      // §5 (傾斜時の回転ずれ): the pose's frame id vs the frame on screen; a
+      // miss means the previous image stayed under a newer pose.
+      const t = s.timing;
+      const sync = t.poseFrameId !== undefined ? `  frame ${t.poseFrameId} shown ${t.presentedFrameId === -1 ? "live" : t.presentedFrameId}${t.frameSync === false ? " MISMATCH" : ""}${t.presentMisses ? ` miss ${t.presentMisses}` : ""}` : "";
+      rows.push(row("Pose", `age ${t.ageMs.toFixed(0)}ms${t.stale ? "  STALE" : ""}${sync}`, t.stale || t.frameSync === false ? "hud-warn" : undefined));
+    }
+    // v16: the rest of the frame's wall time (main thread + worker transport).
+    // On Android the engine took 22–31 ms but vision ran at 10–14 fps; this
+    // row says whether the grab, the display copy, the result waiting for a
+    // busy main thread (q↓), the Three.js update or the HUD itself is to blame.
+    // It sat under `Vis` while the Android grab path was being diagnosed
+    // (resolved: WebGL grab); moved here so InitMV / ObjFlr stay above the
+    // fold of the iPhone HUD.
+    const mt = s.mainTiming;
+    if (mt) {
+      const ms = (v: number) => v.toFixed(v >= 10 ? 0 : 1);
+      const overhead = mt.roundTripMs - mt.engineMs;
+      rows.push(
+        row(
+          "Main",
+          `grab ${ms(mt.grabMs)} cap ${ms(mt.captureMs)} q↑ ${ms(mt.queueInMs)} eng ${ms(mt.engineMs)} q↓ ${ms(mt.queueOutMs)} rtt ${ms(mt.roundTripMs)}  world ${ms(mt.worldMs)} show ${ms(mt.presentMs)} ovl ${ms(mt.overlayMs)} hud ${ms(s.hudMs ?? 0)}  every ${ms(mt.resultIntervalMs)}ms`,
+          overhead > 20 ? "hud-warn" : undefined,
+        ),
+      );
     }
     rows.push(row("Proc", `FAST ${s.fastThreshold}  ${s.processingSize}  [${s.backend}]`));
     if (s.build) rows.push(row("Build", s.build));

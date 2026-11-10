@@ -13,7 +13,7 @@ import {
   type PoseSource,
   type PoseValidationLimits,
 } from "./PoseValidation";
-import { triangulatePoint, type TriangulationResult } from "../math/Triangulation";
+import { triangulateMultiView, triangulatePoint, type MultiViewTriangulation, type TriangulationResult, type TriangulationView } from "../math/Triangulation";
 import { LandmarkMap, type Landmark } from "./LandmarkMap";
 import type { RelativePose } from "./PoseEstimator";
 import { RESIDUAL_GROUP_ADJUSTED, RESIDUAL_GROUP_PLANE, fitResidualField } from "./ResidualField";
@@ -21,6 +21,7 @@ import {
   emptyRelinkStats,
   emptyReprojectionBreakdown,
   type InitRefinementOutput,
+  type InitStageOutput,
   type PoseCandidateReport,
   type ReanchorStats,
   type RelinkStats,
@@ -57,6 +58,59 @@ export interface RelinkVerdict {
  * view the landmark was built from, before any later drift of the track).
  */
 export type RelinkKeyframeChoice = "nearest" | "oldest";
+
+/**
+ * A multi-view init stage solved but not applied (v25, atomic since
+ * 指示書「座標系整合性」§5): nothing in the map, the keyframes or the
+ * canonical pose has changed when this is returned. The engine validates
+ * it, prepares the keyframe poses and the rebuilt landmarks in temporary
+ * storage, and commits everything at once (`commitInitStage`) or nothing.
+ */
+export interface InitStageCandidate {
+  /** 1-based stage index this candidate would become. */
+  stage: number;
+  frameId: number;
+  parallaxPx: number;
+  baselineRatio: number;
+  /** Init landmarks in the solve, their positions before / after (x,y,z interleaved, map frame). */
+  ids: number[];
+  before: Float64Array;
+  after: Float64Array;
+  /** Current-frame pixel observations of those landmarks (the tracks), for the spread check. */
+  obsX: Float64Array;
+  obsY: Float64Array;
+  /** Canonical pose before the solve (the tracker's, untouched) and the solved current pose. */
+  poseBefore: RigidTransform;
+  poseAfter: RigidTransform;
+  errorBeforePx: number;
+  errorAfterPx: number;
+  iterations: number;
+  converged: boolean;
+  /** Median reference-view depth of the landmarks before the solve (map units). */
+  medianDepth: number;
+  /** Solved landmarks with a non-positive depth in the reference or the current view. */
+  behindCamera: number;
+  maxLandmarkShift: number;
+  /** Landmarks moved by more than `maxShiftRatio` × their depth (the engine passes the ratio). */
+  shifted: number;
+  /** Mean reprojection error of the solved landmarks in the reference view after the solve (px). */
+  referenceErrorAfterPx: number;
+}
+
+/** One rebuilt landmark of `planRebuild` (applied by `commitInitStage`). */
+export interface RebuiltLandmark {
+  id: number;
+  position: Float64Array;
+  anchorPose: RigidTransform;
+  anchorX: number;
+  anchorY: number;
+  parallax: number;
+}
+
+export interface RebuildPlan {
+  updates: RebuiltLandmark[];
+  drop: number[];
+}
 
 /**
  * Checks re-association candidates against stored keyframe observations
@@ -243,6 +297,11 @@ export class MapTracker {
    * refinement off.
    */
   lastInitRefinement: InitRefinementOutput | null = null;
+  /** Ids of the landmarks triangulated in the initialization (v25 multi-view stages). */
+  private readonly initLandmarkIds = new Set<number>();
+  private initStagesDone = 0;
+  /** Camera-centre distance of the init frame from the reference view (map units; the baseline the stages are measured against). */
+  private initBaseline = 1;
   private _initialized = false;
   private _mapFrameId = -1;
   /** X_cam = R X_map + t for the current frame. */
@@ -354,6 +413,9 @@ export class MapTracker {
     this.velocity.fill(0);
     this.lastDepth = 0;
     this.referenceKeyframeId = -1;
+    this.lastInitRefinement = null;
+    this.initLandmarkIds.clear();
+    this.initStagesDone = 0;
     for (const t of tracks) {
       t.landmarkId = -1;
       t.anchorFrame = -1;
@@ -437,6 +499,13 @@ export class MapTracker {
         rotationDeg: (rotationDistance(pose.rotation, refined.rotation) * 180) / Math.PI,
         directionDeg,
         applied,
+        stages: 0,
+        maxStages: Math.max(0, cfg.initRefineStages),
+        currentParallaxPx: rel.parallaxPx,
+        trackedInitLandmarks: nL,
+        currentBaselineRatio: 1,
+        nextStageBaselineRatio: Math.pow(cfg.initRefineBaselineFactor, 1),
+        lastStage: null,
       };
       if (applied) {
         pose.rotation.set(refined.rotation);
@@ -452,6 +521,12 @@ export class MapTracker {
     this._mapFrameId = refFrameId;
     this._pose = { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) };
     this._framesSinceTracked = 0;
+    this.initLandmarkIds.clear();
+    this.initStagesDone = 0;
+    {
+      const c = cameraCenterOf(this._pose);
+      this.initBaseline = Math.max(Math.hypot(c[0], c[1], c[2]), 1e-9);
+    }
     const refPose = identity();
     for (const { track, p } of created) {
       const lm = this.map.add(p, track.id, frameId);
@@ -462,6 +537,7 @@ export class MapTracker {
       lm.parallax = this.tri.parallax; // last computed; refined below
       track.landmarkId = lm.id;
       track.linkSource = "native";
+      this.initLandmarkIds.add(lm.id);
     }
     // Record each landmark's own parallax (the loop above reused the scratch).
     for (const { track, p } of created) {
@@ -1103,6 +1179,13 @@ export class MapTracker {
    * number removed; counted in `RelinkStats.purgedTotal`.
    */
   purgeLandmarks(ids: Iterable<number>, tracks: readonly Track[]): number {
+    const removed = this.dropLandmarks(ids, tracks);
+    this.purgedTotal += removed;
+    return removed;
+  }
+
+  /** Remove landmarks and unlink / un-anchor the tracks observing them. */
+  private dropLandmarks(ids: Iterable<number>, tracks: readonly Track[]): number {
     let removed = 0;
     const gone = new Set<number>();
     for (const id of ids) {
@@ -1118,8 +1201,229 @@ export class MapTracker {
       t.anchorFrame = -1;
       t.anchorPose = null;
     }
-    this.purgedTotal += removed;
     return removed;
+  }
+
+  /**
+   * v25: multi-view refinement stage of the initial map. Called by the
+   * engine on tracked frames before the world is established. Measures the
+   * camera baseline from the reference view (camera-centre distance over
+   * the initialization baseline); when it reaches the next stage's threshold
+   * (`initRefineBaselineFactor^stage`) and the still-tracked init landmarks
+   * show at least `initMinParallaxPx` of median parallax, the init
+   * landmarks and the current pose are re-solved jointly against the fixed
+   * reference view (reference observation = the landmark's anchor pixel,
+   * current observation = its track). The two-view initialization is
+   * direction-degenerate on a floor with a 30 px baseline; a 60–240 px
+   * baseline from the same reference constrains what it could not. On
+   * acceptance the landmarks are written back and the canonical pose
+   * replaced by the solved one; the engine then re-poses the keyframes,
+   * rebuilds the later landmarks and moves the world anchor.
+   *
+   * Since 指示書「座標系整合性」§5 this method only *solves*: it returns an
+   * `InitStageCandidate` and writes nothing. The engine validates the
+   * candidate (§6), prepares the rest in temporary storage and commits all
+   * of it with `commitInitStage`, or records a rejection with
+   * `recordInitStage`; either way the stage is consumed (the next waits for
+   * the next threshold). `maxShiftRatio` is the landmark-shift ratio the
+   * candidate counts `shifted` against. While `motionBlocked` (medium / fast
+   * motion: blurred observations) the stage waits without being consumed.
+   * Returns null when no stage is due.
+   */
+  refineInitStage(tracks: readonly Track[], k: CameraIntrinsics, frameId: number, maxShiftRatio: number, motionBlocked = false): InitStageCandidate | null {
+    const cfg = this.config;
+    const out = this.lastInitRefinement;
+    if (!out || !this._initialized || this._framesSinceTracked > 0) return null;
+    if (this.initStagesDone >= cfg.initRefineStages) return null;
+    const pairs: { lm: Landmark; t: Track; par: number }[] = [];
+    for (const t of tracks) {
+      if (t.landmarkId < 0 || !this.initLandmarkIds.has(t.landmarkId)) continue;
+      const lm = this.map.get(t.landmarkId);
+      if (!lm) continue;
+      pairs.push({ lm, t, par: Math.hypot(t.x - lm.anchorX, t.y - lm.anchorY) });
+    }
+    const threshold = Math.pow(cfg.initRefineBaselineFactor, this.initStagesDone + 1);
+    out.nextStageBaselineRatio = threshold;
+    out.trackedInitLandmarks = pairs.length;
+    const cc = cameraCenterOf(this._pose);
+    const baselineRatio = Math.hypot(cc[0], cc[1], cc[2]) / this.initBaseline;
+    out.currentBaselineRatio = baselineRatio;
+    if (pairs.length === 0) {
+      out.currentParallaxPx = 0;
+      return null;
+    }
+    const sorted = pairs.map((p) => p.par).sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    out.currentParallaxPx = median;
+    if (pairs.length < cfg.initMinLandmarks || baselineRatio < threshold || median < cfg.initMinParallaxPx) return null;
+    if (motionBlocked) return null;
+
+    const f = (k.fx + k.fy) / 2;
+    const nL = pairs.length;
+    const landmarks = new Float64Array(nL * 3);
+    const before = new Float64Array(nL * 3);
+    const obsX = new Float64Array(nL), obsY = new Float64Array(nL);
+    const observations: BAObservation[] = [];
+    const depths: number[] = [];
+    for (let i = 0; i < nL; i++) {
+      const { lm, t } = pairs[i];
+      landmarks.set(lm.position, i * 3);
+      depths.push(Math.abs(lm.position[2]));
+      obsX[i] = t.x;
+      obsY[i] = t.y;
+      observations.push({ keyframe: 0, landmark: i, x: (lm.anchorX - k.cx) / k.fx, y: (lm.anchorY - k.cy) / k.fy });
+      observations.push({ keyframe: 1, landmark: i, x: (t.x - k.cx) / k.fx, y: (t.y - k.cy) / k.fy });
+    }
+    before.set(landmarks);
+    const sortedDepths = depths.slice().sort((a, b) => a - b);
+    const medianDepth = sortedDepths[sortedDepths.length >> 1];
+    const refined: RigidTransform = { rotation: Float64Array.from(this._pose.rotation), translation: Float64Array.from(this._pose.translation) };
+    const res = bundleAdjust(
+      { keyframes: [{ pose: identity(), fixed: true }, { pose: refined, fixed: false }], landmarks, landmarkCount: nL, observations },
+      { huber: cfg.pnpHuberPx / f, maxIterations: 20, epsilon: 1e-9, minRelativeGain: 1e-4 },
+    );
+    let maxShift = 0;
+    let shifted = 0;
+    let behindCamera = 0;
+    let refErr = 0;
+    const r = refined.rotation, t = refined.translation;
+    for (let i = 0; i < nL; i++) {
+      const X = landmarks[i * 3], Y = landmarks[i * 3 + 1], Z = landmarks[i * 3 + 2];
+      const d = Math.hypot(X - before[i * 3], Y - before[i * 3 + 1], Z - before[i * 3 + 2]);
+      if (d > maxShift) maxShift = d;
+      if (d > maxShiftRatio * Math.max(depths[i], 1e-9)) shifted++;
+      const zCur = r[6] * X + r[7] * Y + r[8] * Z + t[2];
+      if (!(Z > 0) || !(zCur > 0)) behindCamera++;
+      // Reference view = identity: the map frame is still the reference camera.
+      if (Z > 0) {
+        const o = observations[i * 2];
+        refErr += Math.hypot(X / Z - o.x, Y / Z - o.y);
+      }
+    }
+    return {
+      stage: this.initStagesDone + 1,
+      frameId,
+      parallaxPx: median,
+      baselineRatio,
+      ids: pairs.map((p) => p.lm.id),
+      before,
+      after: landmarks,
+      obsX,
+      obsY,
+      poseBefore: this._pose,
+      poseAfter: refined,
+      errorBeforePx: res.errorBefore * f,
+      errorAfterPx: res.errorAfter * f,
+      iterations: res.iterations,
+      converged: res.converged,
+      medianDepth,
+      behindCamera,
+      maxLandmarkShift: maxShift,
+      shifted,
+      referenceErrorAfterPx: nL > 0 ? (refErr / nL) * f : 0,
+    };
+  }
+
+  /**
+   * Consume a stage (accepted or not): the stage counter advances and the
+   * record becomes `lastInitRefinement.lastStage`. Nothing else changes.
+   */
+  recordInitStage(output: InitStageOutput): void {
+    const out = this.lastInitRefinement;
+    this.initStagesDone = output.stage;
+    if (!out) return;
+    out.stages = this.initStagesDone;
+    out.lastStage = output;
+    out.nextStageBaselineRatio = Math.pow(this.config.initRefineBaselineFactor, this.initStagesDone + 1);
+  }
+
+  /**
+   * Commit an accepted stage atomically (指示書 §5): the solved landmark
+   * positions, the solved current pose, the rebuilt landmarks (`plan`,
+   * computed by the engine against the re-posed keyframes) and the drops
+   * are written together, after which the unlinked tracks' anchors are
+   * reset. Every value was validated finite by the caller.
+   */
+  commitInitStage(c: InitStageCandidate, plan: RebuildPlan, tracks: readonly Track[]): { rebuilt: number; removed: number } {
+    const c1 = cameraCenterOf(c.poseAfter);
+    for (let i = 0; i < c.ids.length; i++) {
+      const lm = this.map.get(c.ids[i]);
+      if (!lm) continue;
+      lm.position[0] = c.after[i * 3];
+      lm.position[1] = c.after[i * 3 + 1];
+      lm.position[2] = c.after[i * 3 + 2];
+      // Ray parallax between the reference view (origin) and the current camera.
+      const ax = lm.position[0], ay = lm.position[1], az = lm.position[2];
+      const bx = ax - c1[0], by = ay - c1[1], bz = az - c1[2];
+      const na = Math.hypot(ax, ay, az), nb = Math.hypot(bx, by, bz);
+      if (na > 1e-12 && nb > 1e-12) lm.parallax = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by + az * bz) / (na * nb))));
+    }
+    this._pose = { rotation: Float64Array.from(c.poseAfter.rotation), translation: Float64Array.from(c.poseAfter.translation) };
+    let rebuilt = 0;
+    for (const u of plan.updates) {
+      const lm = this.map.get(u.id);
+      if (!lm) continue;
+      lm.position.set(u.position);
+      lm.anchorPose = u.anchorPose;
+      lm.anchorX = u.anchorX;
+      lm.anchorY = u.anchorY;
+      lm.parallax = u.parallax;
+      rebuilt++;
+    }
+    const removed = this.dropLandmarks(plan.drop, tracks);
+    this.resetAnchors(tracks);
+    return { rebuilt, removed };
+  }
+
+  /** Landmarks triangulated in the initialization (v25). */
+  isInitLandmark(id: number): boolean {
+    return this.initLandmarkIds.has(id);
+  }
+
+  /**
+   * v25: after an accepted stage, rebuild every landmark the stage did not
+   * solve in the refined map: the landmarks triangulated after the
+   * initialization (built between poses of the old map) and the init
+   * landmarks whose track had died (not in the solve, still at their old
+   * depth). Each is re-triangulated linearly from all of its views
+   * (`views(lm)`: the reference view for init landmarks, the re-posed
+   * keyframe observations, the current track); one that has fewer than two
+   * views, lies behind a camera, reprojects beyond `maxTriangulationErrorPx`
+   * in any view or has too narrow a widest ray angle is dropped (its corner
+   * re-anchors at the refined pose and is triangulated again later).
+   * Writes nothing (指示書 §5): returns the plan `commitInitStage` applies.
+   * Every view passed in must already be in the refined map frame.
+   */
+  planRebuild(k: CameraIntrinsics, solved: ReadonlySet<number>, views: (lm: Landmark) => { pose: RigidTransform; x: number; y: number }[]): RebuildPlan {
+    const cfg = this.config;
+    const f = (k.fx + k.fy) / 2;
+    const maxErr = cfg.maxTriangulationErrorPx / f;
+    const minAngle = (cfg.minTriangulationAngleDeg * Math.PI) / 180;
+    const drop: number[] = [];
+    const updates: RebuiltLandmark[] = [];
+    const mv: MultiViewTriangulation = { point: new Float64Array(3), minDepth: 0, maxError: Number.POSITIVE_INFINITY, parallax: 0 };
+    const norm: TriangulationView[] = [];
+    for (const lm of this.map.values()) {
+      if (solved.has(lm.id)) continue;
+      const v = views(lm);
+      norm.length = 0;
+      for (const o of v) norm.push({ pose: o.pose, x: (o.x - k.cx) / k.fx, y: (o.y - k.cy) / k.fy });
+      const res = triangulateMultiView(norm, mv);
+      if (!res || !(res.minDepth > 0) || !(res.maxError <= maxErr) || res.parallax < minAngle) {
+        drop.push(lm.id);
+        continue;
+      }
+      const a = v[0];
+      updates.push({
+        id: lm.id,
+        position: Float64Array.from(res.point),
+        anchorPose: { rotation: Float64Array.from(a.pose.rotation), translation: Float64Array.from(a.pose.translation) },
+        anchorX: a.x,
+        anchorY: a.y,
+        parallax: res.parallax,
+      });
+    }
+    return { updates, drop };
   }
 
   /**
