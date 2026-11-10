@@ -91,6 +91,18 @@ export interface GyroDiagnostics {
   /** RMS frame-to-frame disagreement at zero lag and at the best lag (deg). */
   lagRmsZeroDeg: number;
   lagRmsBestDeg: number;
+  /**
+   * Axis check: the frame-to-frame disagreement (RMS, deg) with the axis
+   * mapping in use, and with the best of the 48 alternatives (24 signed axis
+   * permutations × rate handedness). `axesBest` names the alternative
+   * (camera axes: new x, y, z as ± old axes, `T` = opposite handedness) or is
+   * "ok" when the mapping in use is the best one. NaN / "" until estimated.
+   */
+  axesRmsDeg: number;
+  axesBestRmsDeg: number;
+  axesBest: string;
+  /** Convention of the gyro source ("w3c" / "webkit"), when it says. */
+  axes: string;
   /** Last completed still → still segment, how long ago, and how many so far. */
   segment: GyroSegmentRecord | null;
   segmentAgeMs: number;
@@ -119,6 +131,9 @@ export class GyroComparer {
   private lagMs = NaN;
   private lagRmsZero = NaN;
   private lagRmsBest = NaN;
+  private axesRms = NaN;
+  private axesBestRms = NaN;
+  private axesBest = "";
   private results = 0;
   private segment: GyroSegmentRecord | null = null;
   private segmentTime = 0;
@@ -169,6 +184,10 @@ export class GyroComparer {
       lagMs: this.lagMs,
       lagRmsZeroDeg: this.lagRmsZero,
       lagRmsBestDeg: this.lagRmsBest,
+      axesRmsDeg: this.axesRms,
+      axesBestRmsDeg: this.axesBestRms,
+      axesBest: this.axesBest,
+      axes: gyro?.axes ?? "",
       segment: this.segment,
       segmentAgeMs: this.segment ? tMs - this.segmentTime : 0,
       segmentCount: this.segmentCount,
@@ -203,6 +222,9 @@ export class GyroComparer {
     out.lagMs = this.lagMs;
     out.lagRmsZeroDeg = this.lagRmsZero;
     out.lagRmsBestDeg = this.lagRmsBest;
+    out.axesRmsDeg = this.axesRms;
+    out.axesBestRmsDeg = this.axesBestRms;
+    out.axesBest = this.axesBest;
 
     // Sliding windows.
     for (const w of this.cfg.windowsMs) {
@@ -327,7 +349,98 @@ export class GyroComparer {
     this.lagMs = Number.isFinite(this.lagMs) ? this.lagMs * 0.8 + bestLag * 0.2 : bestLag;
     this.lagRmsBest = Math.sqrt(bestCost);
     this.lagRmsZero = Math.sqrt(zeroCost);
+    this.checkAxes(gyro, pairs, bestLag);
   }
+
+  /**
+   * Is the device → camera axis mapping right? Re-express the gyro rotation
+   * of each frame pair under every signed axis permutation (and the opposite
+   * rate handedness) and see which one the vision rotation agrees with.
+   * Browsers do not agree on what alpha / beta / gamma are the rates about.
+   */
+  private checkAxes(gyro: GyroSource, pairs: [Entry, Entry][], lag: number): void {
+    const vs: Float64Array[] = [];
+    const gs: Float64Array[] = [];
+    for (const [a, b] of pairs) {
+      const g = gyro.cameraRotationBetween(a.t + lag, b.t + lag);
+      if (!g) continue;
+      const v = new Float64Array(9);
+      relative(a.r, b.r, v);
+      vs.push(v);
+      gs.push(Float64Array.from(g));
+    }
+    if (vs.length < 8) return;
+    let best = Infinity;
+    let bestName = "";
+    let current = NaN;
+    const pg = new Float64Array(9);
+    const gt = new Float64Array(9);
+    for (const perm of AXIS_PERMUTATIONS) {
+      for (let flip = 0; flip < 2; flip++) {
+        let sum = 0;
+        for (let i = 0; i < vs.length; i++) {
+          let g: ArrayLike<number> = gs[i];
+          if (flip) {
+            transposeInto(gs[i], gt);
+            g = gt;
+          }
+          conjugate(perm.m, g, pg);
+          mulT(vs[i], pg, TMP_D);
+          const d = angleDeg(TMP_D);
+          sum += d * d;
+        }
+        const rms = Math.sqrt(sum / vs.length);
+        const identity = perm.identity && !flip;
+        if (identity) current = rms;
+        if (rms < best) {
+          best = rms;
+          bestName = identity ? "ok" : perm.name + (flip ? " T" : "");
+        }
+      }
+    }
+    this.axesRms = current;
+    this.axesBestRms = best;
+    // Another mapping has to be clearly better to be named (noise picks one at random otherwise).
+    this.axesBest = bestName !== "ok" && best < current * 0.7 ? bestName : "ok";
+  }
+}
+
+interface AxisPermutation {
+  m: Float64Array;
+  name: string;
+  identity: boolean;
+}
+
+/** The 24 proper signed axis permutations (rotations of the cube). */
+const AXIS_PERMUTATIONS: AxisPermutation[] = (() => {
+  const out: AxisPermutation[] = [];
+  const axes = ["x", "y", "z"];
+  for (const p of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+    for (let signs = 0; signs < 8; signs++) {
+      const s = [signs & 1 ? -1 : 1, signs & 2 ? -1 : 1, signs & 4 ? -1 : 1];
+      const m = new Float64Array(9);
+      for (let i = 0; i < 3; i++) m[i * 3 + p[i]] = s[i];
+      const det =
+        m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+      if (det < 0) continue;
+      out.push({
+        m,
+        name: `[${p.map((k, i) => (s[i] < 0 ? "−" : "+") + axes[k]).join(",")}]`,
+        identity: p[0] === 0 && p[1] === 1 && p[2] === 2 && signs === 0,
+      });
+    }
+  }
+  return out;
+})();
+
+const TMP_C = new Float64Array(9);
+/** out = m · r · mᵀ */
+function conjugate(m: ArrayLike<number>, r: ArrayLike<number>, out: Float64Array): void {
+  mul(m, r, TMP_C);
+  mulT(TMP_C, m, out);
+}
+function transposeInto(r: ArrayLike<number>, out: Float64Array): void {
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) out[i * 3 + j] = r[j * 3 + i];
 }
 
 const TMP_A = new Float64Array(9);

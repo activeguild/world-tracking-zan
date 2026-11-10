@@ -4,7 +4,11 @@
  * tracker.
  *
  * W3C: `rotationRate.alpha / beta / gamma` are deg/s about the device Z / X /
- * Y axes. Event times are `event.timeStamp` (same clock as
+ * Y axes (Chrome follows this). WebKit on iOS reports them about X / Y / Z
+ * instead (recording 45, iPhone: a pure pitch of 15.6° by vision came out of
+ * the W3C mapping as 14.9° about the camera Z axis, i.e. `alpha` carried the
+ * device X rate). `GyroAxes` selects the convention; `detectGyroAxes()`
+ * picks WebKit's on iOS. Event times are `event.timeStamp` (same clock as
  * `performance.now()` and the video frame callback); when a browser reports
  * something else (not within a second of now) the arrival time is used.
  */
@@ -23,9 +27,27 @@ export interface GyroSource {
   readonly biasDeg: number;
   readonly sampleHz: number;
   readonly hasReading: boolean;
+  /** Axis convention in use (for the HUD); undefined for fakes. */
+  readonly axes?: string;
 }
 
 const DEG = Math.PI / 180;
+
+/** Which device axis each of alpha / beta / gamma is the rate about. */
+export type GyroAxes = "w3c" | "webkit";
+
+/** iOS (every browser there is WebKit) → "webkit", otherwise the W3C order. */
+export function detectGyroAxes(): GyroAxes {
+  if (typeof navigator === "undefined") return "w3c";
+  const ua = navigator.userAgent || "";
+  const iOS = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1);
+  return iOS ? "webkit" : "w3c";
+}
+
+/** alpha / beta / gamma (any unit) → rates about the device X / Y / Z axes. */
+export function rotationRateToDevice(axes: GyroAxes, alpha: number, beta: number, gamma: number): [number, number, number] {
+  return axes === "webkit" ? [alpha, beta, gamma] : [beta, gamma, alpha];
+}
 
 export class GyroProvider implements GyroSource {
   readonly integrator: GyroIntegrator;
@@ -37,10 +59,14 @@ export class GyroProvider implements GyroSource {
     if (!w || w.alpha == null || w.beta == null || w.gamma == null) return;
     const now = performance.now();
     const t = Math.abs(ev.timeStamp - now) < 1000 ? ev.timeStamp : now;
-    this.integrator.add(t, w.beta * DEG, w.gamma * DEG, w.alpha * DEG);
+    const [x, y, z] = rotationRateToDevice(this.axes, w.alpha, w.beta, w.gamma);
+    this.integrator.add(t, x * DEG, y * DEG, z * DEG);
   };
 
-  constructor(opts?: GyroIntegratorOptions) {
+  constructor(
+    opts?: GyroIntegratorOptions,
+    readonly axes: GyroAxes = detectGyroAxes(),
+  ) {
     this.integrator = new GyroIntegrator(opts);
   }
 

@@ -10,7 +10,7 @@ import type { RelocalizationDiagnostics } from "./vision/Relocalizer";
 import type { PoseCandidateReport } from "./vision/types";
 import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
-import { GyroProvider } from "./sensors/GyroProvider";
+import { GyroProvider, detectGyroAxes, type GyroAxes } from "./sensors/GyroProvider";
 import "./style.css";
 
 /**
@@ -23,6 +23,7 @@ import "./style.css";
  *   ?worker=0         run the vision engine on the main thread
  *   ?hud=0 / ?hud=1   force the initial HUD state independently of ?debug
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
+ *   ?gyroaxes=w3c|webkit  what rotationRate alpha/beta/gamma are about (default: webkit on iOS)
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
  *   ?video=1          place the bundled sample video (public/sample.mp4 / .webm) as a
@@ -50,7 +51,10 @@ const showHud = hudParam !== null ? hudParam === "1" : debugLog;
 const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
 // Phase 6 step 0: the gyro is only compared with the vision rotation (HUD `Gyro` rows).
-const gyroProvider = new GyroProvider();
+// ?gyroaxes=w3c|webkit overrides the per-platform axis convention (iOS = webkit).
+const gyroAxesParam = params.get("gyroaxes");
+const gyroAxes: GyroAxes = gyroAxesParam === "w3c" || gyroAxesParam === "webkit" ? gyroAxesParam : detectGyroAxes();
+const gyroProvider = new GyroProvider(undefined, gyroAxes);
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 // Sample video (ユーザー要望): ?video=1 → the bundled sample, ?video=URL → that file.

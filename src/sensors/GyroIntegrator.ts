@@ -10,7 +10,7 @@
  * at t1 into the device frame at t0.
  *
  * Bias: the mean rate while the device is held still (|ω| below
- * `stillRateRad` from `stillMinMs` before a sample to `stillMinMs` after it)
+ * `stillRateRad` from `biasMarginMs` before a sample to `biasMarginMs` after it)
  * is tracked with a slow EMA and subtracted before integration. Hand tremor
  * is zero-mean, so a hold gives the bias.
  *
@@ -31,6 +31,13 @@ export interface GyroIntegratorOptions {
   correctBias?: boolean;
   /** Gaps longer than this are not integrated (ms): the ring restarts. */
   maxGapMs?: number;
+  /**
+   * Stillness required before and after a sample for it to count towards
+   * the bias (ms; default 2 × stillMinMs). Longer than the hold test: a slow
+   * drift of the hand under `stillRateRad` must not be learned as bias
+   * (recording 45 started at 0.97°/s and took 15 s to come down to 0.27).
+   */
+  biasMarginMs?: number;
 }
 
 export class GyroIntegrator {
@@ -50,6 +57,7 @@ export class GyroIntegrator {
   private readonly biasAlpha: number;
   private readonly correctBias: boolean;
   private readonly maxGapMs: number;
+  private readonly biasMarginMs: number;
   /** Estimated bias (rad/s, device frame). */
   readonly bias = new Float64Array(3);
   biasSamples = 0;
@@ -69,6 +77,7 @@ export class GyroIntegrator {
     this.biasAlpha = opts.biasAlpha ?? 0.02;
     this.correctBias = opts.correctBias ?? true;
     this.maxGapMs = opts.maxGapMs ?? 200;
+    this.biasMarginMs = opts.biasMarginMs ?? this.stillMinMs * 2;
   }
 
   get sampleCount(): number {
@@ -116,9 +125,9 @@ export class GyroIntegrator {
           // for `stillMinMs` before it *and* stays still for as long after
           // it: the slow start of a real rotation must not leak into the bias.
           this.pending.push(tMs, wx, wy, wz);
-          while (this.pending.length && tMs - this.pending[0] >= this.stillMinMs) {
+          while (this.pending.length && tMs - this.pending[0] >= this.biasMarginMs) {
             const pt = this.pending[0];
-            if (pt - this.stillSince >= this.stillMinMs) {
+            if (pt - this.stillSince >= this.biasMarginMs) {
               const a = this.biasSamples < 1 / this.biasAlpha ? 1 / (this.biasSamples + 1) : this.biasAlpha;
               this.bias[0] += (this.pending[1] - this.bias[0]) * a;
               this.bias[1] += (this.pending[2] - this.bias[1]) * a;

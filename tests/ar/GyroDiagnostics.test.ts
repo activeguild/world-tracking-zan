@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { GyroComparer, angleDeg, type GyroDiagnostics, type GyroDiagnosticsConfig } from "../../src/ar/GyroDiagnostics";
-import { GyroProvider } from "../../src/sensors/GyroProvider";
+import { GyroProvider, rotationRateToDevice } from "../../src/sensors/GyroProvider";
 import { deviceToCameraMatrix } from "../../src/sensors/GyroIntegrator";
 import { rotationAxisAngle, rotationZ } from "../../src/math/Pose";
 import { mat3Multiply } from "../../src/math/Matrix";
@@ -35,7 +35,7 @@ function bump(t: number, a: number, b: number): number {
 }
 
 /** Body rates (rad/s, device frame): hold, pitch +15° with some yaw, hold, roll 8°, hold, pitch back, hold. */
-function rates(tMs: number): [number, number, number] {
+function ratesAt(tMs: number): [number, number, number] {
   const t = tMs / 1000;
   const wx = 15 * DEG * bump(t, 0.6, 1.6) - 15 * DEG * bump(t, 4.4, 5.4);
   const wy = 6 * DEG * bump(t, 0.7, 1.5);
@@ -50,10 +50,13 @@ function transpose(m: ArrayLike<number>): Float64Array {
 interface Sim {
   /** Vision rotation (world → camera) at time t (ms). */
   visionAt(tMs: number): Float64Array;
+  endMs: number;
   gyro: GyroProvider;
 }
 
-function simulate(durationMs = 6400, gyroBias: [number, number, number] = [0, 0, 0]): Sim {
+function simulate(durationMs = 6400, gyroBias: [number, number, number] = [0, 0, 0], report: (x: number, y: number, z: number) => [number, number, number] = (x, y, z) => [x, y, z], leadMs = 0): Sim {
+  durationMs += leadMs;
+  const rates = (ms: number) => ratesAt(ms - leadMs);
   const M = deviceToCameraMatrix(0);
   const q: Float64Array[] = [];
   let Q = rotationAxisAngle([0.3, 1, 0.2], 0.4); // arbitrary start orientation
@@ -73,7 +76,8 @@ function simulate(durationMs = 6400, gyroBias: [number, number, number] = [0, 0,
       sx += wx; sy += wy; sz += wz;
     }
     n = Math.max(1, n);
-    gyro.integrator.add(t, sx / n + gyroBias[0], sy / n + gyroBias[1], sz / n + gyroBias[2]);
+    const [rx, ry, rz] = report(sx / n + gyroBias[0], sy / n + gyroBias[1], sz / n + gyroBias[2]);
+    gyro.integrator.add(t, rx, ry, rz);
   }
   return {
     visionAt(tMs: number) {
@@ -81,6 +85,7 @@ function simulate(durationMs = 6400, gyroBias: [number, number, number] = [0, 0,
       return mat3Multiply(M, transpose(q[i]));
     },
     gyro,
+    endMs: durationMs - 100,
   };
 }
 
@@ -91,7 +96,7 @@ function run(
   const cmp = new GyroComparer(CFG);
   const records: GyroDiagnostics[] = [];
   let frame = 0;
-  for (let t = 300; t <= 6300; t += 1000 / 30, frame++) {
+  for (let t = 300; t <= sim.endMs; t += 1000 / 30, frame++) {
     let r = sim.visionAt(t);
     if (opts.distort) r = opts.distort(r, t, frame, cmp);
     records.push(cmp.update(frame, t + (opts.stampOffsetMs ?? 0), r, opts.tracked ? opts.tracked(frame) : true, opts.mapId ? opts.mapId(frame) : 1, sim.gyro));
@@ -129,6 +134,7 @@ describe("GyroComparer", () => {
     expect(Math.abs(last.lagMs)).toBeLessThan(10);
     expect(records.some((r) => r.still)).toBe(true);
     expect(records.some((r) => !r.still)).toBe(true);
+    expect(last.axesBest).toBe("ok");
   });
 
   it("reports a pose-dependent vision rotation error on the hold → hold segment", () => {
@@ -212,12 +218,40 @@ describe("GyroComparer", () => {
   });
 
   it("a gyro bias is learned during the holds and does not show as disagreement", () => {
-    const { records } = run(simulate(6400, [0.3 * DEG, -0.2 * DEG, 0.25 * DEG]));
+    // 1.5 s of holding still before the first move (the bias needs 0.5 s of stillness on both sides of a sample).
+    const { records } = run(simulate(6400, [0.3 * DEG, -0.2 * DEG, 0.25 * DEG], undefined, 1500));
     const last = records[records.length - 1];
     expect(last.biasDegPerSec).toBeGreaterThan(0.3);
     expect(last.biasDegPerSec).toBeLessThan(0.55);
     // Uncorrected, 0.44°/s over a 2 s segment would be ~0.9°.
     expect(last.segmentCount).toBe(3);
     expect(last.segmentMaxDiffDeg).toBeLessThan(0.3);
+  });
+
+  it("names the axis mapping when the browser reports the rates about other axes (recording 45, iOS WebKit)", () => {
+    // WebKit: alpha / beta / gamma are the rates about X / Y / Z. Read with
+    // the W3C order (x = beta, y = gamma, z = alpha) the device sees (y, z, x).
+    const wrong = run(simulate(6400, [0, 0, 0], (x, y, z) => rotationRateToDevice("w3c", x, y, z)));
+    const seg = wrong.records.find((r) => r.segmentCount === 1)!.segment!;
+    // Same amount of rotation, about a perpendicular axis: the disagreement is ~√2 × the angle.
+    expect(Math.abs(seg.visionDeg - seg.gyroDeg)).toBeLessThan(0.5);
+    expect(seg.diffDeg).toBeGreaterThan(seg.visionDeg);
+    // The pitch (camera x) shows up on the camera z axis, as on the device.
+    expect(Math.abs(seg.gyroAxisDeg[2])).toBeGreaterThan(12);
+    expect(Math.abs(seg.visionAxisDeg[2])).toBeLessThan(2);
+    expect(Math.abs(seg.visionAxisDeg[0])).toBeGreaterThan(12);
+    const last = wrong.records[wrong.records.length - 1];
+    expect(last.axesBest).not.toBe("ok");
+    expect(last.axesBest).toMatch(/^\[[+−][xyz],[+−][xyz],[+−][xyz]\]( T)?$/);
+    expect(last.axesBestRmsDeg).toBeLessThan(last.axesRmsDeg * 0.5);
+
+    // Read with WebKit's order the same samples agree, and the check says so.
+    const right = run(simulate(6400, [0, 0, 0], (x, y, z) => rotationRateToDevice("webkit", x, y, z)));
+    const ok = right.records[right.records.length - 1];
+    expect(ok.axesBest).toBe("ok");
+    expect(ok.segmentCount).toBe(3);
+    expect(ok.segmentMaxDiffDeg).toBeLessThan(0.05);
+    expect(rotationRateToDevice("w3c", 1, 2, 3)).toEqual([2, 3, 1]);
+    expect(rotationRateToDevice("webkit", 1, 2, 3)).toEqual([1, 2, 3]);
   });
 });

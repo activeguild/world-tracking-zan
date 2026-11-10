@@ -662,7 +662,15 @@ export class DebugOverlay {
       } else {
         const lag = Number.isFinite(g.lagMs) ? `  lag ${g.lagMs >= 0 ? "+" : ""}${g.lagMs.toFixed(0)}ms (rms ${g.lagRmsZeroDeg.toFixed(2)} → ${g.lagRmsBestDeg.toFixed(2)}°)` : "  lag ?";
         const f = g.frame ? `  f ${g.frame.visionDeg.toFixed(2)}/${g.frame.gyroDeg.toFixed(2)}° Δ${g.frame.diffDeg.toFixed(2)}` : "";
-        rows.push(row("Gyro", `${g.sampleHz.toFixed(0)}Hz ${g.rateDegPerSec.toFixed(1)}°/s bias ${g.biasDegPerSec.toFixed(2)}°/s${g.still ? " STILL" : ""}${lag}${f}`));
+        const axesBad = g.axesBest !== "" && g.axesBest !== "ok";
+        const axes = g.axesBest === "" ? "" : axesBad ? `  AXES? ${g.axesRmsDeg.toFixed(2)}° vs ${g.axesBest} ${g.axesBestRmsDeg.toFixed(2)}°` : "  axes ok";
+        rows.push(
+          row(
+            "Gyro",
+            `${g.sampleHz.toFixed(0)}Hz${g.axes ? ` ${g.axes}` : ""} ${g.rateDegPerSec.toFixed(1)}°/s bias ${g.biasDegPerSec.toFixed(2)}°/s${g.still ? " STILL" : ""}${lag}${axes}${f}`,
+            axesBad ? "hud-warn" : undefined,
+          ),
+        );
         for (const w of g.windows) {
           const best = Number.isFinite(w.diffLagDeg) ? Math.min(w.diffDeg, w.diffLagDeg) : w.diffDeg;
           rows.push(
