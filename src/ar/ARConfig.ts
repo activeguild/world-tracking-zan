@@ -720,6 +720,14 @@ export interface DebugConfig {
   gyroLagMinMotionDeg: number;
   gyroLagEveryFrames: number;
   gyroWarnDeg: number;
+  /**
+   * Subtract the bias learned while the phone is held still. Off by default:
+   * on iOS the rates are already bias-compensated, and a slow roll of the
+   * hand below the stillness rate was learned as 0.7–0.8°/s of bias, which
+   * then showed up as 0.7°/s of disagreement at rest and 1.2–1.6° on 1.9 s
+   * hold → hold segments (recording 46). The estimate is still reported.
+   */
+  gyroBiasCorrection: boolean;
 }
 
 /**
@@ -1175,6 +1183,7 @@ export const DEFAULT_CONFIG: ARConfig = {
     gyroLagMinMotionDeg: 5,
     gyroLagEveryFrames: 5,
     gyroWarnDeg: 0.5,
+    gyroBiasCorrection: false,
   },
   useWorker: true,
 };

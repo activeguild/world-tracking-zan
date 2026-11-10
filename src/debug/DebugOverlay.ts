@@ -667,7 +667,7 @@ export class DebugOverlay {
         rows.push(
           row(
             "Gyro",
-            `${g.sampleHz.toFixed(0)}Hz${g.axes ? ` ${g.axes}` : ""} ${g.rateDegPerSec.toFixed(1)}°/s bias ${g.biasDegPerSec.toFixed(2)}°/s${g.still ? " STILL" : ""}${lag}${axes}${f}`,
+            `${g.sampleHz.toFixed(0)}Hz${g.axes ? ` ${g.axes}` : ""} ${g.rateDegPerSec.toFixed(1)}°/s bias ${g.biasDegPerSec.toFixed(2)}°/s${g.biasCorrected ? "" : " (off)"}${g.still ? " STILL" : ""}${lag}${axes}${f}`,
             axesBad ? "hud-warn" : undefined,
           ),
         );

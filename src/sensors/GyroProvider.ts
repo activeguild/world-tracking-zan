@@ -27,6 +27,8 @@ export interface GyroSource {
   readonly biasDeg: number;
   readonly sampleHz: number;
   readonly hasReading: boolean;
+  /** The bias estimate is subtracted before integration (false: only reported). */
+  readonly biasCorrected?: boolean;
   /** Axis convention in use (for the HUD); undefined for fakes. */
   readonly axes?: string;
 }
@@ -51,6 +53,7 @@ export function rotationRateToDevice(axes: GyroAxes, alpha: number, beta: number
 
 export class GyroProvider implements GyroSource {
   readonly integrator: GyroIntegrator;
+  readonly biasCorrected: boolean;
   private listening = false;
   private readonly m = new Float64Array(9);
   private readonly r = new Float64Array(9);
@@ -68,6 +71,7 @@ export class GyroProvider implements GyroSource {
     readonly axes: GyroAxes = detectGyroAxes(),
   ) {
     this.integrator = new GyroIntegrator(opts);
+    this.biasCorrected = opts?.correctBias ?? true;
   }
 
   /** Start listening. The DeviceMotion permission (iOS) is requested by GravityProvider.start(). */

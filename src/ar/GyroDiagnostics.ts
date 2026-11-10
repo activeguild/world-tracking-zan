@@ -81,6 +81,8 @@ export interface GyroDiagnostics {
   sampleHz: number;
   rateDegPerSec: number;
   biasDegPerSec: number;
+  /** The bias estimate is applied to the gyro rotations (false: shown only). */
+  biasCorrected: boolean;
   /** The phone is held still at this frame. */
   still: boolean;
   /** Previous tracked frame → this frame. */
@@ -178,6 +180,7 @@ export class GyroComparer {
       sampleHz: gyro?.sampleHz ?? 0,
       rateDegPerSec: gyro?.rateDeg ?? 0,
       biasDegPerSec: gyro?.biasDeg ?? 0,
+      biasCorrected: gyro?.biasCorrected ?? true,
       still: false,
       frame: null,
       windows: [],

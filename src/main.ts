@@ -54,7 +54,9 @@ const gravityProvider = new GravityProvider();
 // ?gyroaxes=w3c|webkit overrides the per-platform axis convention (iOS = webkit).
 const gyroAxesParam = params.get("gyroaxes");
 const gyroAxes: GyroAxes = gyroAxesParam === "w3c" || gyroAxesParam === "webkit" ? gyroAxesParam : detectGyroAxes();
-const gyroProvider = new GyroProvider(undefined, gyroAxes);
+// ?gyrobias=1 subtracts the bias learned during holds (off by default, see debug.gyroBiasCorrection).
+const gyroBiasCorrection = params.get("gyrobias") === "1";
+const gyroProvider = new GyroProvider({ correctBias: gyroBiasCorrection }, gyroAxes);
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 // Sample video (ユーザー要望): ?video=1 → the bundled sample, ?video=URL → that file.
@@ -149,7 +151,7 @@ const session = new ARSession({
   frameCanvas,
   threeCanvas,
   config: {
-    debug: { log: debugLog, overlay: true },
+    debug: { log: debugLog, overlay: true, gyroBiasCorrection },
     useWorker,
     processing: {
       ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),

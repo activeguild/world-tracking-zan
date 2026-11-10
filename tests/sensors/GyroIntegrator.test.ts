@@ -84,4 +84,18 @@ describe("GyroIntegrator", () => {
     expect(Math.abs(l[1])).toBeCloseTo(9.6, 6);
     expect(Math.abs(l[0])).toBeLessThan(1e-9);
   });
+
+  it("reports the bias without applying it when correction is off (recording 46)", () => {
+    const on = new GyroIntegrator();
+    const off = new GyroIntegrator({ correctBias: false });
+    // A slow steady roll of 0.7°/s for 3 s: under the stillness rate, so it is learned as "bias".
+    for (let i = 0; i <= 180; i++) {
+      on.add(i * (1000 / 60), 0, 0, 0.7 * DEG);
+      off.add(i * (1000 / 60), 0, 0, 0.7 * DEG);
+    }
+    expect(Math.hypot(off.bias[0], off.bias[1], off.bias[2]) / DEG).toBeCloseTo(0.7, 2);
+    // Applied, the real rotation of the last 2 s disappears; reported only, it is measured.
+    expect(angleDeg(on.rotationBetween(1000, 2900)!)).toBeLessThan(0.1);
+    expect(angleDeg(off.rotationBetween(1000, 2900)!)).toBeCloseTo(0.7 * 1.9, 2);
+  });
 });
