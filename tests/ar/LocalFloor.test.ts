@@ -104,4 +104,30 @@ describe("localFloorHit", () => {
     expect(few.count).toBeLessThan(6);
     expect(localFloorHit(C, dir, forward, up, origin, few.packed, few.count, cfg)!.surface).toBe("plane");
   });
+
+  it("a given height is used as is: a drag does not re-estimate the floor (recording 48)", () => {
+    // Two patches of landmarks at different heights side by side: the estimate
+    // flips between them as the ray sweeps across (what made the dragged cube shake).
+    const { packed, count } = grid((x) => (x < 0.2 ? -0.3 : 0));
+    const estimated: number[] = [];
+    const fixed: number[] = [];
+    for (let k = 0; k <= 20; k++) {
+      const d = [0.1 + k * 0.01, 1, 2];
+      estimated.push(localFloorHit(C, d, forward, up, origin, packed, count, cfg)!.height);
+      const f = localFloorHit(C, d, forward, up, origin, packed, count, cfg, -0.3)!;
+      expect(f.surface).toBe("fixed");
+      expect(f.height).toBe(-0.3);
+      // On the ray, at the given height.
+      expect(f.point[1]).toBeCloseTo(1.3, 9);
+      expect(f.point[0] / f.point[1]).toBeCloseTo(d[0], 9);
+      fixed.push(f.height);
+    }
+    expect(Math.max(...estimated) - Math.min(...estimated)).toBeGreaterThan(0.2);
+    expect(new Set(fixed).size).toBe(1);
+    // No landmarks needed, and a ray that misses that height returns null.
+    expect(localFloorHit(C, dir, forward, up, origin, null, 0, null, 0.1)!.surface).toBe("fixed");
+    expect(localFloorHit(C, [0, -1, 1], forward, up, origin, packed, count, cfg, -0.3)).toBeNull();
+    // NaN is not a height: the usual estimate runs.
+    expect(localFloorHit(C, dir, forward, up, origin, packed, count, cfg, NaN)!.surface).not.toBe("fixed");
+  });
 });

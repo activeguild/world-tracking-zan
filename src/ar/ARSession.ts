@@ -93,7 +93,7 @@ export interface ARHitResult {
   normal: THREE.Vector3;
   distance: number;
   /** "local": on the floor the map knows around the hit; "plane": on the world plane. */
-  surface?: "plane" | "local";
+  surface?: "plane" | "local" | "fixed";
   /** Height of that surface above the world plane (m). */
   height?: number;
 }
@@ -211,7 +211,7 @@ export interface ARStats {
 
 /** What the last hit test used (HUD `Hit` row). Ratios are relative to the hit's depth. */
 export interface HitSurfaceInfo {
-  surface: "plane" | "local";
+  surface: "plane" | "local" | "fixed";
   heightRatio: number;
   /** Height above the world plane (m). */
   height: number;
@@ -511,9 +511,11 @@ export class ARSession {
   /**
    * Hit test (spec §27–§28, §54): `x, y` in CSS pixels relative to the video
    * element. Returns the point on the detected plane, or null when there is
-   * no world yet / the ray misses the plane.
+   * no world yet / the ray misses the plane. With `options.height` (meters
+   * above the world plane) the ray meets that height and the floor is not
+   * re-estimated: a drag keeps the object at the height it was placed at.
    */
-  hitTest(x: number, y: number): ARHitResult | null {
+  hitTest(x: number, y: number, options?: { height?: number }): ARHitResult | null {
     if (!this.worldAnchor.isReady || !this.lastMapPose || !this.intrinsics) return null;
     const rect = this.video.getBoundingClientRect();
     const vp = viewportIntrinsics(this.intrinsics, rect.width, rect.height);
@@ -534,7 +536,7 @@ export class ARSession {
             },
           }
         : null;
-    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose, local);
+    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose, local, options?.height);
     if (!hit) return null;
     this.lastHit = { surface: hit.surface, heightRatio: hit.heightRatio, height: hit.height, neighbors: hit.neighbors, spreadRatio: hit.spreadRatio, fallback: hit.fallback };
     return {

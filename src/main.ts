@@ -309,7 +309,8 @@ function handleGestures(events: GestureEvent[]): void {
         break;
       case "drag": {
         if (!dragging) break;
-        const hit = session.hitTest(g.x, g.y);
+        // Slide at the height the object already has (the floor is estimated on a tap, not per drag event).
+        const hit = session.hitTest(g.x, g.y, { height: dragging.position.y });
         if (hit) session.moveObject(dragging, hit);
         break;
       }

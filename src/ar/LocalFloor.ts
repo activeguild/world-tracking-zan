@@ -42,8 +42,8 @@ export interface LocalFloorHit {
   t: number;
   /** Height of the surface used above the world plane (map units; 0 = the world plane). */
   height: number;
-  /** "local" when the neighbours decided the height, "plane" for the world plane fallback. */
-  surface: "local" | "plane";
+  /** "local" when the neighbours decided the height, "plane" for the world plane fallback, "fixed" for a caller-given height. */
+  surface: "local" | "plane" | "fixed";
   /** Neighbours behind the decision (0 on a fallback without any). */
   neighbors: number;
   /** Their height spread (MAD, map units; NaN without neighbours). */
@@ -87,7 +87,18 @@ export function localFloorHit(
   landmarks: Float32Array | null,
   landmarkCount: number,
   cfg: LocalFloorConfig | null,
+  fixedHeight?: number,
 ): LocalFloorHit | null {
+  // A caller-given height (map units above the world plane): the ray meets
+  // that plane and nothing is estimated. Used while an object is dragged, so
+  // that it slides at the height it was placed at (recording 48: re-estimating
+  // the floor at every drag event flipped the cube between two heights).
+  if (fixedHeight !== undefined && Number.isFinite(fixedHeight)) {
+    const f = intersect(rayOrigin, rayDir, up, origin, fixedHeight);
+    if (!f) return null;
+    const depth = forward[0] * (f.p[0] - rayOrigin[0]) + forward[1] * (f.p[1] - rayOrigin[1]) + forward[2] * (f.p[2] - rayOrigin[2]);
+    return { point: f.p, t: f.t, height: fixedHeight, surface: "fixed", neighbors: 0, spread: NaN, depth, fallback: "" };
+  }
   const base = intersect(rayOrigin, rayDir, up, origin, 0);
   if (!base) return null;
   const depthOf = (p: ArrayLike<number>) =>

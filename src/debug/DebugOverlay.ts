@@ -662,8 +662,10 @@ export class DebugOverlay {
           "Hit",
           h.surface === "local"
             ? `LOCAL floor h ${pc(h.heightRatio)} (${(h.height * 100).toFixed(1)}cm) n${h.neighbors} ±${(h.spreadRatio * 100).toFixed(1)}%`
-            : `PLANE (${h.fallback || "off"}${h.neighbors ? ` n${h.neighbors}` : ""}${Number.isFinite(h.spreadRatio) ? ` ±${(h.spreadRatio * 100).toFixed(1)}%` : ""})`,
-          h.surface === "local" ? undefined : "hud-warn",
+            : h.surface === "fixed"
+              ? `FIXED height ${(h.height * 100).toFixed(1)}cm (drag)`
+              : `PLANE (${h.fallback || "off"}${h.neighbors ? ` n${h.neighbors}` : ""}${Number.isFinite(h.spreadRatio) ? ` ±${(h.spreadRatio * 100).toFixed(1)}%` : ""})`,
+          h.surface === "plane" ? "hud-warn" : undefined,
         ),
       );
     }

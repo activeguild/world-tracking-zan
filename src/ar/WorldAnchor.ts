@@ -43,7 +43,7 @@ export interface HitResult {
    * Surface the point lies on: the world plane, or the floor the map knows
    * around the hit (same normal, `height` above the plane; recordings 45 / 46).
    */
-  surface: "plane" | "local";
+  surface: "plane" | "local" | "fixed";
   /** Height of that surface above the world plane (meters; 0 on the plane). */
   height: number;
   /** Landmarks that decided the local height, their spread and the hit depth (map units), and why the plane was used. */
@@ -171,7 +171,7 @@ export class WorldAnchor {
    * Hit test: pixel in processing-image coordinates → world point on the
    * plane Y = 0.
    */
-  hitTest(u: number, v: number, k: CameraIntrinsics, mapPose: MapPoseOutput, local?: LocalFloorInput | null): HitResult | null {
+  hitTest(u: number, v: number, k: CameraIntrinsics, mapPose: MapPoseOutput, local?: LocalFloorInput | null, fixedHeightMeters?: number): HitResult | null {
     if (!this.world) return null;
     const cam = toRigid(mapPose);
     // Ray in camera frame → map frame (X_map = Rᵀ (X_cam − t)).
@@ -190,7 +190,7 @@ export class WorldAnchor {
     const up = this.world.plane.up;
     const o = this.world.plane.origin;
     const r = cam.rotation;
-    const hit = localFloorHit(rayMap.origin, rayMap.direction, [r[6], r[7], r[8]], up, o, local?.landmarks ?? null, local?.landmarkCount ?? 0, local?.config ?? null);
+    const hit = localFloorHit(rayMap.origin, rayMap.direction, [r[6], r[7], r[8]], up, o, local?.landmarks ?? null, local?.landmarkCount ?? 0, local?.config ?? null, fixedHeightMeters !== undefined ? fixedHeightMeters / this.world.scale : undefined);
     if (!hit) return null;
     const position = mapToWorld(this.world, hit.point);
     position[1] = hit.height * this.world.scale; // exactly on the surface used

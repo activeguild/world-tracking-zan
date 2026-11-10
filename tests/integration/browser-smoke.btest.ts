@@ -450,7 +450,8 @@ describe("Phase 1 browser smoke test", () => {
       }
       // The last move and the reference hit test share one pose (the synthetic camera keeps moving between ticks).
       fire("pointermove", 1, cx + 80, cy);
-      const expected = window.__ar.session.hitTest(cx + 80, cy);
+      // The drag slides at the height the cube was placed at (the floor is not re-estimated per drag event).
+      const expected = window.__ar.session.hitTest(cx + 80, cy, { height: before.position[1] });
       await wait();
       fire("pointerup", 1, cx + 80, cy);
       await wait();
