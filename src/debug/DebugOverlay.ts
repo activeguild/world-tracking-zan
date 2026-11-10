@@ -112,6 +112,8 @@ export interface HudStats {
   visionMs: number;
   /** Camera frames skipped because the vision backend was still busy. */
   framesDropped?: number;
+  /** Surface of the last hit test (world plane or local floor); null before the first one. */
+  lastHit?: { surface: string; heightRatio: number; height: number; neighbors: number; spreadRatio: number; fallback: string } | null;
   /** Vision ↔ gyro rotation comparison (Phase 6 step 0); null without a gyro. */
   gyro?: GyroDiagnostics | null;
   gyroWarnDeg?: number;
@@ -650,6 +652,20 @@ export class DebugOverlay {
         return `${label} h ${pct(f.heightRatio)}±${(f.heightSpread * 100).toFixed(1)}${gen} (n${f.neighbors}/${f.planeFlagged}pl)${tilt}${ratio}${depth}`;
       });
       rows.push(row("ObjFlr", parts.join("  |  "), warn ? "hud-warn" : undefined));
+    }
+    // Where the last hit test landed: the floor around the tap, or the world plane.
+    if (s.lastHit) {
+      const h = s.lastHit;
+      const pc = (v: number) => (Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%` : "-");
+      rows.push(
+        row(
+          "Hit",
+          h.surface === "local"
+            ? `LOCAL floor h ${pc(h.heightRatio)} (${(h.height * 100).toFixed(1)}cm) n${h.neighbors} ±${(h.spreadRatio * 100).toFixed(1)}%`
+            : `PLANE (${h.fallback || "off"}${h.neighbors ? ` n${h.neighbors}` : ""}${Number.isFinite(h.spreadRatio) ? ` ±${(h.spreadRatio * 100).toFixed(1)}%` : ""})`,
+          h.surface === "local" ? undefined : "hud-warn",
+        ),
+      );
     }
     // Phase 6 step 0: vision rotation vs gyro rotation over the same interval.
     if (s.gyro) {

@@ -707,6 +707,17 @@ IMU 融合に入る前に「傾けたときに Vision の**回転**が間違っ�
 - **修正（同日）**: バイアス補正を既定 OFF（`debug.gyroBiasCorrection: false`、`GyroProvider({ correctBias })`、`?gyrobias=1` で ON）。推定値は表示のみ（HUD `bias 0.69°/s (off)`）。`GyroDiagnostics.biasCorrected`。テスト 377 件（+1）: 0.7°/s の定常ロール 3 s は「バイアス」として学習され、補正 ON では直近 1.9 s の実回転が 0.1° 未満に消え、OFF では 1.33° と測れる
 - **次に読むもの**: 同じ動き（静止 → 傾け → 静止 → 戻す）で `Gyro … webkit … axes ok` を確認したうえで `GyHold … Δ`。**`ObjFlr` の Cube の `h` が今回の −16% のように 2% を大きく超えるなら、「傾けるとずれる」の主因は回転ではなく配置面（平面が Cube の場所で Map の床から外れている）**で、ジャイロ融合より先に「hitTest をタップ近傍の Landmark 面にする / 平面を近傍 Landmark で検証する」が候補（挙動変更なので承認後）
 
+### 配置面をタップ近傍の床に（local floor hit test、2026-11-10、ユーザー承認「1」、実機確認待ち）
+
+45 / 46 本目の `ObjFlr`（Cube 周辺の Landmark が World 平面より奥行きの 16% / 7–8% 下 = Cube が Map の床から 11 / 5 cm 浮いている）への対処。World 平面は Map 初期化の約 1 秒後、奥行き構造がまだ決まっていない Map から 1 回だけ確定するので、タップした場所では床から外れうる。**エンジン・WorldAnchor（World 平面 / 原点 / スケール）・Vision は不変**。変わるのは hitTest が返す点の高さだけ。
+
+- `src/ar/LocalFloor.ts` の純関数 `localFloorHit(rayOrigin, rayDir, forward, up, origin, landmarks, count, cfg)`（Map 座標）: まず World 平面との交点を取り、その点から水平距離 `world.localFloorRadiusDepthRatio`（0.1）× 奥行き以内・高さ `localFloorHeightWindowDepthRatio`（0.25）× 奥行き以内の Landmark の「World 平面からの高さ」の中央値 h を求め、**同じ法線で h だけずらした平面**と光線を交差し直す（交点が光線に沿って動くので近傍を取り直して最大 4 回、変化 < 0.1% 奥行きで停止）。近傍が `localFloorMinLandmarks`（6）未満なら半径 2 倍でもう一度、それでも不足なら World 平面（`fallback: few_landmarks`）。高さの散らばり（MAD）が `localFloorMaxSpreadDepthRatio`（0.05）× 奥行きを超える（床ではない: 物が散らかっている / 段差）なら World 平面（`spread`）。法線は World up のままなので配置物は World に対して直立
+- `WorldAnchor.hitTest(u, v, k, mapPose, local?)`: `local = { landmarks, landmarkCount, config }` を渡したときだけ上記を使い、`position[1] = h × scale`（World 平面からの高さ、m）。`HitResult` に `surface: plane | local / height / neighbors / spreadRatio / heightRatio / fallback`。`local` なしの呼び出しは従来と同じ（Y = 0）。`ARSession.hitTest` は直近の結果の Landmark（`lastLandmarks`）で呼ぶ（`world.localFloor`、既定 true、`?localfloor=0` で従来の平面、FPS 行末尾 `planeHit`）。タップ配置・ドラッグ移動・動画配置のすべてが同じ hitTest を通る。`ARHitResult.surface / height`、`ARStats.lastHit`
+- **HUD**: `ObjFlr` の下に `Hit LOCAL floor h −7.4% (−4.6cm) n8 ±2.1%` / `Hit PLANE (few_landmarks n3)`（平面へのフォールバックは橙）。`ObjFlr` の高さは**配置物自身の高さを基準**に変更（0 = 周りの床の上に載っている。原点 `O` は従来どおり平面基準）
+- テスト 381 件（+4）: `tests/ar/LocalFloor.test.ts`（床が平面上なら h 0 で平面の交点と同じ・Landmark / 設定なしは平面・平面に届かない光線は null / 床が平面の −16% / −7.5% / +5% でも h を 1e-5 で復元し交点は光線上 / 3 分の 1 が床上 0.15 の物でも中央値は床・高さが ±15% にばらつくと `spread` で平面 / 1 倍半径に点がなく 2 倍にあれば local・それより遠い / 6 点未満は平面）。`ObjectFloor.test.ts` に統合: 二平面シーンで World 平面を 3% カメラ側へずらした Anchor に対し、従来の hit は真の床から 3.00% 外れ、**local hit は 0.37–0.83%**（n 16–17、±0.3–0.4%）、Y < 0、タップ画素への再投影 1e-6、`ObjFlr` は |h| < 1%。ブラウザテスト 4 件（配置点の Y は「World 平面から 2 cm / 距離の 2% 以内」に緩和）、`tsc` / `npm run build` OK
+- **実機で読むべきもの**: Cube を置いた直後の `Hit` 行 — `LOCAL … h` の符号と量（45 / 46 本目と同じ −7〜−16% なら平面のずれを吸収している）、`PLANE (few_landmarks)` が多いなら Cube の周りに Landmark が少ない（半径 / 最小点数の調整）。`ObjFlr 1 h` が 0 付近（±2% 以内）に収まること。**体感**: 傾けたときに Cube が床に対して滑らないか、近づく / 離れるときの大きさの変化が床の模様と合うか。`?localfloor=0` と A/B
+- **限界**: 床の高さは配置時（とドラッグ中）の Landmark で決まり、その後 Map が BA / ステージで動いても配置物の高さは追従しない（Anchor の補正は従来どおり効く）。近傍の Landmark が床の上の物ばかりだと物の上面に載る（中央値なので過半数が床なら床）。平面の**傾き**のずれは補正しない（高さのみ）
+
 ### Phase 5 — 実装済み（承認待ち）
 
 - `src/vision/Keyframe.ts`: Keyframe（姿勢、画像ピラミッドのコピー、粗画像、Landmark 観測）

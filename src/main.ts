@@ -23,6 +23,7 @@ import "./style.css";
  *   ?worker=0         run the vision engine on the main thread
  *   ?hud=0 / ?hud=1   force the initial HUD state independently of ?debug
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
+ *   ?localfloor=0     hit tests land on the world plane, not on the floor around the tap (A/B)
  *   ?gyroaxes=w3c|webkit  what rotationRate alpha/beta/gamma are about (default: webkit on iOS)
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
@@ -174,6 +175,7 @@ const session = new ARSession({
     },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
+      ...(params.get("localfloor") === "0" ? { localFloor: false } : {}),
       ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
     },
   },
@@ -549,10 +551,11 @@ function refreshHud(): void {
     bundleAdjustment: s.bundleAdjustment,
     mainTiming: s.mainTiming,
     gyro: s.gyro,
+    lastHit: s.lastHit,
     gyroWarnDeg: session.config.debug.gyroWarnDeg,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}${params.get("localfloor") === "0" ? " planeHit" : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {

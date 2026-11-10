@@ -92,6 +92,10 @@ export interface ARHitResult {
   position: THREE.Vector3;
   normal: THREE.Vector3;
   distance: number;
+  /** "local": on the floor the map knows around the hit; "plane": on the world plane. */
+  surface?: "plane" | "local";
+  /** Height of that surface above the world plane (m). */
+  height?: number;
 }
 
 export interface ARSessionEvents {
@@ -201,6 +205,19 @@ export interface ARStats {
   objectFloor: ObjectFloorRecord[];
   /** Vision rotation vs gyro rotation over the same interval (diagnostics only); null without a gyro. */
   gyro: GyroDiagnostics | null;
+  /** Surface the last hit test landed on (world plane or the local floor); null before the first one. */
+  lastHit: HitSurfaceInfo | null;
+}
+
+/** What the last hit test used (HUD `Hit` row). Ratios are relative to the hit's depth. */
+export interface HitSurfaceInfo {
+  surface: "plane" | "local";
+  heightRatio: number;
+  /** Height above the world plane (m). */
+  height: number;
+  neighbors: number;
+  spreadRatio: number;
+  fallback: string;
 }
 
 /**
@@ -245,6 +262,10 @@ export class ARSession {
   private readonly gyroSource: GyroSource | null;
   private readonly gyroComparer: GyroComparer;
   private gyroDiagnostics: GyroDiagnostics | null = null;
+  /** Landmarks of the last result (map frame), for the local-floor hit test. */
+  private lastLandmarks: Float32Array | null = null;
+  private lastLandmarkCount = 0;
+  private lastHit: HitSurfaceInfo | null = null;
   private readonly logger: ARLogger;
 
   // Phase 4: world anchor + Three.js
@@ -499,12 +520,29 @@ export class ARSession {
     // CSS → processing pixels (inverse of the object-fit: cover mapping).
     const u = (x - vp.offsetX) / vp.scale;
     const v = (y - vp.offsetY) / vp.scale;
-    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose);
+    const w = this.config.world;
+    const local =
+      w.localFloor && this.lastLandmarks
+        ? {
+            landmarks: this.lastLandmarks,
+            landmarkCount: this.lastLandmarkCount,
+            config: {
+              radiusDepthRatio: w.localFloorRadiusDepthRatio,
+              heightWindowDepthRatio: w.localFloorHeightWindowDepthRatio,
+              minLandmarks: w.localFloorMinLandmarks,
+              maxSpreadDepthRatio: w.localFloorMaxSpreadDepthRatio,
+            },
+          }
+        : null;
+    const hit = this.worldAnchor.hitTest(u, v, this.intrinsics, this.lastMapPose, local);
     if (!hit) return null;
+    this.lastHit = { surface: hit.surface, heightRatio: hit.heightRatio, height: hit.height, neighbors: hit.neighbors, spreadRatio: hit.spreadRatio, fallback: hit.fallback };
     return {
       position: new THREE.Vector3(hit.position[0], hit.position[1], hit.position[2]),
       normal: new THREE.Vector3(hit.normal[0], hit.normal[1], hit.normal[2]),
       distance: hit.distance,
+      surface: hit.surface,
+      height: hit.height,
     };
   }
 
@@ -697,6 +735,7 @@ export class ARSession {
       initRefinement: this.initRefinement,
       objectFloor: this.objectFloor,
       gyro: this.gyroDiagnostics,
+      lastHit: this.lastHit,
       objects: this.world.objects
         .filter((o) => o.placed)
         .map((o) => ({ id: o.id, kind: o.kind, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
@@ -1019,6 +1058,8 @@ export class ARSession {
     this.planeAnchored = r.planeAnchor !== null;
     this.fastThreshold = r.fastThreshold;
     this.lastMapPose = r.mapPose;
+    this.lastLandmarks = r.landmarks;
+    this.lastLandmarkCount = r.landmarkCount;
     this.setState(r.state);
     const w0 = performance.now();
     this.updateWorld(r);

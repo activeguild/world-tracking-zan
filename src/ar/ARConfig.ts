@@ -618,6 +618,21 @@ export interface RelocalizationConfig {
 
 /** World anchoring, hit test and rendering (spec §25–§30, §33–§34, Phase 4). */
 export interface WorldConfig {
+  /**
+   * Hit tests land on the floor the map knows around the tap instead of the
+   * world plane (recordings 45 / 46: the landmarks around the placed cube
+   * were 7–16 % of the depth below the plane, the cube floated 5–11 cm).
+   * The height is the median of the landmarks within
+   * `localFloorRadiusDepthRatio` × depth horizontally (tried at 1× and 2×)
+   * and `localFloorHeightWindowDepthRatio` × depth vertically; fewer than
+   * `localFloorMinLandmarks`, or a height spread (MAD) above
+   * `localFloorMaxSpreadDepthRatio` × depth, falls back to the world plane.
+   */
+  localFloor: boolean;
+  localFloorRadiusDepthRatio: number;
+  localFloorHeightWindowDepthRatio: number;
+  localFloorMinLandmarks: number;
+  localFloorMaxSpreadDepthRatio: number;
   /** Assumed camera→plane distance (m) when the world is created; fixes the monocular scale. */
   assumedPlaneDistanceMeters: number;
   /**
@@ -1110,6 +1125,11 @@ export const DEFAULT_CONFIG: ARConfig = {
     // Unused since v13 (objects hide on the engine's own lost hysteresis).
     holdPoseOnLostMs: 10000,
     relocGuidanceDelayMs: 2000,
+    localFloor: true,
+    localFloorRadiusDepthRatio: 0.1,
+    localFloorHeightWindowDepthRatio: 0.25,
+    localFloorMinLandmarks: 6,
+    localFloorMaxSpreadDepthRatio: 0.05,
     sidewaysGuidanceDelayMs: 1500,
     smoothing: false,
     // Light smoothing: with the displayed frame synchronized to the pose,
