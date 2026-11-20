@@ -457,11 +457,40 @@ describe("MapTracker", () => {
     expect(deg(rotationDistance(tracker.pose.rotation, cameraAt(f).rotation))).toBeLessThan(0.5);
 
     // Long loss: no observations for many frames keeps every landmark.
+    const linkOf = new Map<number, number>();
+    for (const t of byId.values()) if (t.landmarkId >= 0) linkOf.set(pointOf.get(t.id)!, t.landmarkId);
     const emptyFrames: Track[] = [];
     for (let i = 0; i < 200; i++) {
       f++;
       tracker.update(emptyFrames, f, TEST_K, null);
     }
+    expect(tracker.map.size).toBe(landmarksBefore);
+
+    // …and so does the frame tracking comes back on (longer than
+    // maxLandmarkAgeFrames lost): half of the landmarks are seen again at
+    // the held pose; the other half must not be pruned for the frames the
+    // camera spent lost.
+    expect(200).toBeGreaterThan(cfg.maxLandmarkAgeFrames);
+    f++;
+    const held = tracker.pose;
+    const back: Track[] = [];
+    let k = 0;
+    for (const landmarkId of linkOf.values()) {
+      const lm = tracker.map.get(landmarkId);
+      if (!lm || k++ % 2) continue;
+      // The landmark's own (map-frame) position under the held map-frame pose.
+      const p = project(lm.position, held, 0, 0, rng);
+      if (!p) continue;
+      back.push({
+        id: nextId++, x: p[0], y: p[1], prevX: p[0], prevY: p[1], age: 1, score: 10, inlier: true, outlierStreak: 0,
+        refX: p[0], refY: p[1], refFrame: -1,
+        landmarkId, anchorFrame: -1, anchorX: p[0], anchorY: p[1], anchorPose: null,
+        planePoint: null, planeStreak: 0, planeOutliers: 0, offPlane: false,
+      });
+    }
+    expect(back.length).toBeGreaterThanOrEqual(cfg.minRecoveryInliersLong);
+    const returned = tracker.update(back, f, TEST_K, null);
+    expect(returned.tracked).toBe(true);
     expect(tracker.map.size).toBe(landmarksBefore);
   });
 

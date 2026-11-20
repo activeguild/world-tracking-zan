@@ -290,6 +290,8 @@ export class MapTracker {
    * far every time it becomes a candidate. The second strike removes it.
    */
   private readonly farStrikes = new Map<number, number>();
+  /** Untracked frames since the last tracked one, not yet credited to the landmarks' ages. */
+  private lostFramesToCredit = 0;
   /**
    * v24 re-anchor probe (diagnostics only): every this many frames a sample
    * of at most `reanchorProbeMaxTracks` PnP inliers is re-observed from the
@@ -417,6 +419,7 @@ export class MapTracker {
   reset(tracks: readonly Track[]): void {
     this.map.clear();
     this.farStrikes.clear();
+    this.lostFramesToCredit = 0;
     this.purgedTotal = 0;
     this.lastReanchor = null;
     this._initialized = false;
@@ -533,6 +536,7 @@ export class MapTracker {
 
     this.map.clear();
     this.farStrikes.clear();
+    this.lostFramesToCredit = 0;
     this.purgedTotal = 0;
     this.lastReanchor = null;
     this._initialized = true;
@@ -1032,7 +1036,17 @@ export class MapTracker {
       reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, imageMotion ? null : this._pose);
     }
     // Pruning by age counts only tracked frames: a loss must not erode the map.
+    // The age is a frame-id difference, so the frames spent lost are credited
+    // back to every landmark on the first tracked frame after the loss —
+    // otherwise that frame removed every unprotected landmark it did not
+    // see as an inlier, once the loss was longer than `maxLandmarkAgeFrames`.
     // Landmarks a stored keyframe observes are exempt from the age rule (v15).
+    if (!tracked) {
+      this.lostFramesToCredit++;
+    } else if (this.lostFramesToCredit > 0) {
+      for (const lm of this.map.values()) lm.lastSeenFrame = Math.min(frameId, lm.lastSeenFrame + this.lostFramesToCredit);
+      this.lostFramesToCredit = 0;
+    }
     if (tracked) this.map.prune(frameId, cfg.maxLandmarkAgeFrames, cfg.maxLandmarks, this.protectedLandmarkIds);
     const center = this.cameraCenter();
     if (this.relinkStats.verified) this.relinkStats.meanSnapPx = this.relinkSnapSum / this.relinkStats.verified;
