@@ -193,7 +193,15 @@ export class FeatureTracker {
       const det = gxx * gyy - gxy * gxy;
       const minEig = tr / 2 - Math.sqrt(Math.max(0, (tr * tr) / 4 - det));
       if (minEig / this.winArea < cfg.minEigenvalue || det < 1e-9) {
-        return TrackStatus.LOW_TEXTURE;
+        // Like the border case above: a coarse level without texture is
+        // skipped and only level 0 decides. The 2×2 box pyramid averages a
+        // small or low-contrast corner away at 1/8 scale; failing the track
+        // there dropped every speck on a plain desk or floor one frame
+        // after FAST had found it.
+        if (L === 0) return TrackStatus.LOW_TEXTURE;
+        dX *= 2;
+        dY *= 2;
+        continue;
       }
       const invDet = 1 / det;
       const iGxx = gyy * invDet;
