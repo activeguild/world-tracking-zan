@@ -105,3 +105,18 @@ describe("video panel object", () => {
     expect(yawFacing(0, 0, NaN, 1)).toBe(0);
   });
 });
+
+describe("ARWorld.setWorldReady(false)", () => {
+  it("removes every placed object, whatever their number", () => {
+    for (const n of [1, 2, 3, 4]) {
+      const world = new ARWorld();
+      world.setWorldReady(true);
+      const objs = Array.from({ length: n }, () => world.createCube(0.1));
+      for (const o of objs) o.place([0, 0, 0]);
+      world.setWorldReady(false);
+      expect(world.objects.length).toBe(0);
+      expect(world.placedCount).toBe(0);
+      expect(objs.filter((o) => o.root.parent === world.root).length).toBe(0);
+    }
+  });
+});

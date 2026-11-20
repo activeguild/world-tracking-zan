@@ -42,7 +42,9 @@ export class ARWorld {
   setWorldReady(ready: boolean): void {
     this.root.visible = ready;
     if (!ready) {
-      for (const o of this.objects) this.remove(o);
+      // Over a copy: remove() splices `objects`, and iterating the live
+      // array skipped every other object.
+      for (const o of [...this.objects]) this.remove(o);
       this.lostSince = null;
       this.hidden = false;
     }
