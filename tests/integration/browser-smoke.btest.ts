@@ -234,6 +234,57 @@ describe("Phase 1 browser smoke test", () => {
     await ctxOn.close();
   });
 
+  it("start() is re-entrant and stop() during a start is honoured", async () => {
+    const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const page = await context.newPage();
+    await page.goto(`https://localhost:${PORT}/`, { waitUntil: "load" });
+    const r = (await page.evaluate(async () => {
+      let streams = 0;
+      const md = navigator.mediaDevices;
+      const real = md.getUserMedia.bind(md);
+      md.getUserMedia = (c) => {
+        streams++;
+        return real(c);
+      };
+      let workers = 0;
+      const RealWorker = window.Worker;
+      window.Worker = class extends RealWorker {
+        constructor(url: string | URL, opts?: WorkerOptions) {
+          super(url, opts);
+          workers++;
+        }
+      };
+      const session = window.__ar.session;
+      const video = document.getElementById("video") as HTMLVideoElement;
+      // Two overlapping starts: one camera stream, one worker.
+      await Promise.all([session.start(), session.start()]);
+      const double = { running: session.isRunning, streams, workers };
+      session.stop();
+      const stopped = { running: session.isRunning, hasStream: video.srcObject !== null };
+      // stop() while the next start is still awaiting the camera.
+      const p = session.start();
+      session.stop();
+      await p;
+      const during = { running: session.isRunning, hasStream: video.srcObject !== null };
+      // And it starts normally afterwards.
+      await session.start();
+      const again = { running: session.isRunning, hasStream: video.srcObject !== null };
+      session.stop();
+      return { double, stopped, during, again };
+    })) as {
+      double: { running: boolean; streams: number; workers: number };
+      stopped: { running: boolean; hasStream: boolean };
+      during: { running: boolean; hasStream: boolean };
+      again: { running: boolean; hasStream: boolean };
+    };
+    console.log("[browser-smoke] lifecycle " + JSON.stringify(r));
+    await context.close();
+    expect(r.double).toEqual({ running: true, streams: 1, workers: 1 });
+    expect(r.stopped).toEqual({ running: false, hasStream: false });
+    expect(r.during).toEqual({ running: false, hasStream: false });
+    expect(r.again).toEqual({ running: true, hasStream: true });
+  });
+
   it("v16: the WebGL frame grabber reproduces the 2D grabber's gray image and tracks to a world", async () => {
     const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
     const page = await context.newPage();

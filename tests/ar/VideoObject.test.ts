@@ -120,3 +120,45 @@ describe("ARWorld.setWorldReady(false)", () => {
     }
   });
 });
+
+describe("ARObject.fromModel on a model that was placed before", () => {
+  it("normalizes from the model as loaded, not from its previous placement", () => {
+    const model = new THREE.Group();
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshBasicMaterial());
+    mesh.position.set(0.5, 1, -0.25); // origin not at the base centre
+    model.add(mesh);
+    const boxOf = (o: THREE.Object3D) => {
+      o.updateMatrixWorld(true);
+      return new THREE.Box3().setFromObject(o);
+    };
+    const world = new ARWorld();
+    world.setWorldReady(true);
+    const first = world.addModel(model, 0.2);
+    first.place([0.3, 0, -0.5], 1.1);
+    first.setScale(2);
+    world.remove(first);
+    const second = world.addModel(model, 0.2);
+    second.place([0, 0, 0]);
+    const b = boxOf(second.root);
+    expect(b.min.x).toBeCloseTo(-0.1, 6);
+    expect(b.max.x).toBeCloseTo(0.1, 6);
+    expect(b.min.z).toBeCloseTo(-0.1, 6);
+    expect(b.max.z).toBeCloseTo(0.1, 6);
+    expect(b.min.y).toBeCloseTo(0, 6);
+    expect(b.max.y).toBeCloseTo(0.2, 6);
+  });
+
+  it("stands a model with its own offset on the plane", () => {
+    const model = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial());
+    model.position.set(3, -2, 1);
+    const obj = ARObject.fromModel(1, model, 0.5);
+    obj.place([0, 0, 0]);
+    obj.root.updateMatrixWorld(true);
+    const b = new THREE.Box3().setFromObject(obj.root);
+    expect(b.min.y).toBeCloseTo(0, 6);
+    expect((b.min.x + b.max.x) / 2).toBeCloseTo(0, 6);
+    expect((b.min.z + b.max.z) / 2).toBeCloseTo(0, 6);
+    expect(b.max.x - b.min.x).toBeCloseTo(0.5, 6);
+  });
+});
+
