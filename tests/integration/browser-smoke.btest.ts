@@ -438,8 +438,23 @@ describe("Phase 1 browser smoke test", () => {
       const fire = (type: string, id: number, x: number, y: number) =>
         app.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: rect.left + x, clientY: rect.top + y, bubbles: true, pointerType: "touch", isPrimary: id === 1 }));
       const wait = () => new Promise((r) => setTimeout(r, 30));
-      const cx = rect.width / 2, cy = rect.height * 0.6; // where the cube was placed
+      // Where the cube is on screen *now* (the synthetic camera has moved
+      // since it was placed): its projected centre.
+      const session = window.__ar.session;
+      const proj = session.placedObjects[0].position;
+      proj.y += 0.05;
+      proj.project(session.threeCamera);
+      const cx = ((proj.x + 1) / 2) * rect.width, cy = ((1 - proj.y) / 2) * rect.height;
       const before = window.__ar.stats().objects[0];
+      // Far from the cube nothing is picked (the cube's edge lines must not
+      // count as hits through the raycaster's default 1 m line threshold).
+      const farPicks = [
+        [10, 10],
+        [rect.width - 10, 10],
+        [10, rect.height - 10],
+        [rect.width - 10, rect.height - 10],
+      ].filter(([x, y]) => window.__ar.session.pickObject(x, y, 0) !== null).length;
+      const nearPick = window.__ar.session.pickObject(cx, cy) !== null;
       // Drag: press on the cube, move 80 px right in a few steps, release.
       fire("pointerdown", 1, cx, cy);
       await wait();
@@ -482,9 +497,11 @@ describe("Phase 1 browser smoke test", () => {
       fire("pointerup", 2, ncx + 50, cy);
       await wait();
       const afterPinch = window.__ar.stats().objects[0];
-      return { before, afterDrag, afterTwist, afterPinch, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
+      return { before, farPicks, nearPick, afterDrag, afterTwist, afterPinch, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
     })) as {
       before: { position: number[]; yaw: number; scale: number };
+      farPicks: number;
+      nearPick: boolean;
       afterDrag: { position: number[]; yaw: number; scale: number };
       afterTwist: { position: number[]; yaw: number; scale: number };
       afterPinch: { position: number[]; yaw: number; scale: number };
@@ -619,6 +636,8 @@ describe("Phase 1 browser smoke test", () => {
     // finger (still one object, no re-placement), the twist turned it by
     // −90° about the plane normal without moving it.
     expect(manipulation.placed).toBe(1);
+    expect(manipulation.farPicks).toBe(0);
+    expect(manipulation.nearPick).toBe(true);
     expect(manipulation.expected).not.toBeNull();
     const dragMove = Math.hypot(manipulation.afterDrag.position[0] - manipulation.before.position[0], manipulation.afterDrag.position[2] - manipulation.before.position[2]);
     expect(dragMove).toBeGreaterThan(0.02);

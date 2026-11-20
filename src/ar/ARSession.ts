@@ -260,6 +260,13 @@ export class ARSession {
   private rafHandle = 0;
   private vfcHandle = 0;
   private lastSentTime = 0;
+  /**
+   * Frame id of the next frame sent to the engine. Owned by the session, not
+   * by the grabber: the grabber is replaced mid-session (auto 2D → WebGL
+   * switch, WebGL context loss) and the engine uses frame ids as its clock
+   * and as identity (keyframe gaps, landmark ages, "this frame" tests).
+   */
+  private nextFrameId = 0;
 
   private _state: TrackingState = TrackingState.INITIALIZING;
   private readonly listeners: { [K in keyof ARSessionEvents]: Set<Listener<K>> } = {
@@ -407,6 +414,7 @@ export class ARSession {
     );
     this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
     this.grabSamplesMs = [];
+    this.nextFrameId = 0;
     this.grabDecided = this.config.processing.grabber !== "auto";
     this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
 
@@ -563,6 +571,13 @@ export class ARSession {
     camera.updateMatrixWorld(true);
     const ndc = new THREE.Vector2((x / rect.width) * 2 - 1, 1 - (y / rect.height) * 2);
     const raycaster = new THREE.Raycaster();
+    // Three's default line / point thresholds are 1 world unit — 1 m here.
+    // The demo cube carries its edges as LineSegments, so with the default
+    // every ray within a metre of an edge "hit" the cube and a drag started
+    // anywhere on screen grabbed it. Only meshes are pick targets; near
+    // misses are the tolerance fallback's job below.
+    raycaster.params.Line.threshold = 0;
+    raycaster.params.Points.threshold = 0;
     raycaster.setFromCamera(ndc, camera);
     let best: ARObject | null = null;
     let bestDistance = Infinity;
@@ -754,6 +769,7 @@ export class ARSession {
       this.grabDecided = true;
       frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
     }
+    frame.frameId = this.nextFrameId++;
     this.maybeSwitchGrabber(g1 - g0);
     // Phase 2: the BA's anchor correction is fitted to the landmarks around
     // the world origin and the placed objects (map frame, current anchor).
