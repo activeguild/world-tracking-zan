@@ -251,7 +251,10 @@ export class VisionEngine {
         verify: (candidates, pose, radiusPx, choice) => this.relocalizer.verifyRelinks(candidates, this.curPyramid, pose, radiusPx, choice),
       };
       // v21: a keyframe patch landing a BA-outlier distance away removes the landmark.
-      if (config.landmarks.purgeInconsistent) this.mapTracker.purgeFarPx = config.bundleAdjustment.maxObservationErrorPx;
+      if (config.landmarks.purgeInconsistent) {
+        this.mapTracker.purgeFarPx = config.bundleAdjustment.maxObservationErrorPx;
+        this.mapTracker.purgeFarMaxPx = config.relocalization.lkMaxDisplacementPx;
+      }
       // v24: the re-anchor probe (diagnostics only) rides on the same check.
       this.mapTracker.reanchorProbeEveryFrames = config.landmarks.reanchorProbeEveryFrames;
       this.mapTracker.reanchorProbeMaxTracks = config.landmarks.reanchorProbeMaxTracks;

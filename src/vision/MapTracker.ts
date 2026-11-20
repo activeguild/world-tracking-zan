@@ -44,7 +44,7 @@ export interface RelinkVerdict {
   /** Keyframe-consistent position in the current frame (valid when verified). */
   x: number;
   y: number;
-  /** Why a candidate was rejected: the keyframe patch landed beyond the radius (`too_far`, with `landedPx` = its distance from the candidate) or LK failed outright (`lk_failed`). */
+  /** Why a candidate was rejected: the keyframe patch tracked into the current frame (forward-backward verified) but landed beyond the radius (`too_far`, with `landedPx` = its distance from the candidate), or LK failed (`lk_failed`). */
   reason?: "too_far" | "lk_failed";
   landedPx?: number;
   /** Frame id of the keyframe whose observation was tracked (verified / rejected). */
@@ -275,6 +275,22 @@ export class MapTracker {
    */
   purgeFarPx = 0;
   /**
+   * Upper bound (px) of a landing that counts as "the keyframe view and the
+   * map disagree": beyond it the patch did not track to this landmark's
+   * corner at all (under an occluder it settles on a look-alike 80–150 px
+   * away and still passes forward-backward now and then). The engine sets
+   * it to `relocalization.lkMaxDisplacementPx`, the displacement the same
+   * keyframe→current LK is trusted for in relocalization. 0 = no bound.
+   */
+  purgeFarMaxPx = 0;
+  /**
+   * Far landings seen so far per landmark. One far landing can be chance (a
+   * look-alike next to an occluder edge passes forward-backward a few
+   * percent of the time); a landmark the keyframe really contradicts lands
+   * far every time it becomes a candidate. The second strike removes it.
+   */
+  private readonly farStrikes = new Map<number, number>();
+  /**
    * v24 re-anchor probe (diagnostics only): every this many frames a sample
    * of at most `reanchorProbeMaxTracks` PnP inliers is re-observed from the
    * oldest keyframe observation of their landmark and the residuals of the
@@ -400,6 +416,7 @@ export class MapTracker {
 
   reset(tracks: readonly Track[]): void {
     this.map.clear();
+    this.farStrikes.clear();
     this.purgedTotal = 0;
     this.lastReanchor = null;
     this._initialized = false;
@@ -515,6 +532,7 @@ export class MapTracker {
     }
 
     this.map.clear();
+    this.farStrikes.clear();
     this.purgedTotal = 0;
     this.lastReanchor = null;
     this._initialized = true;
@@ -1007,7 +1025,7 @@ export class MapTracker {
     // tracks sitting on the same corners; the next PnP verifies the links.
     let reassociated = guidedLinks;
     if (tracked) {
-      reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, this._pose);
+      reassociated += this.reassociateWith(tracks, k, cfg.reassociateRadiusPx, this._pose, true);
     } else if (this._framesSinceTracked <= cfg.reassociateMaxLostFrames) {
       // Lost: the image-motion-propagated positions are far more reliable
       // than a projection through a held / predicted pose.
@@ -1650,7 +1668,7 @@ export class MapTracker {
    * their predicted image position: the projection under `pose`, or, with
    * `pose` null, the position carried along by the image motion.
    */
-  private reassociateWith(tracks: Track[], k: CameraIntrinsics, radiusPx: number, pose: RigidTransform | null): number {
+  private reassociateWith(tracks: Track[], k: CameraIntrinsics, radiusPx: number, pose: RigidTransform | null, canPurge = false): number {
     const cfg = this.config;
     // Spatial hash of unlinked tracks (cell = radius).
     const cell = Math.max(1, radiusPx);
@@ -1738,7 +1756,17 @@ export class MapTracker {
           this.relinkFarSum += v.landedPx ?? 0;
           // v21: the keyframe's view of this landmark is not where the map
           // projects it — an inconsistent landmark, not a wrong candidate.
-          if (this.purgeFarPx > 0 && (v.landedPx ?? 0) >= this.purgeFarPx) {
+          // Only where the predicted position came from the canonical pose
+          // of a tracked frame (`canPurge`): while lost, or under a guided-
+          // recovery seed pose, a far landing says the *prediction* is off.
+          const landed = v.landedPx ?? 0;
+          if (canPurge && this.purgeFarPx > 0 && landed >= this.purgeFarPx && (this.purgeFarMaxPx <= 0 || landed <= this.purgeFarMaxPx)) {
+            const strikes = (this.farStrikes.get(lm.id) ?? 0) + 1;
+            if (strikes < 2) {
+              this.farStrikes.set(lm.id, strikes);
+              continue;
+            }
+            this.farStrikes.delete(lm.id);
             this.map.remove(lm.id);
             this.relinkStats.purged++;
             this.purgedTotal++;
@@ -1749,6 +1777,7 @@ export class MapTracker {
         continue;
       }
       if (v && v.status === "verified") {
+        this.farStrikes.delete(lm.id);
         this.relinkStats.verified++;
         this.relinkSnapSum += Math.hypot(v.x - track.x, v.y - track.y);
         track.x = v.x;
