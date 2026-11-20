@@ -165,8 +165,16 @@ export function ransacEssential(
       const p = Math.pow(w, 8);
       if (p >= 1 - 1e-9) maxIter = iter + 1;
       else if (p > 0) {
-        const needed = Math.ceil(Math.log(1 - config.confidence) / Math.log(1 - p));
-        maxIter = Math.min(config.maxIterations, Math.max(iter + 1, needed));
+        // For a tiny inlier ratio w⁸ is below the double epsilon: 1 − p is
+        // exactly 1, its log is 0 and `needed` would be −Infinity, which
+        // used to end the search on the spot with a 1–2 inlier model. A
+        // model that weak says nothing about how many samples are needed:
+        // keep the full budget.
+        const denom = Math.log(1 - p);
+        if (denom < 0) {
+          const needed = Math.ceil(Math.log(1 - config.confidence) / denom);
+          maxIter = Math.min(config.maxIterations, Math.max(iter + 1, needed));
+        }
       }
     }
   }

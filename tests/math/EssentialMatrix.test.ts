@@ -75,6 +75,31 @@ describe("Essential matrix", () => {
     expect(deg(angleBetween(rec.pose.translation, pose.translation))).toBeLessThan(3);
   });
 
+  it("RANSAC does not stop on a first model with a tiny inlier ratio (w⁸ underflow)", () => {
+    // n = 250: a first sample scoring 1–2 inliers has w⁸ below the double
+    // epsilon; the adaptive iteration count then ended the search at once
+    // and the call returned null (27 % of calls at 30 % outliers).
+    let nulls = 0;
+    const trials = 60;
+    for (let s = 0; s < trials; s++) {
+      const r = createRng(1000 + s);
+      const pts = randomBoxPoints(r, 250);
+      const cp = projectTwoViews(pts, pose, TEST_K, 0.3, r);
+      corrupt(cp, 0.3, TEST_K, r);
+      const n = cp.n;
+      const nx1 = new Float64Array(n), ny1 = new Float64Array(n), nx2 = new Float64Array(n), ny2 = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        nx1[i] = (cp.x1[i] - TEST_K.cx) / TEST_K.fx;
+        ny1[i] = (cp.y1[i] - TEST_K.cy) / TEST_K.fy;
+        nx2[i] = (cp.x2[i] - TEST_K.cx) / TEST_K.fx;
+        ny2[i] = (cp.y2[i] - TEST_K.cy) / TEST_K.fy;
+      }
+      const res = ransacEssential(nx1, ny1, nx2, ny2, n, { threshold: 1.5 / 493, confidence: 0.99, maxIterations: 300, minCorrespondences: 20 }, r);
+      if (!res.essential) nulls++;
+    }
+    expect(nulls).toBe(0);
+  });
+
   it("triangulation recovers the points up to the translation scale", () => {
     for (let i = 0; i < c.n; i += 10) {
       const tri = triangulatePoint(pose, c.x1[i], c.y1[i], c.x2[i], c.y2[i]);
