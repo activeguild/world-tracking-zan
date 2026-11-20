@@ -900,7 +900,9 @@ export class MapTracker {
       // tracked velocity for a few frames (then held). A two-view
       // translation is scale-free and never enters the map-frame pose (v2 §6).
       const rot = rotationPrior ? mat3Multiply(rotationPrior, this._pose.rotation) : Float64Array.from(this._pose.rotation);
-      const c = prevCenter;
+      // A copy: `prevCenter` is what this frame's pose delta is measured
+      // from (predicting in place reported a translation of 0).
+      const c = Float64Array.from(prevCenter);
       if (this._framesSinceTracked <= cfg.velocityPropagationFrames) {
         c[0] += this.velocity[0];
         c[1] += this.velocity[1];

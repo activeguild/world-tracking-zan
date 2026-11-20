@@ -1020,7 +1020,11 @@ export class Relocalizer {
   private suppressed(kf: Keyframe, rank: CoarseImage, frameId: number | undefined): boolean {
     if (frameId === undefined) return false;
     const s = this.retry.get(kf.id);
-    if (!s || frameId >= s.cooldownUntil) return false;
+    // Strictly after: with attempts every `attemptEveryNFrames` (3) and a
+    // cooldown of two periods (6), `>=` freed the keyframe exactly on the
+    // second following attempt, so the top-ranked batches alternated and the
+    // lower-ranked keyframes were never tried on an unchanged view.
+    if (!s || frameId > s.cooldownUntil) return false;
     return coarseShift(s.failedRank, rank, 0).score >= this.config.retryImageChangeScore;
   }
 

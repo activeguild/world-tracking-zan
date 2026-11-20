@@ -447,6 +447,9 @@ describe("MapTracker", () => {
     fresh.forEach((t) => byId.set(t.id, t));
     const lost = tracker.update(fresh, f, TEST_K, null);
     expect(lost.tracked).toBe(false); // nothing linked in this frame…
+    // The centre is predicted with the last velocity, and the reported delta says so.
+    expect(lost.translationPredicted).toBe(true);
+    expect(lost.poseDeltaTranslation).toBeGreaterThan(0.01);
     expect(lost.reassociated).toBeGreaterThan(cfg.minPnPInliers); // …but the landmarks were re-linked for the next one
     expect(tracker.map.size).toBe(landmarksBefore); // and nothing was pruned while lost
 
