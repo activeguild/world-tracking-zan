@@ -343,6 +343,8 @@ export class VisionEngine {
     this.stateMachine.reset();
     this.lastQuality = emptyQuality();
     this.referenceFrameId = -1;
+    for (const s of this.referenceSlots) s.frameId = -1;
+    this.lastImageMotion = null;
     this.referenceRotation = mat3Identity();
     this.lastRelativeRotation = mat3Identity();
     this.lastAccumulatedRotation = mat3Identity();
@@ -2120,9 +2122,13 @@ export class VisionEngine {
     this.referenceRotation = mat3Multiply(relativeRotation, this.referenceRotation);
     this.lastRelativeRotation = mat3Identity();
     this.referenceFrameId = frameId;
-    // Keep this frame's image while no map exists: if the map initializes
-    // against this reference, it becomes the origin keyframe (指示書 §3).
-    if (!this.mapTracker.initialized) {
+    // Keep this frame's image: if a map initializes against this reference,
+    // it becomes the origin keyframe (指示書 §3). Also while a map exists —
+    // a lost map stays "initialized" until its reset, and the map that
+    // replaces it initializes against a reference renewed in that time; with
+    // no image stored for it the init frame took the origin role instead
+    // (not an identity pose, yet treated as the fixed reference view).
+    {
       if (this.referenceSlots.length < 2) {
         this.referenceSlots.push({ pyramid: new ImagePyramid(this.width, this.height, this.config.tracker.pyramidLevels), frameId: -1, timestamp: 0 });
       }
