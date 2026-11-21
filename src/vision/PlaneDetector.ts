@@ -37,6 +37,8 @@ export class PlaneDetector {
   private stableFrames = 0;
   private found = false;
   private missedFrames = 0;
+  /** Consecutive candidates inconsistent with the previous one while `found`. */
+  private inconsistentFrames = 0;
   lastSearch: PlaneSearchInfo = emptySearch();
 
   constructor(
@@ -49,6 +51,7 @@ export class PlaneDetector {
     this.stableFrames = 0;
     this.found = false;
     this.missedFrames = 0;
+    this.inconsistentFrames = 0;
     this.lastSearch = emptySearch();
   }
 
@@ -64,6 +67,7 @@ export class PlaneDetector {
     this.previous = null;
     this.stableFrames = 0;
     this.missedFrames = 0;
+    this.inconsistentFrames = 0;
   }
 
   get isFound(): boolean {
@@ -161,14 +165,20 @@ export class PlaneDetector {
     }
     this.stableFrames = stable ? this.stableFrames + 1 : 0;
     this.missedFrames = 0;
+    if (stable) this.inconsistentFrames = 0;
 
     if (horizontal && this.stableFrames >= cfg.stableFramesRequired && res.inlierCount >= cfg.minInliers) {
       this.found = true;
     } else if (!horizontal || !stable) {
       // A clearly different or non-horizontal plane breaks the found state.
       if (!stable && this.previous && this.found) {
-        // keep `found` through a single inconsistent frame (grace), drop after
-        this.missedFrames = 1;
+        // Keep `found` through a single odd candidate (grace): that is two
+        // inconsistent comparisons in a row, the odd one against the plane
+        // and the plane against the odd one. A third is a different plane,
+        // which has to earn `found` with its own stable frames.
+        // (`missedFrames` cannot count this: it is reset on every candidate.)
+        this.inconsistentFrames++;
+        if (this.inconsistentFrames > 2) this.found = false;
       } else if (!horizontal) {
         this.found = false;
       }

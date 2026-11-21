@@ -184,6 +184,20 @@ export class ARObject {
    * on X/Z and standing on the plane (min Y = 0).
    */
   static fromModel(id: number, model: THREE.Object3D, targetSize = 0): ARObject {
+    // The same loaded model may be wrapped again (placed anew after the
+    // world was lost): start from its transform as loaded and from no
+    // parent, or the box below would include the previous placement (hit
+    // position, yaw, pinch scale) and the normalization applied last time.
+    const base = model.userData.arBaseTransform as { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 } | undefined;
+    if (base) {
+      model.position.copy(base.position);
+      model.quaternion.copy(base.quaternion);
+      model.scale.copy(base.scale);
+    } else {
+      model.userData.arBaseTransform = { position: model.position.clone(), quaternion: model.quaternion.clone(), scale: model.scale.clone() };
+    }
+    model.removeFromParent();
+    model.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(model);
     const size = new THREE.Vector3();
     box.getSize(size);
@@ -193,10 +207,14 @@ export class ARObject {
       const extent = Math.max(size.x, size.z, 1e-6);
       scale = targetSize / extent;
     }
-    model.scale.multiplyScalar(scale);
     const center = new THREE.Vector3();
     box.getCenter(center);
-    model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
+    // Scaling about the model's own origin p0 maps a point x to
+    // p + scale·(x − p0): put the box centre on the X/Z origin and its
+    // bottom on Y = 0.
+    const p0 = model.position.clone();
+    model.scale.multiplyScalar(scale);
+    model.position.set((p0.x - center.x) * scale, (p0.y - box.min.y) * scale, (p0.z - center.z) * scale);
     holder.add(model);
     return new ARObject(id, holder, "model");
   }
