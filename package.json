@@ -12,7 +12,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "lean:check": "bash scripts/lean-check.sh",
+    "lean:export": "cd lean && lake build conformance && lake exe conformance > conformance/tracking-state.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

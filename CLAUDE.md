@@ -207,6 +207,16 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### Lean による形式ガードレール（2026-11-21、ユーザー要望）
+
+freee の記事（業務ルールを Lean に写し、検査を通らない操作は実行しない）の考え方を、**壊れても気づきにくい判定ロジック**に適用。`lean/`（Lean 4.24.0、Mathlib なし、Lake）。エンジンの処理は不変。
+
+- **モデルと定理**（`lean/Guardrails/`）: `TrackingState`（`ARState.update` の全分岐。RELOCALIZING は World 確立時のみ / Map で位置決めでき inlier ≥ `lostBelow` なら失探状態を抜けてそこに留まる / LOST には `lostFrameTolerance` 回の不良フレームが要る）、`RetryCooldown`（失敗 Keyframe はちょうど次の 2 試行だけ抑制）、`LandmarkPurge`（追跡フレーム以外・1 回目・距離上限超では削除しない）、`PlaneFound`（1 回の乱れは猶予、3 回目の不整合で `found` を落とし、戻るのは安定フレーム規則だけ）
+- **実装との結合**: 状態機械だけ機械的に結合。`lake exe conformance` がモデルの全遷移表（8 状態 × badFrames 3 × inlier 6 × フラグ 16 = 2304 行、`lean/conformance/tracking-state.json`、コミット済み）を出力し、`tests/lean/Conformance.test.ts` が TypeScript 実装を全行で突き合わせる（通常の `npm test` に含まれ、Lean 不要）。修正 8 を戻すと `SEARCHING_FEATURES inl=20 … model PLANE_FOUND` で落ちることを確認。**他の 3 モデルは仕様の記述で、実装との自動突き合わせはない**
+- **検査**: `npm run lean:check`（証明のビルド、`sorry` / `admit` / `axiom` / `unsafe` / `native_decide` の禁止、遷移表が最新か）。Lean が要るのはこのコマンドだけ。**CI はまだない**（リポジトリに GitHub Actions がなく、Vercel のビルドには Lean がない）ので手動実行
+- **変更時のルール**: 対応する TypeScript を変えるときは (1) Lean モデルを先に変える、(2) 定理を通す。通らなくなった定理は「ルールを捨てる」ことなので黙って消さず変更内容に書く、(3) `npm run lean:export` → 突き合わせテストを通す
+- 証明中に見つかったこと: `PlaneFound` の「`found` が戻るのは安定フレーム規則だけ」は `stableFramesRequired = 0` だと成り立たない（不安定な候補でも即 `found`）。既定は 5 なので実害はないが、定理は `0 < required` を前提にしている
+
 ### コードレビュー対応 — 15 件の修正（2026-11-20、実機確認待ち）
 
 `src/` 全体のレビュー（行単位の精読 + 履歴監査 + ファイル横断 + 規約）で確定した 15 件を修正。各修正は「修正なしで失敗・修正ありで合格」のテストつき（フレーム ID の件のみコードのみ）。**PnP / RANSAC のゲート値・BA の数式・再局所化の検証値は変更していない**。単体 376 件（+11）、ブラウザ 5 件（+1）、`tsc` / `npm run build` OK。
