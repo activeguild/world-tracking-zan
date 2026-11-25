@@ -52,7 +52,7 @@ export interface ObjectFloorRecord {
   planeFlagged: number;
   young: number;
   old: number;
-  /** Median height of the neighbours above the world plane (map units; + = above). */
+  /** Median height of the neighbours above the object's own height over the world plane (map units; + = above; the origin is on the plane). */
   heightMedian: number;
   /** heightMedian / depth (the size-mismatch scale: 0.03 = the floor is 3 % of the depth away from the plane). */
   heightRatio: number;
@@ -123,8 +123,11 @@ export function objectFloorDiagnostics(
     if (!(depth > 1e-9)) continue;
     const radius = cfg.radiusDepthRatio * depth;
     const window = cfg.heightWindowDepthRatio * depth;
-    // Height of the object itself above the plane (0 for a hit-test placement; the
-    // neighbours are measured relative to the plane, not to the object).
+    // Height of the object itself above the world plane (0 on the plane; the
+    // local-floor hit test places objects on the floor the map knows, off the
+    // plane). The neighbours are measured relative to the object's own height:
+    // 0 = the object sits on the floor around it.
+    const objectHeight = up[0] * (o[0] - origin[0]) + up[1] * (o[1] - origin[1]) + up[2] * (o[2] - origin[2]);
     const heights: number[] = [];
     const young: number[] = [];
     const old: number[] = [];
@@ -134,7 +137,7 @@ export function objectFloorDiagnostics(
       const x = landmarks[k], y = landmarks[k + 1], z = landmarks[k + 2];
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
       const ex = x - origin[0], ey = y - origin[1], ez = z - origin[2];
-      const h = up[0] * ex + up[1] * ey + up[2] * ez;
+      const h = up[0] * ex + up[1] * ey + up[2] * ez - objectHeight;
       if (Math.abs(h) > window) continue;
       // Horizontal distance to the object: remove the up component of (X − o).
       const vx = x - o[0], vy = y - o[1], vz = z - o[2];

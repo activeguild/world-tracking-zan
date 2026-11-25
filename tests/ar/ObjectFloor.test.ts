@@ -260,5 +260,54 @@ describe("object-floor diagnostic through the engine and the anchor", () => {
       expect(r.localDepthRatio).toBeCloseTo(tTrue, 1);
       console.log(`[objfloor] shifted plane, object ${r.id}: height ${(r.heightRatio * 100).toFixed(2)} % (expected ${((-shift / r.depth) * 100).toFixed(2)}), local depth ×${r.localDepthRatio.toFixed(4)} (true floor at ×${tTrue.toFixed(4)}), n ${r.neighbors}`);
     }
+
+    // Local-floor hit test on the same shifted plane: the object lands on the
+    // floor the map knows (the true plane), not 3 % above it.
+    const w = resolveConfig({}).world;
+    const local = {
+      landmarks: o.landmarks,
+      landmarkCount: o.landmarkCount,
+      config: {
+        radiusDepthRatio: w.localFloorRadiusDepthRatio,
+        heightWindowDepthRatio: w.localFloorHeightWindowDepthRatio,
+        minLandmarks: w.localFloorMinLandmarks,
+        maxSpreadDepthRatio: w.localFloorMaxSpreadDepthRatio,
+      },
+    };
+    let localHits = 0;
+    const objects3: { id: number; position: number[] }[] = [];
+    taps.forEach(([u, v], j) => {
+      const flat = anchor2.hitTest(u, v, TP_K, mp)!;
+      const hit = anchor2.hitTest(u, v, TP_K, mp, local)!;
+      expect(flat.surface).toBe("plane");
+      expect(flat.position[1]).toBe(0);
+      objects3.push({ id: j + 1, position: Array.from(hit.position) });
+      const m = worldToMap(anchor2.frame!, hit.position);
+      const off = (p.normal[0] * m[0] + p.normal[1] * m[1] + p.normal[2] * m[2] + p.d) / dist;
+      const mf = worldToMap(anchor2.frame!, flat.position);
+      const offFlat = (p.normal[0] * mf[0] + p.normal[1] * mf[1] + p.normal[2] * mf[2] + p.d) / dist;
+      console.log(`[localfloor] tap ${j + 1}: ${hit.surface}${hit.fallback ? ` (${hit.fallback})` : ""} n ${hit.neighbors} h ${(hit.heightRatio * 100).toFixed(2)} % ±${(hit.spreadRatio * 100).toFixed(2)}, off the true plane ${(off * 100).toFixed(2)} % of the camera height (world-plane hit: ${(offFlat * 100).toFixed(2)} %)`);
+      expect(offFlat).toBeCloseTo(0.03, 3);
+      if (hit.surface !== "local") return;
+      localHits++;
+      // On the true plane to within 1 % of the camera height, below the shifted world plane.
+      expect(Math.abs(off)).toBeLessThan(0.01);
+      expect(hit.position[1]).toBeLessThan(0);
+      expect(hit.height).toBeCloseTo(hit.position[1], 12);
+      // Still on the tap's ray: it reprojects to the tapped pixel.
+      const R = mp.rotation, T = mp.translation;
+      const xc = R[0] * m[0] + R[1] * m[1] + R[2] * m[2] + T[0];
+      const yc = R[3] * m[0] + R[4] * m[1] + R[5] * m[2] + T[1];
+      const zc = R[6] * m[0] + R[7] * m[1] + R[8] * m[2] + T[2];
+      expect(TP_K.fx * (xc / zc) + TP_K.cx).toBeCloseTo(u, 6);
+      expect(TP_K.fy * (yc / zc) + TP_K.cy).toBeCloseTo(v, 6);
+    });
+    expect(localHits).toBeGreaterThanOrEqual(2);
+    // The diagnostic now measures the neighbours against the object's own height: ≈ 0.
+    const recs3 = objectFloorDiagnostics(o.landmarks, o.landmarkCount, anchor2.frame!, mp.rotation, mp.cameraCenter, objects3, fcfg);
+    for (const r of recs3.slice(1)) {
+      if (!Number.isFinite(r.heightRatio) || objects3[r.id - 1].position[1] === 0) continue;
+      expect(Math.abs(r.heightRatio)).toBeLessThan(0.01);
+    }
   });
 });

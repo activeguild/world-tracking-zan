@@ -10,6 +10,7 @@ import type { RelocalizationDiagnostics } from "./vision/Relocalizer";
 import type { PoseCandidateReport } from "./vision/types";
 import type { ARObject } from "./rendering/ARObject";
 import { GravityProvider, parseGravityOverride } from "./sensors/GravityProvider";
+import { GyroProvider, detectGyroAxes, type GyroAxes } from "./sensors/GyroProvider";
 import "./style.css";
 
 /**
@@ -22,6 +23,8 @@ import "./style.css";
  *   ?worker=0         run the vision engine on the main thread
  *   ?hud=0 / ?hud=1   force the initial HUD state independently of ?debug
  *   ?gravity=x,y,z    override the gravity direction (camera frame), for tests
+ *   ?localfloor=0     hit tests land on the world plane, not on the floor around the tap (A/B)
+ *   ?gyroaxes=w3c|webkit  what rotationRate alpha/beta/gamma are about (default: webkit on iOS)
  *   ?model=URL        place this GLB instead of the cube (same-origin or CORS-enabled)
  *   ?size=0.15        footprint of the model in meters (default 0.15)
  *   ?video=1          place the bundled sample video (public/sample.mp4 / .webm) as a
@@ -48,6 +51,13 @@ const hudParam = params.get("hud");
 const showHud = hudParam !== null ? hudParam === "1" : debugLog;
 const gravityOverride = parseGravityOverride(params.get("gravity"));
 const gravityProvider = new GravityProvider();
+// Phase 6 step 0: the gyro is only compared with the vision rotation (HUD `Gyro` rows).
+// ?gyroaxes=w3c|webkit overrides the per-platform axis convention (iOS = webkit).
+const gyroAxesParam = params.get("gyroaxes");
+const gyroAxes: GyroAxes = gyroAxesParam === "w3c" || gyroAxesParam === "webkit" ? gyroAxesParam : detectGyroAxes();
+// ?gyrobias=1 subtracts the bias learned during holds (off by default, see debug.gyroBiasCorrection).
+const gyroBiasCorrection = params.get("gyrobias") === "1";
+const gyroProvider = new GyroProvider({ correctBias: gyroBiasCorrection }, gyroAxes);
 const modelUrl = params.get("model");
 const modelSize = Number(params.get("size") ?? "0.15") || 0.15;
 // Sample video (ユーザー要望): ?video=1 → the bundled sample, ?video=URL → that file.
@@ -142,7 +152,7 @@ const session = new ARSession({
   frameCanvas,
   threeCanvas,
   config: {
-    debug: { log: debugLog, overlay: true },
+    debug: { log: debugLog, overlay: true, gyroBiasCorrection },
     useWorker,
     processing: {
       ...(fovDeg ? { longSideFovDeg: fovDeg } : {}),
@@ -165,10 +175,12 @@ const session = new ARSession({
     },
     world: {
       ...(assumedDist ? { assumedPlaneDistanceMeters: assumedDist } : {}),
+      ...(params.get("localfloor") === "0" ? { localFloor: false } : {}),
       ...(smoothingParam !== null ? { smoothing: smoothingParam === "1" } : {}),
     },
   },
   gravitySource: () => gravityOverride ?? gravityProvider.gravityCamera,
+  gyroSource: gyroProvider,
 });
 
 // Debug HUD on/off (v7 §15–§18): UI state only. The engine, its diagnostics
@@ -306,7 +318,8 @@ function handleGestures(events: GestureEvent[]): void {
         break;
       case "drag": {
         if (!dragging) break;
-        const hit = session.hitTest(g.x, g.y);
+        // Slide at the height the object already has (the floor is estimated on a tap, not per drag event).
+        const hit = session.hitTest(g.x, g.y, { height: dragging.position.y });
         if (hit) session.moveObject(dragging, hit);
         break;
       }
@@ -381,6 +394,8 @@ startButton.addEventListener("click", async () => {
   try {
     // Gravity needs a user gesture on iOS; start it from the click handler.
     if (!gravityOverride) await gravityProvider.start();
+    // Same DeviceMotion permission (requested just above on iOS).
+    gyroProvider.start();
     await session.start();
     startButton.style.display = "none";
   } catch (e) {
@@ -545,9 +560,12 @@ function refreshHud(): void {
     engineTiming: s.engineTiming,
     bundleAdjustment: s.bundleAdjustment,
     mainTiming: s.mainTiming,
+    gyro: s.gyro,
+    lastHit: s.lastHit,
+    gyroWarnDeg: session.config.debug.gyroWarnDeg,
     hudMs: lastHudMs,
     fastThreshold: s.fastThreshold,
-    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}`,
+    processingSize: `${s.processingWidth}x${s.processingHeight} f=${s.focalPx.toFixed(0)}${s.syncVideo ? " sync" : ""}${s.grabber ? ` grab ${s.grabber === "webgl" ? "gl" : "2d"}` : ""}${freezeMap ? " FREEZE" : ""}${refineLandmarks ? " REFINE" : ""}${bundleAdjustmentParam === "0" ? " noBA" : ""}${relinkVerify ? "" : " rawLink"}${purgeInconsistent ? "" : " noPurge"}${initRefineWithBA ? "" : " noInitBA"}${initRefineStages === 0 ? " noInitMV" : initRefineStages !== null ? ` initMV=${initRefineStages}` : ""}${reanchorProbe ? "" : " noProbe"}${anchorParam && anchorParam !== "local" ? ` anchor=${anchorParam}` : ""}${params.get("localfloor") === "0" ? " planeHit" : ""}`,
     backend: s.backend,
     motion: s.motion
       ? {

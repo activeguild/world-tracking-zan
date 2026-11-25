@@ -618,6 +618,21 @@ export interface RelocalizationConfig {
 
 /** World anchoring, hit test and rendering (spec §25–§30, §33–§34, Phase 4). */
 export interface WorldConfig {
+  /**
+   * Hit tests land on the floor the map knows around the tap instead of the
+   * world plane (recordings 45 / 46: the landmarks around the placed cube
+   * were 7–16 % of the depth below the plane, the cube floated 5–11 cm).
+   * The height is the median of the landmarks within
+   * `localFloorRadiusDepthRatio` × depth horizontally (tried at 1× and 2×)
+   * and `localFloorHeightWindowDepthRatio` × depth vertically; fewer than
+   * `localFloorMinLandmarks`, or a height spread (MAD) above
+   * `localFloorMaxSpreadDepthRatio` × depth, falls back to the world plane.
+   */
+  localFloor: boolean;
+  localFloorRadiusDepthRatio: number;
+  localFloorHeightWindowDepthRatio: number;
+  localFloorMinLandmarks: number;
+  localFloorMaxSpreadDepthRatio: number;
   /** Assumed camera→plane distance (m) when the world is created; fixes the monocular scale. */
   assumedPlaneDistanceMeters: number;
   /**
@@ -700,6 +715,34 @@ export interface DebugConfig {
   objectFloorHeightWindowDepthRatio: number;
   objectFloorMinLandmarks: number;
   objectFloorYoungFrames: number;
+  /**
+   * Vision ↔ gyro rotation diagnostic (HUD `Gyro` rows, Phase 6 step 0;
+   * nothing feeds the tracker). Sliding windows `gyroWindowsMs`; a hold is
+   * the gyro rate below `gyroStillRateDegPerSec` for `gyroStillMinMs`, and a
+   * hold → move → hold segment is reported when the gyro turned at least
+   * `gyroSegmentMinDeg`. The frame ↔ gyro time offset is searched over
+   * ± `gyroLagMaxMs` in `gyroLagStepMs` steps on the last `gyroLagWindowMs`
+   * of motion (needs `gyroLagMinMotionDeg`), every `gyroLagEveryFrames`
+   * results. Disagreements of `gyroWarnDeg` or more are highlighted.
+   */
+  gyroWindowsMs: number[];
+  gyroStillRateDegPerSec: number;
+  gyroStillMinMs: number;
+  gyroSegmentMinDeg: number;
+  gyroLagMaxMs: number;
+  gyroLagStepMs: number;
+  gyroLagWindowMs: number;
+  gyroLagMinMotionDeg: number;
+  gyroLagEveryFrames: number;
+  gyroWarnDeg: number;
+  /**
+   * Subtract the bias learned while the phone is held still. Off by default:
+   * on iOS the rates are already bias-compensated, and a slow roll of the
+   * hand below the stillness rate was learned as 0.7–0.8°/s of bias, which
+   * then showed up as 0.7°/s of disagreement at rest and 1.2–1.6° on 1.9 s
+   * hold → hold segments (recording 46). The estimate is still reported.
+   */
+  gyroBiasCorrection: boolean;
 }
 
 /**
@@ -1082,6 +1125,11 @@ export const DEFAULT_CONFIG: ARConfig = {
     // Unused since v13 (objects hide on the engine's own lost hysteresis).
     holdPoseOnLostMs: 10000,
     relocGuidanceDelayMs: 2000,
+    localFloor: true,
+    localFloorRadiusDepthRatio: 0.1,
+    localFloorHeightWindowDepthRatio: 0.25,
+    localFloorMinLandmarks: 6,
+    localFloorMaxSpreadDepthRatio: 0.05,
     sidewaysGuidanceDelayMs: 1500,
     smoothing: false,
     // Light smoothing: with the displayed frame synchronized to the pose,
@@ -1145,6 +1193,17 @@ export const DEFAULT_CONFIG: ARConfig = {
     objectFloorHeightWindowDepthRatio: 0.25,
     objectFloorMinLandmarks: 5,
     objectFloorYoungFrames: 30,
+    gyroWindowsMs: [1000, 3000],
+    gyroStillRateDegPerSec: 3,
+    gyroStillMinMs: 250,
+    gyroSegmentMinDeg: 3,
+    gyroLagMaxMs: 200,
+    gyroLagStepMs: 10,
+    gyroLagWindowMs: 2000,
+    gyroLagMinMotionDeg: 5,
+    gyroLagEveryFrames: 5,
+    gyroWarnDeg: 0.5,
+    gyroBiasCorrection: false,
   },
   useWorker: true,
 };
@@ -1175,7 +1234,7 @@ export function resolveConfig(overrides?: PartialARConfig): ARConfig {
       rotationSmoothing: { ...base.world.rotationSmoothing, ...overrides.world?.rotationSmoothing },
     },
     state: { ...base.state, ...overrides.state },
-    debug: { ...base.debug, ...overrides.debug },
+    debug: { ...base.debug, ...overrides.debug, gyroWindowsMs: (overrides.debug?.gyroWindowsMs as number[] | undefined) ?? base.debug.gyroWindowsMs },
     useWorker: overrides.useWorker ?? base.useWorker,
   };
 }

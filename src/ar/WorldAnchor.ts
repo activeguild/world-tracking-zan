@@ -8,7 +8,8 @@ import {
   type WorldFrame,
 } from "../math/CoordinateSystem";
 import { applyTransform, type RigidTransform } from "../math/Pose";
-import { intersectRayPlane, pixelRay, transformRay } from "../math/Ray";
+import { pixelRay, transformRay } from "../math/Ray";
+import { localFloorHit, type LocalFloorConfig } from "./LocalFloor";
 import { transpose3 } from "../math/Decomposition";
 import { mat3Multiply } from "../math/Matrix";
 
@@ -38,6 +39,25 @@ export interface HitResult {
   normal: Float64Array;
   /** Distance from the camera along the ray (meters). */
   distance: number;
+  /**
+   * Surface the point lies on: the world plane, or the floor the map knows
+   * around the hit (same normal, `height` above the plane; recordings 45 / 46).
+   */
+  surface: "plane" | "local" | "fixed";
+  /** Height of that surface above the world plane (meters; 0 on the plane). */
+  height: number;
+  /** Landmarks that decided the local height, their spread and the hit depth (map units), and why the plane was used. */
+  neighbors: number;
+  spreadRatio: number;
+  heightRatio: number;
+  fallback: string;
+}
+
+/** Landmarks and settings for the local-floor hit test. */
+export interface LocalFloorInput {
+  landmarks: Float32Array;
+  landmarkCount: number;
+  config: LocalFloorConfig;
 }
 
 export interface WorldAnchorConfig {
@@ -151,7 +171,7 @@ export class WorldAnchor {
    * Hit test: pixel in processing-image coordinates → world point on the
    * plane Y = 0.
    */
-  hitTest(u: number, v: number, k: CameraIntrinsics, mapPose: MapPoseOutput): HitResult | null {
+  hitTest(u: number, v: number, k: CameraIntrinsics, mapPose: MapPoseOutput, local?: LocalFloorInput | null, fixedHeightMeters?: number): HitResult | null {
     if (!this.world) return null;
     const cam = toRigid(mapPose);
     // Ray in camera frame → map frame (X_map = Rᵀ (X_cam − t)).
@@ -164,16 +184,29 @@ export class WorldAnchor {
       -(rt[6] * t[0] + rt[7] * t[1] + rt[8] * t[2]),
     ];
     const rayMap = transformRay(rayCam, rt, cMap);
-    // Plane in the map frame: up · (X − origin) = 0  →  n = up, d = −up·origin
+    // World plane in the map frame: up · (X − origin) = 0. With landmarks the
+    // ray meets the floor the map knows around the hit instead (same normal,
+    // shifted along it); without enough of them, the world plane.
     const up = this.world.plane.up;
     const o = this.world.plane.origin;
-    const d = -(up[0] * o[0] + up[1] * o[1] + up[2] * o[2]);
-    const hit = intersectRayPlane(rayMap, up, d);
+    const r = cam.rotation;
+    const hit = localFloorHit(rayMap.origin, rayMap.direction, [r[6], r[7], r[8]], up, o, local?.landmarks ?? null, local?.landmarkCount ?? 0, local?.config ?? null, fixedHeightMeters !== undefined ? fixedHeightMeters / this.world.scale : undefined);
     if (!hit) return null;
     const position = mapToWorld(this.world, hit.point);
-    position[1] = 0; // exactly on the plane
+    position[1] = hit.height * this.world.scale; // exactly on the surface used
     const normal = mapDirToWorld(this.world, up);
-    return { position, normal, distance: hit.t * this.world.scale };
+    const dl = Math.hypot(rayMap.direction[0], rayMap.direction[1], rayMap.direction[2]);
+    return {
+      position,
+      normal,
+      distance: hit.t * dl * this.world.scale,
+      surface: hit.surface,
+      height: hit.height * this.world.scale,
+      neighbors: hit.neighbors,
+      spreadRatio: hit.spread / hit.depth,
+      heightRatio: hit.height / hit.depth,
+      fallback: hit.fallback,
+    };
   }
 
   /** Map point → world point (for debug rendering of landmarks). */

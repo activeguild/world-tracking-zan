@@ -390,7 +390,8 @@ describe("Phase 1 browser smoke test", () => {
     expect(result.placed).toBe(1);
     expect(result.state).toBe("AR_ACTIVE");
     expect(result.object.kind).toBe("video");
-    expect(Math.abs(result.object.position[1])).toBeLessThan(1e-6);
+    // On the floor the map knows around the tap (local-floor hit test): within 2 cm of the world plane here.
+    expect(Math.abs(result.object.position[1])).toBeLessThan(0.02);
     expect(result.object.scale).toBe(1);
     // The sample is a 16:9 clip (public/sample.mp4 / .webm).
     expect(result.videoWidth / result.videoHeight).toBeCloseTo(16 / 9, 2);
@@ -515,7 +516,8 @@ describe("Phase 1 browser smoke test", () => {
       }
       // The last move and the reference hit test share one pose (the synthetic camera keeps moving between ticks).
       fire("pointermove", 1, cx + 80, cy);
-      const expected = window.__ar.session.hitTest(cx + 80, cy);
+      // The drag slides at the height the cube was placed at (the floor is not re-estimated per drag event).
+      const expected = window.__ar.session.hitTest(cx + 80, cy, { height: before.position[1] });
       await wait();
       fire("pointerup", 1, cx + 80, cy);
       await wait();
@@ -661,7 +663,7 @@ describe("Phase 1 browser smoke test", () => {
 
     // Phase 4
     expect(placement.hit, "hit test on the found plane").not.toBeNull();
-    expect(Math.abs(placement.hit!.y)).toBeLessThan(1e-6);
+    expect(Math.abs(placement.hit!.y)).toBeLessThan(0.02 * placement.hit!.distance);
     expect(placement.hit!.distance).toBeGreaterThan(0.1);
     expect(placement.placed).toBe(1);
     expect(placement.state).toBe("AR_ACTIVE");
