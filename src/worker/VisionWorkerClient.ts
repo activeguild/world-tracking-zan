@@ -95,8 +95,15 @@ export class VisionWorkerClient implements VisionBackend {
       this.worker = worker;
       let ready = false;
       worker.onerror = (ev) => {
-        if (!ready) reject(new Error(`VisionWorker failed to start: ${ev.message}`));
-        else this.onError?.(ev.message);
+        if (!ready) {
+          reject(new Error(`VisionWorker failed to start: ${ev.message}`));
+          return;
+        }
+        // An exception no handler in the worker caught: the frame in flight
+        // (if any) died with it and no result will come. Without this the
+        // client stayed busy and no frame was ever sent again.
+        this._busy = false;
+        this.onError?.(ev.message);
       };
       worker.onmessage = (ev: MessageEvent<WorkerResponse>) => {
         const msg = ev.data;
@@ -138,7 +145,9 @@ export class VisionWorkerClient implements VisionBackend {
             });
             return;
           case "error":
-            this._busy = false;
+            // Only a frame's failure ends the flight (it carries the frame id);
+            // a failed reset leaves the frame behind it in flight.
+            if (msg.frameId !== undefined) this._busy = false;
             this.onError?.(msg.message, msg.gray);
             return;
         }

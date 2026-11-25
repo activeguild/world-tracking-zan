@@ -6,7 +6,8 @@ import { TrackingState } from "./ARState";
  *
  * Lost → objects hidden (transform kept, map / world anchor / keyframes
  * kept, relocalization continues) → relocalizing hidden → candidate applied
- * and still being confirmed (post-relocalization monitor) hidden → world
+ * and still being confirmed (post-relocalization monitor) hidden, unless the
+ * objects were still shown (a dropout inside the tolerance) → world
  * tracking with a fresh map pose → visible. The decision is pure so it can
  * be unit-tested; `ARWorld` applies it idempotently.
  *
@@ -66,8 +67,11 @@ export function decideObjectVisibility(i: ObjectVisibilityInput): ObjectVisibili
   }
   if (!i.poseFinite) return { visible: false, reason: "POSE_INVALID" };
   // A relocalized pose is applied first and confirmed over the following
-  // frames; nothing is shown until that window closes (§7–§9, §22, §26).
-  if (i.relocalized) return { visible: false, reason: "CONFIRMING" };
+  // frames; showing never starts until that window closes (§7–§9, §22, §26).
+  // Objects that are still shown (a PnP dropout inside the tolerance) are not
+  // hidden by it: a verified relocalization must not look worse than a plain
+  // PnP recovery in the same window (quint/tracking.qnt shownThroughRelocalization).
+  if (i.relocalized && !i.currentlyVisible) return { visible: false, reason: "CONFIRMING" };
   if (i.framesSinceTracked === 0) return { visible: true, reason: "TRACKING_ACTIVE" };
   // A short PnP dropout the state machine still tolerates: keep what is shown
   // (no flicker), but never *start* showing on a held pose.

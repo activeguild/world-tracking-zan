@@ -9,6 +9,7 @@ export default defineConfig({
     "src/vision/PoseValidation.ts",
     "src/vision/InitStageValidation.ts",
     "src/vision/RelocalizationSchedule.ts",
+    "src/vision/RelocalizationLedger.ts",
     "src/vision/PlaneRecovery.ts",
   ],
   runner: "vitest",

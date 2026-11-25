@@ -303,6 +303,8 @@ export class ARSession {
    * and as identity (keyframe gaps, landmark ages, "this frame" tests).
    */
   private nextFrameId = 0;
+  /** Results of frames below this id were computed before the last `reset()`. */
+  private resetBeforeFrameId = 0;
 
   private _state: TrackingState = TrackingState.INITIALIZING;
   private readonly listeners: { [K in keyof ARSessionEvents]: Set<Listener<K>> } = {
@@ -453,12 +455,18 @@ export class ARSession {
    */
   start(): Promise<void> {
     if (this.running) return Promise.resolve();
-    if (this.starting) return this.starting;
+    if (this.starting) {
+      // start() after a stop() that the start in flight has not acted on yet:
+      // the last call wins, the start goes on (it used to resolve stopped).
+      this.stopRequested = false;
+      return this.starting;
+    }
     this.stopRequested = false;
-    this.starting = this.doStart().finally(() => {
-      this.starting = null;
+    const p: Promise<void> = this.doStart().finally(() => {
+      if (this.starting === p) this.starting = null;
     });
-    return this.starting;
+    this.starting = p;
+    return p;
   }
 
   private async doStart(): Promise<void> {
@@ -470,7 +478,7 @@ export class ARSession {
       throw err;
     }
     if (this.stopRequested) {
-      this.releaseResources();
+      this.abortStart();
       return;
     }
 
@@ -485,6 +493,7 @@ export class ARSession {
       this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
       this.grabSamplesMs = [];
       this.nextFrameId = 0;
+      this.resetBeforeFrameId = 0;
       this.grabDecided = this.config.processing.grabber !== "auto";
       this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
       // The projection is cached per viewport size; new intrinsics need a rebuild.
@@ -507,7 +516,7 @@ export class ARSession {
       throw err;
     }
     if (this.stopRequested) {
-      this.releaseResources();
+      this.abortStart();
       return;
     }
     this.backend.onResult = (r) => this.handleResult(r);
@@ -534,6 +543,17 @@ export class ARSession {
     this.renderer?.resize();
     this.scheduleFrame();
     this.emit("started");
+  }
+
+  /**
+   * stop() during the start: release what it acquired. The start is over
+   * from here on, so a start() called before the promise settles begins a
+   * new one instead of joining this one.
+   */
+  private abortStart(): void {
+    this.releaseResources();
+    this.stopRequested = false;
+    this.starting = null;
   }
 
   /** Camera, backend and grabber of a run (or of a start that did not complete). */
@@ -767,6 +787,9 @@ export class ARSession {
 
   /** Forget all tracks and restart from INITIALIZING (keeps the camera running). */
   reset(): void {
+    // The worker handles messages in order: a frame sent before this point is
+    // processed by the engine as it was before the reset.
+    this.resetBeforeFrameId = this.nextFrameId;
     this.backend?.reset();
     this.setState(TrackingState.INITIALIZING);
   }
@@ -1048,6 +1071,9 @@ export class ARSession {
   private handleResult(r: VisionResult): void {
     if (!this.running) return;
     this.grabber?.release(r.grayBuffer);
+    // In flight when reset() was called: computed by the engine before the
+    // reset, so it is not applied (state, pose, world) after it.
+    if (r.frameId < this.resetBeforeFrameId) return;
     this.framesProcessed++;
     this.poseFrameId = r.frameId;
     const arrived = performance.now();
@@ -1076,6 +1102,27 @@ export class ARSession {
     this.bundleAdjustment = r.bundleAdjustment;
     this.initRefinement = r.initRefinement;
     this.worldChangeReason = "none";
+    // Map corrections of this frame, in the order the engine made them: the
+    // init stage first, then the keyframe BA (VisionEngine.updateMap). Rigid
+    // corrections do not commute, so the anchor follows in that same order
+    // (quint/mapcorrection.qnt: anchorFollowsMap).
+    // v25: an accepted multi-view init stage re-constrained the init map;
+    // the world anchor follows its correction (once, this frame).
+    const st = r.initRefinement?.lastStage;
+    if (st && st.frameId === r.frameId) {
+      let anchorMoved = false;
+      if (st.applied) this.gyroComparer.applyMapCorrection(st.correctionRotation);
+      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
+        if (anchorMoved) this.worldChangeReason = "init_stage";
+      }
+      if (this.config.debug.log) {
+        const t = st.correctionTranslation;
+        this.logger.info(
+          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
+    }
     if (r.bundleAdjustment.ranThisFrame) {
       const b = r.bundleAdjustment;
       // v18: the map moved under the camera; move the world frame with it so
@@ -1096,23 +1143,6 @@ export class ARSession {
             `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
             `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}° ` +
             `correction ${corr.toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
-        );
-      }
-    }
-    // v25: an accepted multi-view init stage re-constrained the init map;
-    // the world anchor follows its correction the same way (once, this frame).
-    const st = r.initRefinement?.lastStage;
-    if (st && st.frameId === r.frameId) {
-      let anchorMoved = false;
-      if (st.applied) this.gyroComparer.applyMapCorrection(st.correctionRotation);
-      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
-        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
-        if (anchorMoved) this.worldChangeReason = "init_stage";
-      }
-      if (this.config.debug.log) {
-        const t = st.correctionTranslation;
-        this.logger.info(
-          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
         );
       }
     }
@@ -1373,6 +1403,8 @@ export class ARSession {
       this.world.setWorldReady(false);
       this.arCamera.resetSmoothing();
       this.worldChangeReason = "map_reset";
+      // Nothing is shown without a world (the placed objects went with it).
+      this.objectVisibility = { visible: false, reason: "WORLD_NOT_READY" };
       this.logger.info("world lost (map reset)");
       this.emit("worldLost");
     }
@@ -1380,8 +1412,16 @@ export class ARSession {
     // first PLANE_FOUND; the same plane is the reference of the plane-relative
     // pose, so world and pose share one definition). Without plane tracking
     // the first found plane is used directly.
+    //
+    // Only once the engine has established the world (its tracking state
+    // reached PLANE_FOUND for this map): the detector can report a plane in a
+    // frame the state machine does not accept (too few inliers, still lost),
+    // and a world the engine does not know about is one it neither
+    // relocalizes into nor keeps — it re-initializes the map after a short
+    // loss and the session would drop the world and whatever was placed in
+    // it (quint/tracking.qnt: worldAgrees).
     const anchorPlane = r.planeAnchor ?? (r.plane?.found ? r.plane : null);
-    if (!this.worldAnchor.isReady && anchorPlane && r.mapPose) {
+    if (!this.worldAnchor.isReady && anchorPlane && r.mapPose && r.worldEstablished) {
       if (this.worldAnchor.create(anchorPlane, r.mapPose)) {
         this.worldChangeReason = "created";
         const scale = this.worldAnchor.frame!.scale;
@@ -1392,6 +1432,11 @@ export class ARSession {
         // shown right now follows the debug HUD toggle.
         this.world.showPlaneGrid(extent, this.config.debug.overlay && this.config.world.showPlaneGrid);
         this.world.setPlaneGridVisible(this.debugVisualization);
+        // A new world starts hidden: showing begins on a frame whose pose
+        // came from the map (decided below), never on a held pose — also in
+        // the frame the world is created (quint/tracking.qnt: showStartsOnFreshPose).
+        this.world.setObjectsVisible(false);
+        this.objectVisibility = { visible: false, reason: "WORLD_NOT_READY" };
         this.arCamera.resetSmoothing();
         this.logger.info(`world ready scale=${scale.toFixed(3)} m/unit grid=${extent.toFixed(2)} m`);
         this.emit("worldReady");

@@ -13,14 +13,13 @@ import { PlaneRecovery, emptyPlaneRecovery, significantTwoViewMotion } from "./P
 import { PlaneTracker } from "./PlaneTracker";
 import { PoseEstimator, type RelativePose } from "./PoseEstimator";
 import { Relocalizer, requiredConfirmations, spatialCellCount, type RelocalizationDiagnostics, type RelocalizationResult } from "./Relocalizer";
+import { RelocalizationLedger } from "./RelocalizationLedger";
 import {
   advanceTimeline,
   candidateAction,
-  candidateStale,
   completeTimeline,
   emptyRelocalizationTimeline,
   type RelocalizationTimeline,
-  shouldAttemptRelocalization,
   shouldPrepareRelocalization,
 } from "./RelocalizationSchedule";
 import { isJumpRejection, poseDelta } from "./PoseValidation";
@@ -156,20 +155,20 @@ export class VisionEngine {
   private lastPoseSource: MapPoseOutput["source"] = "propagated";
   /** Pose source of the last ~50 frames (debug, v3 §21). */
   private sourceHistory = "";
-  /** Failed relocalization attempts since the camera was last located (world-reset condition, v3 §16). */
-  private relocAttemptsSinceLost = 0;
 
   // Phase 5: keyframes + relocalization.
   private readonly relocalizer: Relocalizer;
   private relocStatus: RelocalizationOutput = emptyReloc();
   private relocSuccessCount = 0;
   private relocLastSuccessFrame = -1;
-  /** Validated candidate waiting to be reproduced in the next frame (v5 §10–§11). */
-  private pendingReloc: { result: RelocalizationResult; frameId: number; confirmations: number } | null = null;
+  /**
+   * Pending candidate (v5 §10–§11), failed attempts since the camera was last
+   * located (v3 §16), monitor window, map-reset rule — see RelocalizationLedger.
+   */
+  private readonly relocLedger: RelocalizationLedger<RelocalizationResult>;
   /** Map-PnP-vs-relocalized-pose watch for the frames after a relocalization (v5 §16–§17). */
   private relocMonitor: {
     pose: RigidTransform;
-    framesLeft: number;
     maxDeltaTranslation: number;
     maxDeltaRotationDeg: number;
     inconsistent: boolean;
@@ -245,6 +244,15 @@ export class VisionEngine {
     this.planeDetector = new PlaneDetector(config.plane, rng);
     this.planeTracker = new PlaneTracker(config.planeTracking);
     this.relocalizer = new Relocalizer(config.relocalization, config.tracker);
+    this.relocLedger = new RelocalizationLedger({
+      startAfterLostFrames: config.relocalization.startAfterLostFrames,
+      attemptEveryNFrames: config.relocalization.attemptEveryNFrames,
+      candidateMaxAgeFrames: config.relocalization.candidateMaxAgeFrames,
+      postRelocMonitorFrames: config.relocalization.postRelocMonitorFrames,
+      minAttemptsBeforeReset: config.relocalization.minAttemptsBeforeReset,
+      lostResetFrames: config.landmarks.lostResetFrames,
+      preWorldLostResetFrames: config.landmarks.preWorldLostResetFrames,
+    });
     // v20: re-associations are confirmed against the keyframes' image
     // pyramids. `curPyramid` is the frame being processed while the map
     // tracker runs (the swap happens at the end of process()).
@@ -366,7 +374,6 @@ export class VisionEngine {
     this.lastPlanePose = null;
     this.lastPoseSource = "propagated";
     this.sourceHistory = "";
-    this.relocAttemptsSinceLost = 0;
     this.lastMapPose = null;
     this.lastPlane = null;
     this.packedLandmarkCount = 0;
@@ -374,7 +381,7 @@ export class VisionEngine {
     this.relocStatus = emptyReloc();
     this.relocSuccessCount = 0;
     this.relocLastSuccessFrame = -1;
-    this.pendingReloc = null;
+    this.relocLedger.clear();
     this.relocMonitor = null;
     this.lastRelocalized = false;
     this.relocDiagnostics = null;
@@ -651,6 +658,22 @@ export class VisionEngine {
     st.correctionTranslation.set(corrTrans);
     st.anchorFitLandmarks = anchorFitLandmarks;
     tracker.recordInitStage(st);
+    // The session moves the world anchor by this correction when the result
+    // arrives. A keyframe BA later in this same frame fits its own correction
+    // around the anchor points, so they move along now: left where the frame
+    // brought them, they would be points of the map as it was before the
+    // stage (quint/mapcorrection.qnt: anchorPointsFresh).
+    const ap = this.anchorPoints;
+    if (ap) {
+      const moved = new Array<number>(ap.length);
+      for (let a = 0; a + 2 < ap.length; a += 3) {
+        const x = ap[a], y = ap[a + 1], z = ap[a + 2];
+        moved[a] = corrRot[0] * x + corrRot[1] * y + corrRot[2] * z + corrTrans[0];
+        moved[a + 1] = corrRot[3] * x + corrRot[4] * y + corrRot[5] * z + corrTrans[1];
+        moved[a + 2] = corrRot[6] * x + corrRot[7] * y + corrRot[8] * z + corrTrans[2];
+      }
+      this.anchorPoints = moved;
+    }
     const corr = Math.hypot(corrTrans[0], corrTrans[1], corrTrans[2]);
     log(
       `applied: baseline ×${st.baselineRatio.toFixed(2)}, parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px in ${st.iterations} it (reference view ${st.referenceErrorAfterPx.toFixed(2)} px), pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u (dir ${directionDeg.toFixed(2)}°), max landmark shift ${st.maxLandmarkShift.toFixed(3)} u, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, keyframes re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}${kfPlan.plans.filter((p) => p.outcome === "propagated").map((p) => ` KF${p.kf.id}:${p.skip}`).join("")}, anchor correction ${corr.toFixed(4)} u (${anchorFitLandmarks ? `local fit on ${anchorFitLandmarks}` : "pose"})`,
@@ -1202,8 +1225,8 @@ export class VisionEngine {
       framesSinceAttempt: this.relocDiagnostics ? ++this.relocDiagnosticsAge : -1,
       searchStage: this.relocDiagnostics ? this.relocDiagnostics.searchStage : "idle",
       preparedAgeFrames: this.relocPreparedFrame >= 0 ? frameId - this.relocPreparedFrame : -1,
-      pendingKeyframeId: this.pendingReloc ? this.pendingReloc.result.keyframeId : -1,
-      candidateAgeFrames: this.pendingReloc ? frameId - this.pendingReloc.frameId : -1,
+      pendingKeyframeId: this.relocLedger.pending ? this.relocLedger.pending.candidate.keyframeId : -1,
+      candidateAgeFrames: this.relocLedger.pending ? frameId - this.relocLedger.pending.frameId : -1,
       timeline: this.relocTimeline,
     };
     let relocalizedNow = false;
@@ -1254,32 +1277,21 @@ export class VisionEngine {
       // temporal gate is not used here (a correct return after a loss can be
       // far from the held pose, v5 §9); the delta is diagnostic only.
       const rc = this.config.relocalization;
-      let pending = this.pendingReloc;
+      const ledger = this.relocLedger;
       // Relocalization only returns to an *established* world (v10 §2, §9):
       // before a plane fixed the world there is nothing to go back to, the
       // user may be scanning somewhere else on purpose, and the map is
       // re-initialized there instead (reset below).
-      if (tracker.framesSinceTracked === 0 || !this.worldEstablished) {
-        this.pendingReloc = null;
-        pending = null;
-      }
+      const start = ledger.begin(frameId, tracker.framesSinceTracked, this.worldEstablished);
+      const pending = start.pending;
       // v14 §43–§44: a candidate that was not confirmed within its age limit
       // is stale — never applied as the current pose, recomputed instead.
-      if (pending && candidateStale(pending.frameId, frameId, rc.candidateMaxAgeFrames)) {
+      if (start.stale) {
         this.relocStatus.rejectCode = "stale_candidate";
-        this.relocStatus.reason = `candidate from frame ${pending.frameId} is ${frameId - pending.frameId} frames old (> ${rc.candidateMaxAgeFrames})`;
+        this.relocStatus.reason = `candidate from frame ${start.stale.frameId} is ${frameId - start.stale.frameId} frames old (> ${rc.candidateMaxAgeFrames})`;
         this.relocStatus.attempt = "fail";
-        this.relocAttemptsSinceLost++;
-        this.pendingReloc = null;
-        pending = null;
       }
-      const attempt = shouldAttemptRelocalization({
-        worldEstablished: this.worldEstablished,
-        framesSinceTracked: tracker.framesSinceTracked,
-        startAfterLostFrames: rc.startAfterLostFrames,
-        attemptEveryNFrames: rc.attemptEveryNFrames,
-        pending: pending !== null,
-      });
+      const attempt = start.attempt;
       if (attempt) {
         const tr0 = now();
         // The held pose and scene depth feed the relocalization-specific jump
@@ -1289,7 +1301,7 @@ export class VisionEngine {
         const r = this.relocalizer.relocalize(this.curPyramid, tracker.map, k, tracker.pose, tracker.sceneDepth, {
           frameId,
           firstAttempt: this.relocTimeline !== null && this.relocTimeline.attempts === 0,
-          preferKeyframeId: pending ? pending.result.keyframeId : undefined,
+          preferKeyframeId: pending ? pending.candidate.keyframeId : undefined,
           // v16: the held pose is dead-reckoned while lost; after a long loss
           // the jump limits vs it are diagnostic only.
           lostFrames: tracker.framesSinceTracked,
@@ -1318,52 +1330,47 @@ export class VisionEngine {
           jumpTranslation: d.translation,
           jumpRotationDeg: d.rotationDeg,
         };
-        let apply = false;
-        if (r.success && r.pose) {
-          // v12 §10–§11: an acceptable candidate (error above the strict bound)
-          // is never applied at once — it needs at least one confirmation
-          // frame whatever the immediate-apply rule says.
-          const level: "strong" | "acceptable" = r.level === "acceptable" ? "acceptable" : "strong";
-          const needed = requiredConfirmations(level, rc.confirmationFrames);
-          const immediate = candidateAction(level, r.inlierCount, r.meanReprojectionErrorPx, rc, needed) === "apply";
-          if (pending) {
-            // Confirmation: the new candidate must land where the pending one did.
-            const c = poseDelta(r.pose, pending.result.pose!);
-            const depth = tracker.sceneDepth;
-            const near =
-              c.translation <= rc.confirmTranslationDepthRatio * Math.max(depth, 1e-9) && c.rotationDeg <= rc.confirmRotationDeg;
-            if (near) {
-              pending.confirmations++;
-              apply = pending.confirmations >= needed;
-            } else {
-              this.relocStatus.reason = `confirmation failed: Δ ${c.translation.toFixed(3)} / ${c.rotationDeg.toFixed(1)}° vs frame ${pending.frameId}`;
-              this.relocStatus.rejectCode = "confirmation_failed";
-              this.relocStatus.attempt = "fail";
-              this.relocAttemptsSinceLost++;
-              // The newer candidate starts its own confirmation.
-              this.pendingReloc = { result: r, frameId, confirmations: 0 };
-            }
-          } else if (immediate) {
-            apply = true;
-          } else {
-            this.pendingReloc = { result: r, frameId, confirmations: 0 };
-          }
-        } else {
-          this.relocAttemptsSinceLost++;
-          if (pending) {
-            // A candidate that cannot be reproduced in the next frame is dropped.
-            this.relocStatus.rejectCode = "confirmation_failed";
-            this.relocStatus.reason = `confirmation failed: ${r.reason ?? "no candidate"}`;
-            this.pendingReloc = null;
-          }
+        let near = false;
+        let confirmDelta = { translation: 0, rotationDeg: 0 };
+        if (r.success && r.pose && pending) {
+          // Confirmation: the new candidate must land where the pending one did.
+          confirmDelta = poseDelta(r.pose, pending.candidate.pose!);
+          near =
+            confirmDelta.translation <= rc.confirmTranslationDepthRatio * Math.max(tracker.sceneDepth, 1e-9) &&
+            confirmDelta.rotationDeg <= rc.confirmRotationDeg;
         }
+        // v12 §10–§11: an acceptable candidate (error above the strict bound)
+        // is never applied at once — it needs at least one confirmation
+        // frame whatever the immediate-apply rule says.
+        const level: "strong" | "acceptable" = r.level === "acceptable" ? "acceptable" : "strong";
+        const needed = requiredConfirmations(level, rc.confirmationFrames);
+        const outcome = ledger.settle(
+          frameId,
+          r.success && r.pose
+            ? {
+                candidate: r,
+                requiredConfirmations: needed,
+                immediate: candidateAction(level, r.inlierCount, r.meanReprojectionErrorPx, rc, needed) === "apply",
+                nearPending: near,
+              }
+            : null,
+        );
+        if (outcome === "confirmation_moved") {
+          this.relocStatus.reason = `confirmation failed: Δ ${confirmDelta.translation.toFixed(3)} / ${confirmDelta.rotationDeg.toFixed(1)}° vs frame ${pending!.frameId}`;
+          this.relocStatus.rejectCode = "confirmation_failed";
+          this.relocStatus.attempt = "fail";
+        } else if (outcome === "confirmation_lost") {
+          // A candidate that cannot be reproduced in the next frame is dropped.
+          this.relocStatus.rejectCode = "confirmation_failed";
+          this.relocStatus.reason = `confirmation failed: ${r.reason ?? "no candidate"}`;
+        }
+        const apply = outcome === "apply";
         if (apply && r.pose) {
           // Re-seeds the canonical pose; from the next frame on the map PnP is
           // gated against it again and compared with it (monitor below).
           tracker.applyRelocalization(r.pose);
           this.injectRelocalizedTracks(r.tracks, frameId, r.pose);
           rotationPrior = null; // the relocalized pose is the prior
-          this.pendingReloc = null;
           relocalizedNow = true;
           this.relocSuccessCount++;
           this.relocLastSuccessFrame = frameId;
@@ -1372,7 +1379,6 @@ export class VisionEngine {
           this.relocStatus.successCount = this.relocSuccessCount;
           this.relocMonitor = {
             pose: { rotation: Float64Array.from(r.pose.rotation), translation: Float64Array.from(r.pose.translation) },
-            framesLeft: rc.postRelocMonitorFrames,
             maxDeltaTranslation: 0,
             maxDeltaRotationDeg: 0,
             inconsistent: false,
@@ -1383,9 +1389,9 @@ export class VisionEngine {
           if (this.relocTimeline) completeTimeline(this.relocTimeline, frameId, input.timestamp);
         }
         // v14 §24: the stage the search stands at after this attempt.
-        this.relocStatus.searchStage = relocalizedNow ? "applied" : this.pendingReloc ? "confirming" : r.diagnostics.searchStage;
-        this.relocStatus.pendingKeyframeId = this.pendingReloc ? this.pendingReloc.result.keyframeId : -1;
-        this.relocStatus.candidateAgeFrames = this.pendingReloc ? frameId - this.pendingReloc.frameId : -1;
+        this.relocStatus.searchStage = relocalizedNow ? "applied" : ledger.pending ? "confirming" : r.diagnostics.searchStage;
+        this.relocStatus.pendingKeyframeId = ledger.pending ? ledger.pending.candidate.keyframeId : -1;
+        this.relocStatus.candidateAgeFrames = ledger.pending ? frameId - ledger.pending.frameId : -1;
       }
 
       // Plane-relative pose (experimental): a *candidate* for the canonical
@@ -1414,10 +1420,10 @@ export class VisionEngine {
       // following frames must agree with the relocalized pose up to the
       // camera's own motion; a jump-rejected or far-off solve means the
       // relocalization itself is suspect.
+      const watch = ledger.afterTracking(res.tracked);
       const mon = this.relocMonitor;
-      monitoredThisFrame = mon !== null;
-      if (mon && !relocalizedNow) {
-        mon.framesLeft--;
+      monitoredThisFrame = watch.monitored;
+      if (mon && watch.watch) {
         if (sel.map) {
           const dm = poseDelta(tracker.pose, mon.pose);
           mon.maxDeltaTranslation = Math.max(mon.maxDeltaTranslation, dm.translation);
@@ -1427,7 +1433,7 @@ export class VisionEngine {
         this.relocStatus.postDeltaTranslation = mon.maxDeltaTranslation;
         this.relocStatus.postDeltaRotationDeg = mon.maxDeltaRotationDeg;
         this.relocStatus.postInconsistent = mon.inconsistent;
-        if (mon.framesLeft <= 0) this.relocMonitor = null;
+        if (!ledger.monitoring) this.relocMonitor = null;
       }
       // v14 §45: a lost episode starts on the first frame the map PnP does
       // not locate the camera after it did (the timeline is measured from
@@ -1438,7 +1444,6 @@ export class VisionEngine {
       }
       this.prevFramesSinceTracked = tracker.framesSinceTracked;
       if (res.tracked) {
-        this.relocAttemptsSinceLost = 0;
         if (!relocalizedNow) {
           // Tracking again: the lost-episode diagnostics are over.
           this.relocDiagnostics = null;
@@ -1511,12 +1516,7 @@ export class VisionEngine {
           // poses and the landmarks they observe one consistent map.
           if (this.config.bundleAdjustment.enabled) this.runBundleAdjustment(k, frameId);
         }
-      } else if (
-        this.worldEstablished
-          ? tracker.framesSinceTracked > cfg.lostResetFrames &&
-            this.relocAttemptsSinceLost >= this.config.relocalization.minAttemptsBeforeReset
-          : tracker.framesSinceTracked > cfg.preWorldLostResetFrames
-      ) {
+      } else if (ledger.shouldResetMap(this.worldEstablished)) {
         // Established world: reset is the last resort (v3 §12, §16) — long
         // loss AND enough failed relocalization attempts; a short loss keeps
         // map, world and objects while the camera holds its last good pose.
@@ -1529,8 +1529,10 @@ export class VisionEngine {
         this.lastPlaneAnchor = null;
         this.relocalizer.reset();
         this.resetBundleAdjustmentState();
-        this.relocAttemptsSinceLost = 0;
-        this.pendingReloc = null;
+        ledger.clear();
+        // World tracking does not outlive its map: with the loss measured by
+        // the PnP the reset can come while the state is still PLANE_FOUND.
+        this.stateMachine.mapDropped();
         this.relocMonitor = null;
         this.relocDiagnostics = null;
         this.relocTimeline = null;

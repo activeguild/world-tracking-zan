@@ -17,9 +17,12 @@
     "mutate:diff": "mutator --since origin/main --include-test-changes",
     "mutate:ci": "mutator --fail-on-survived",
     "lean:check": "bash scripts/lean-check.sh",
-    "lean:export": "cd lean && lake build conformance && lake exe conformance > conformance/tracking-state.json"
+    "lean:export": "cd lean && lake build conformance && lake exe conformance > conformance/tracking-state.json",
+    "quint:check": "bash scripts/quint-check.sh",
+    "quint:export": "node scripts/quint-traces.mjs"
   },
   "devDependencies": {
+    "@informalsystems/quint": "0.34.0",
     "@mizchi/mutator": "0.5.5",
     "@types/node": "^22.0.0",
     "@types/three": "^0.186.0",

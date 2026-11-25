@@ -64,6 +64,19 @@ describe("decideObjectVisibility (v13 §4–§11, Tests 1–9, 13–15)", () => 
     expect(decideObjectVisibility(base({ framesSinceTracked: TOL + 1, currentlyVisible: true }))).toEqual({ visible: false, reason: "TRACKING_LOST" });
   });
 
+  it("a relocalization applied inside the tolerated dropout does not hide what is shown; it still never starts showing", () => {
+    // Shown, PnP dropped for a frame, relocalization applied in the next: stays shown through the apply frame and the monitor window.
+    expect(decideObjectVisibility(base({ state: TrackingState.AR_ACTIVE, framesSinceTracked: 0, relocalized: true, currentlyVisible: true }))).toEqual({ visible: true, reason: "TRACKING_ACTIVE" });
+    for (let f = 1; f <= TOL; f++) {
+      expect(decideObjectVisibility(base({ framesSinceTracked: f, relocalized: true, currentlyVisible: true })).visible).toBe(true);
+      expect(decideObjectVisibility(base({ framesSinceTracked: f, relocalized: true, currentlyVisible: false }))).toEqual({ visible: false, reason: "CONFIRMING" });
+    }
+    // Beyond the tolerance, or out of world tracking, the usual rules hide them.
+    expect(decideObjectVisibility(base({ framesSinceTracked: TOL + 1, relocalized: true, currentlyVisible: true })).visible).toBe(false);
+    expect(decideObjectVisibility(base({ state: TrackingState.RELOCALIZING, relocalized: true, currentlyVisible: true })).visible).toBe(false);
+    expect(decideObjectVisibility(base({ poseFinite: false, relocalized: true, currentlyVisible: true })).visible).toBe(false);
+  });
+
   it("world not ready / not established, or a non-finite pose → hidden with that reason", () => {
     expect(decideObjectVisibility(base({ worldReady: false }))).toEqual({ visible: false, reason: "WORLD_NOT_READY" });
     expect(decideObjectVisibility(base({ worldEstablished: false }))).toEqual({ visible: false, reason: "WORLD_NOT_READY" });
