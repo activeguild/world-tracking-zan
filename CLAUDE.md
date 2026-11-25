@@ -212,10 +212,16 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 テストが「壊れたコードを本当に落とすか」を測る。[mizchi/mutator](https://github.com/mizchi/mutator) 0.5.5（固定）を devDependency に追加。エンジンの処理は不変、既存テストも未変更。
 
 - **対象**（`mutator.config.ts`）: 判定ロジック 8 ファイル — `ARState` / `ObjectVisibility` / `Guidance` / `ObjectGestures` / `PoseValidation` / `InitStageValidation` / `RelocalizationSchedule` / `PlaneRecovery`（Lean ガードレールと同じ「壊れても気づきにくい判定」）
-- **使うテスト**（`vitest.mutation.config.ts`）: それらの単体テスト 9 ファイルだけ。通常の設定のままだと合成映像のエンジンテスト 40 ファイルが対象を通り、テストごとのカバレッジ取得が 10 分で終わらなかった
+- **使うテスト**（`vitest.mutation.config.ts`）: それらの単体テスト 14 ファイルだけ。通常の設定のままだと合成映像のエンジンテスト 40 ファイルが対象を通り、テストごとのカバレッジ取得が 10 分で終わらなかった
 - **コマンド**: `npm run mutate`（対象全体。初回 約 7 分、以後は `.mutator/` のキャッシュで変更箇所だけ）、`npm run mutate:diff`（`origin/main` との差分に触れるミュータントだけ）。`.mutator/` はコミットしない
-- **初回の結果**: 1033 ミュータント — Killed 566 / Survived 104 / Timeout 4 / NoCoverage 6 / 型エラーで除外 353、**スコア 83.8%**。生き残りは `RelocalizationSchedule` 32+、`ObjectGestures` 21、`PlaneRecovery` 14、`Guidance` 9、`InitStageValidation` 8、`ARState` 3、`PoseValidation` 2（最後に走った 12 件の内訳は未集計）。多いのは閾値の境界（`<` → `<=`）で、ちょうど境界値のテストがない
-- **未対応**: 生き残りへのテスト追加、等価ミュータントの `mutator accept`、品質ゲート（`thresholds.break` / `critical`）、CI ジョブ。パッケージは Node 24 以上を要求するがこのリポジトリと CI は Node 22（動くが `node:sqlite` の ExperimentalWarning が出る、サポート外）
+- **初回の結果**: 1033 ミュータント — Killed 566 / Survived 104 / Timeout 4 / NoCoverage 6 / 型エラーで除外 353、スコア 83.8%
+- **仕分けとテスト追加（同日）**: 検出されなかった 110 件（Survived 104 + NoCoverage 6）のうち **98 件はテスト追加で検出**、**12 件は等価として受理**（`mutator.accepted.json`、理由つき、コミット済み）。現在 Killed 664 / Timeout 4 / 受理 12 / 型エラー 353、**スコア 100%**。単体 424 件（+48）
+  - 追加したテスト: `tests/vision/RelocalizationSchedule.test.ts`（LK 失敗理由の同数・ちょうど半分、準備 / 試行の境界、タイムラインの「最初の成功だけ記録」・frame 0・失探時刻不明）、`tests/ar/ObjectGesturesEdges.test.ts`（slop / 時間ちょうど、同じ pointer の二重 down、3 本目、dead 状態、reset、ピンチの 8 px 下限、ひねり中心の y）、`tests/vision/PoseValidationEdges.test.ts`（`R·C + t = 0`、上限ちょうど、既定ラベル、回転の不一致コード）、`tests/vision/InitStageValidationEdges.test.ts`（各上限ちょうど、棄却時 `accepted: false`）、`tests/vision/PlaneRecoveryController.test.ts`（二視点トリガの閾値ちょうど、`reset`、アイドル診断）、既存の `Guidance.test.ts`（全文言が空でない、`stable` な回復候補は横移動の誘導に勝つ）と `ARState.test.ts`（`ARError` の名前と既定メッセージ）
+  - 傾向: 生き残りの大半は「閾値ちょうど」のテストがなかったもの。**実装の誤りは見つかっていない**（追加テストはすべて現在の挙動のまま合格）
+  - 受理した 12 件: `ARState` の失探分岐 1（SEARCHING_FEATURES への再代入は no-op）、`ObjectGestures` 4（3 本目の move は 2 本の位置を変えない / rotate 中に pointer 数 0 にはならない ×2 / `wrapAngle(π)`）、`InitStageValidation` 3（`minGainFraction ≤ 0` の 2 行は後の行が包含 ×2、`errorBefore = 0` のときだけ差が出る 1 = 厳密には等価ではない）、`RelocalizationSchedule` 4（`lkFailureReason` の `second` は書くだけで読まれない ×3、最大値 0 の早期 return）
+  - 見つかった死にコード: `lkFailureReason` の変数 `second`（未修正。消せば受理 3 件が不要になる）
+- **変更時のルール**: 対象 8 ファイルを変えたら `npm run mutate`（または `mutate:diff`）。新しい生き残りはテストを足すか、等価なら `npx mutator accept <key> --reason "…"` で理由を残す
+- **未対応**: 品質ゲート（`thresholds.break` / `critical` / `--fail-on-survived`）、CI ジョブ。パッケージは Node 24 以上を要求するがこのリポジトリと CI は Node 22（動くが `node:sqlite` の ExperimentalWarning が出る、サポート外）
 
 ### Lean による形式ガードレール（2026-11-21、ユーザー要望）
 

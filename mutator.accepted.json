@@ -1,0 +1,50 @@
+{
+  "13wns2yvqsb": {
+    "reason": "Equivalent: with minGainFraction <= 0 the next line (errorAfter < errorBefore) is strictly stronger than this one, so evaluating this line too changes nothing.",
+    "where": "src/vision/InitStageValidation.ts:100:7 l.minGainFraction > 0 -> l.minGainFraction >= 0"
+  },
+  "1x7zazkfv7s": {
+    "reason": "Equivalent: rotate mode needs two pointers, so after one is released at least one is still down; size is never 0 here.",
+    "where": "src/ar/ObjectGestures.ts:167:21 this.pointers.size > 0 -> this.pointers.size >= 0"
+  },
+  "1xf40zqru9o": {
+    "reason": "Equivalent: 'second' is written but never read (the majority test uses the sum of the rejections), so no change to it is observable.",
+    "where": "src/vision/RelocalizationSchedule.ts:66:16 e[1] > second -> e[1] <= second"
+  },
+  "8uiwtrsows": {
+    "reason": "Equivalent: 'second' is written but never read (the majority test uses the sum of the rejections), so no change to it is observable.",
+    "where": "src/vision/RelocalizationSchedule.ts:66:31 { second = e[1]; } -> {}"
+  },
+  "cmoagtvgp9": {
+    "reason": "Equivalent: 'second' is written but never read (the majority test uses the sum of the rejections), so no change to it is observable.",
+    "where": "src/vision/RelocalizationSchedule.ts:66:16 e[1] > second -> e[1] >= second"
+  },
+  "d29131ira3": {
+    "reason": "Differs only when errorBeforePx is exactly 0 (0 -> 0 would become no_gain); a solve never starts from zero error, so not worth pinning with a test.",
+    "where": "src/vision/InitStageValidation.ts:101:7 l.minGainFraction <= 0 -> true"
+  },
+  "inn0ais0ak": {
+    "reason": "Equivalent: when the largest count is 0 'best' is still the initial insufficient_tracks entry, so the function returns insufficient_tracks either way.",
+    "where": "src/vision/RelocalizationSchedule.ts:73:7 best[1] === 0 -> false"
+  },
+  "r6oy32lfum": {
+    "reason": "Equivalent: with minGainFraction <= 0 the next line (errorAfter < errorBefore) is strictly stronger than this one, so evaluating this line too changes nothing.",
+    "where": "src/vision/InitStageValidation.ts:100:7 l.minGainFraction > 0 -> true"
+  },
+  "sbxydvr8v6": {
+    "reason": "Equivalent: an input of exactly pi is taken to -pi by the first loop and back to pi by the second; the result is the same.",
+    "where": "src/ar/ObjectGestures.ts:196:10 a > Math.PI -> a >= Math.PI"
+  },
+  "sfkasp9ota": {
+    "reason": "Equivalent: rotate mode needs two pointers, so after one is released at least one is still down; size is never 0 here.",
+    "where": "src/ar/ObjectGestures.ts:167:21 this.pointers.size > 0 -> true"
+  },
+  "snfimbbis1": {
+    "reason": "Equivalent: in this branch the state is SEARCHING_FEATURES or RELOCALIZING (TRACKING_LOST is handled just above); for SEARCHING_FEATURES the assignment is a no-op.",
+    "where": "src/ar/ARState.ts:138:20 this._state === TrackingState.RELOCALIZING -> true"
+  },
+  "viotb76bq5": {
+    "reason": "Equivalent: a third pointer's move does not change the first two pointers, so the twist angle and distance are unchanged and no event is emitted either way.",
+    "where": "src/ar/ObjectGestures.ts:110:13 this.order.indexOf(id) > 1 -> false"
+  }
+}
