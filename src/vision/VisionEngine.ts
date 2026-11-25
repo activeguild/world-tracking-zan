@@ -651,6 +651,22 @@ export class VisionEngine {
     st.correctionTranslation.set(corrTrans);
     st.anchorFitLandmarks = anchorFitLandmarks;
     tracker.recordInitStage(st);
+    // The session moves the world anchor by this correction when the result
+    // arrives. A keyframe BA later in this same frame fits its own correction
+    // around the anchor points, so they move along now: left where the frame
+    // brought them, they would be points of the map as it was before the
+    // stage (quint/mapcorrection.qnt: anchorPointsFresh).
+    const ap = this.anchorPoints;
+    if (ap) {
+      const moved = new Array<number>(ap.length);
+      for (let a = 0; a + 2 < ap.length; a += 3) {
+        const x = ap[a], y = ap[a + 1], z = ap[a + 2];
+        moved[a] = corrRot[0] * x + corrRot[1] * y + corrRot[2] * z + corrTrans[0];
+        moved[a + 1] = corrRot[3] * x + corrRot[4] * y + corrRot[5] * z + corrTrans[1];
+        moved[a + 2] = corrRot[6] * x + corrRot[7] * y + corrRot[8] * z + corrTrans[2];
+      }
+      this.anchorPoints = moved;
+    }
     const corr = Math.hypot(corrTrans[0], corrTrans[1], corrTrans[2]);
     log(
       `applied: baseline ×${st.baselineRatio.toFixed(2)}, parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px in ${st.iterations} it (reference view ${st.referenceErrorAfterPx.toFixed(2)} px), pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u (dir ${directionDeg.toFixed(2)}°), max landmark shift ${st.maxLandmarkShift.toFixed(3)} u, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, keyframes re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}${kfPlan.plans.filter((p) => p.outcome === "propagated").map((p) => ` KF${p.kf.id}:${p.skip}`).join("")}, anchor correction ${corr.toFixed(4)} u (${anchorFitLandmarks ? `local fit on ${anchorFitLandmarks}` : "pose"})`,

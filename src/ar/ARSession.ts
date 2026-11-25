@@ -1102,6 +1102,27 @@ export class ARSession {
     this.bundleAdjustment = r.bundleAdjustment;
     this.initRefinement = r.initRefinement;
     this.worldChangeReason = "none";
+    // Map corrections of this frame, in the order the engine made them: the
+    // init stage first, then the keyframe BA (VisionEngine.updateMap). Rigid
+    // corrections do not commute, so the anchor follows in that same order
+    // (quint/mapcorrection.qnt: anchorFollowsMap).
+    // v25: an accepted multi-view init stage re-constrained the init map;
+    // the world anchor follows its correction (once, this frame).
+    const st = r.initRefinement?.lastStage;
+    if (st && st.frameId === r.frameId) {
+      let anchorMoved = false;
+      if (st.applied) this.gyroComparer.applyMapCorrection(st.correctionRotation);
+      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
+        if (anchorMoved) this.worldChangeReason = "init_stage";
+      }
+      if (this.config.debug.log) {
+        const t = st.correctionTranslation;
+        this.logger.info(
+          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
+    }
     if (r.bundleAdjustment.ranThisFrame) {
       const b = r.bundleAdjustment;
       // v18: the map moved under the camera; move the world frame with it so
@@ -1122,23 +1143,6 @@ export class ARSession {
             `error ${b.errorBeforePx.toFixed(2)} → ${b.errorAfterPx.toFixed(2)} px in ${b.iterations} it ${b.converged ? "" : "(not converged) "}${b.ms.toFixed(1)} ms ` +
             `shift lm ${b.maxLandmarkShift.toFixed(4)} kf ${b.maxKeyframeShift.toFixed(4)} u / ${b.maxKeyframeRotationDeg.toFixed(2)}° ` +
             `correction ${corr.toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
-        );
-      }
-    }
-    // v25: an accepted multi-view init stage re-constrained the init map;
-    // the world anchor follows its correction the same way (once, this frame).
-    const st = r.initRefinement?.lastStage;
-    if (st && st.frameId === r.frameId) {
-      let anchorMoved = false;
-      if (st.applied) this.gyroComparer.applyMapCorrection(st.correctionRotation);
-      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
-        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
-        if (anchorMoved) this.worldChangeReason = "init_stage";
-      }
-      if (this.config.debug.log) {
-        const t = st.correctionTranslation;
-        this.logger.info(
-          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
         );
       }
     }

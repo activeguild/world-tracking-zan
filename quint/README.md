@@ -1,4 +1,6 @@
-# Quint model: session lifecycle × worker protocol
+# Quint models
+
+## Session lifecycle × worker protocol (`session.qnt`)
 
 `session.qnt` models what happens when `ARSession.start()` / `stop()` /
 `reset()` are called at any moment while the camera and the vision worker
@@ -15,20 +17,35 @@ start up, one frame is in flight, and responses arrive later. Lean
 | `lastCallWins` | once nothing is pending, the session is in the state asked for last (unless that start failed) |
 | `noStaleResult`, `filterIsExact` | after `reset()`, nothing the engine computed before it is applied; the frame-id filter drops exactly those |
 
+## Map corrections × world anchor (`mapcorrection.qnt`)
+
+The engine refines its map in place (init stage, keyframe BA); the session's
+world anchor must follow every correction exactly once, in the engine's
+order. A correction is an opaque tag, "the anchor is where the map is" is
+equality of tag lists (rigid transforms do not commute). Bounds: 5 frames,
+3 corrections.
+
+| Invariant | Meaning |
+|---|---|
+| `anchorFollowsMap` | after a result is handled, the anchor is attached to that result's map and reflects exactly its corrections, in order |
+| `anchorPointsFresh` | a correction is never fitted around anchor points of another map or of an earlier state of this one (needs one frame in flight) |
+
 ## Commands
 
 - `npm run quint:check` — exhaustive model check (TLC), each repaired bug is
   still detectable when its repair is switched off, conformance walks up to
   date. Needs Java 17+; Quint downloads the checker on first use.
-- `npm run quint:export` — regenerate `conformance/session-traces.json`.
+- `npm run quint:export` — regenerate `conformance/*-traces.json`.
 - `npx vitest run tests/quint` — replay the walks on the real `ARSession`,
-  `VisionWorkerClient` and worker handler (part of `npm test`; no Java, no Quint).
+  `VisionWorkerClient`, worker handler and `WorldAnchor` (part of `npm test`;
+  no Java, no Quint).
 - Explore a counterexample:
   `npx quint run quint/session.qnt --backend typescript --init initNoWorkerErrorFix --invariant busyIffOneInFlight --verbosity 3`
 
 ## Changing the code
 
-When `start` / `stop` / `reset` / the worker protocol changes: change the
+When `start` / `stop` / `reset` / the worker protocol / how map corrections
+are reported and applied changes: change the
 model first, run `quint:check`, then `quint:export` and the conformance
 test. An invariant that no longer holds is a rule being dropped — say so in
 the change, do not delete it silently.

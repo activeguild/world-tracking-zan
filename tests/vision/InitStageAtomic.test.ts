@@ -250,4 +250,36 @@ describe("keyframe BA gauge (指示書 §3)", () => {
     expect(Number.isFinite(b2.errorAfterPx)).toBe(true);
     expect([...origin.pose.rotation, ...origin.pose.translation]).toEqual(identity);
   });
+
+  it("moves the frame's anchor points along with an accepted stage (a BA later in the frame fits around them)", () => {
+    // quint/mapcorrection.qnt, anchorPointsFresh: the session sent the anchor
+    // points in the map as it was before this frame. After an accepted stage
+    // the engine's copy must be where the session's anchor will be once it
+    // has applied the stage's correction.
+    const engine = new VisionEngine(W, H, resolveConfig({}));
+    const sent = [0.2, 0.9, 5.5, -0.4, 1.1, 6.5];
+    let stages = 0;
+    for (let f = 0; f < 110; f++) {
+      const out = engine.process({ ...input(f), anchorPoints: [...sent] });
+      const held = (engine as unknown as { anchorPoints: number[] | null }).anchorPoints!;
+      const st = out.initRefinement?.lastStage;
+      if (st && st.frameId === f && st.applied) {
+        stages++;
+        const r = st.correctionRotation, tr = st.correctionTranslation;
+        let moved = 0;
+        for (let a = 0; a < sent.length; a += 3) {
+          for (let i = 0; i < 3; i++) {
+            const want = r[i * 3] * sent[a] + r[i * 3 + 1] * sent[a + 1] + r[i * 3 + 2] * sent[a + 2] + tr[i];
+            expect(Math.abs(held[a + i] - want)).toBeLessThan(1e-12);
+            moved = Math.max(moved, Math.abs(want - sent[a + i]));
+          }
+        }
+        expect(moved).toBeGreaterThan(1e-6);
+      } else {
+        // No accepted stage in this frame: the points are the ones sent.
+        expect(held).toEqual(sent);
+      }
+    }
+    expect(stages).toBeGreaterThanOrEqual(1);
+  });
 });
