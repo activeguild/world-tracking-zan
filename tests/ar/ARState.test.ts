@@ -148,6 +148,12 @@ describe("ARError", () => {
     expect(e.code).toBe("CAMERA_PERMISSION_DENIED");
     expect(e).toBeInstanceOf(Error);
   });
+
+  it("is named ARError; the message defaults to the code and an explicit message wins", () => {
+    expect(new ARError(ARErrorCode.CAMERA_UNAVAILABLE).name).toBe("ARError");
+    expect(new ARError(ARErrorCode.CAMERA_UNAVAILABLE).message).toBe("CAMERA_UNAVAILABLE");
+    expect(new ARError(ARErrorCode.CAMERA_UNAVAILABLE, "no rear camera").message).toBe("no rear camera");
+  });
 });
 
 describe("resolveConfig", () => {
