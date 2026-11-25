@@ -101,6 +101,7 @@ const trackingView = (s) =>
 // frame inputs: located, relocalization result N/S/I/A, near
 // | map | framesSinceTracked | pending "age.confirmations" | failed attempts (capped)
 // | monitor frames left | relocalized | applied this frame | world established
+// | frames since the PnP located the camera (capped)
 const pickOf = (o) => (o && o.tag === "Some" ? o.value : null);
 const ledgerView = (s, picks) => {
   const p = some(s.pending);
@@ -115,6 +116,7 @@ const ledgerView = (s, picks) => {
     bit(s.relocalized),
     bit(int(s.sinceApply) === 0),
     bit(s.worldEstablished),
+    int(s.lostFrames),
   ].join("|");
 };
 
@@ -160,7 +162,7 @@ const MODELS = [
     view: ledgerView,
     compact: true,
     pick: () => "",
-    legend: "inputs located,reloc N/S/I/A,near|map|framesSinceTracked|pending age.confirmations|failed attempts (capped)|monitor frames left|relocalized|applied|world established",
+    legend: "inputs located,reloc N/S/I/A,near|map|framesSinceTracked|pending age.confirmations|failed attempts (capped)|monitor frames left|relocalized|applied|world established|lost frames (capped)",
   },
 ];
 

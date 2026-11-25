@@ -1516,7 +1516,7 @@ export class VisionEngine {
           // poses and the landmarks they observe one consistent map.
           if (this.config.bundleAdjustment.enabled) this.runBundleAdjustment(k, frameId);
         }
-      } else if (ledger.shouldResetMap(tracker.framesSinceTracked, this.worldEstablished)) {
+      } else if (ledger.shouldResetMap(this.worldEstablished)) {
         // Established world: reset is the last resort (v3 §12, §16) — long
         // loss AND enough failed relocalization attempts; a short loss keeps
         // map, world and objects while the camera holds its last good pose.
@@ -1530,6 +1530,9 @@ export class VisionEngine {
         this.relocalizer.reset();
         this.resetBundleAdjustmentState();
         ledger.clear();
+        // World tracking does not outlive its map: with the loss measured by
+        // the PnP the reset can come while the state is still PLANE_FOUND.
+        this.stateMachine.mapDropped();
         this.relocMonitor = null;
         this.relocDiagnostics = null;
         this.relocTimeline = null;

@@ -94,23 +94,71 @@ describe("RelocalizationLedger", () => {
 
   it("the map is given up after a long loss with enough failed attempts in a world, quickly before one", () => {
     const ledger = new RelocalizationLedger<string>({ ...CONFIG, minAttemptsBeforeReset: 2 });
-    expect(ledger.shouldResetMap(30, false)).toBe(false);
-    expect(ledger.shouldResetMap(31, false)).toBe(true);
+    const lose = (frames: number) => {
+      for (let i = 0; i < frames; i++) ledger.afterTracking(false);
+    };
+    lose(30);
+    expect(ledger.lostFrames).toBe(30);
+    expect(ledger.shouldResetMap(false)).toBe(false);
+    lose(1);
+    expect(ledger.shouldResetMap(false)).toBe(true);
     // In a world the frame count alone is not enough …
-    expect(ledger.shouldResetMap(301, true)).toBe(false);
+    lose(270);
+    expect(ledger.lostFrames).toBe(301);
+    expect(ledger.shouldResetMap(true)).toBe(false);
     ledger.begin(1, 1, true);
     ledger.settle(1, null);
-    expect(ledger.shouldResetMap(301, true)).toBe(false);
+    expect(ledger.shouldResetMap(true)).toBe(false);
     ledger.begin(4, 4, true);
     ledger.settle(4, null);
     expect(ledger.failedAttempts).toBe(2);
-    // … nor are the attempts without the long loss.
-    expect(ledger.shouldResetMap(300, true)).toBe(false);
-    expect(ledger.shouldResetMap(301, true)).toBe(true);
-    // Locating the camera forgets the failures.
+    expect(ledger.shouldResetMap(true)).toBe(true);
+    // Locating the camera forgets the failures and ends the loss.
     ledger.afterTracking(true);
     expect(ledger.failedAttempts).toBe(0);
-    expect(ledger.shouldResetMap(301, true)).toBe(false);
+    expect(ledger.lostFrames).toBe(0);
+    expect(ledger.shouldResetMap(true)).toBe(false);
+    // … nor are the attempts without the long loss (exactly at the limit).
+    ledger.begin(5, 1, true);
+    ledger.settle(5, null);
+    ledger.begin(8, 4, true);
+    ledger.settle(8, null);
+    lose(300);
+    expect(ledger.shouldResetMap(true)).toBe(false);
+    lose(1);
+    expect(ledger.shouldResetMap(true)).toBe(true);
+  });
+
+  it("a relocalization the map PnP does not follow neither ends the loss nor counts as a success", () => {
+    const ledger = new RelocalizationLedger<string>({ ...CONFIG, minAttemptsBeforeReset: 3, lostResetFrames: 4 });
+    // The tracker's count restarts with every apply (1 each frame); the PnP never locates the camera.
+    for (let f = 0; f < 4; f++) {
+      expect(ledger.begin(f, 1, true).attempt).toBe(true);
+      expect(ledger.settle(f, candidate("a", { immediate: true }))).toBe("apply");
+      ledger.afterTracking(false);
+      expect(ledger.lostFrames).toBe(f + 1);
+      expect(ledger.failedAttempts).toBe(f + 1);
+      expect(ledger.shouldResetMap(true)).toBe(false);
+    }
+    ledger.begin(4, 1, true);
+    ledger.settle(4, candidate("a", { immediate: true }));
+    ledger.afterTracking(false);
+    // Lost for 5 frames (> 4) with 5 unfollowed relocalizations (≥ 3): the map is given up.
+    expect(ledger.shouldResetMap(true)).toBe(true);
+
+    // An apply the PnP follows is a success: nothing is counted, the loss is over.
+    const other = new RelocalizationLedger<string>(CONFIG);
+    other.afterTracking(false);
+    other.begin(1, 1, true);
+    other.settle(1, candidate("a", { immediate: true }));
+    other.afterTracking(true);
+    expect(other.failedAttempts).toBe(0);
+    expect(other.lostFrames).toBe(0);
+    // A lost frame without an apply counts the frame, not an attempt.
+    other.begin(2, 0, true);
+    other.afterTracking(false);
+    expect(other.lostFrames).toBe(1);
+    expect(other.failedAttempts).toBe(0);
   });
 
   it("clear() forgets candidate, failures and monitor window", () => {
@@ -122,9 +170,12 @@ describe("RelocalizationLedger", () => {
     ledger.settle(11, candidate("b"));
     ledger.begin(12, 2, true);
     ledger.settle(12, null);
+    ledger.afterTracking(false);
     expect(ledger.monitoring).toBe(true);
-    expect(ledger.failedAttempts).toBe(1);
+    expect(ledger.failedAttempts).toBe(2);
+    expect(ledger.lostFrames).toBe(2);
     ledger.clear();
+    expect(ledger.lostFrames).toBe(0);
     expect(ledger.pending).toBeNull();
     expect(ledger.failedAttempts).toBe(0);
     expect(ledger.monitoring).toBe(false);

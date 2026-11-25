@@ -106,6 +106,8 @@ check_model tracking relocalizedByConfirmation worldLostAndRebuilt planeRecovery
 expect_violation tracking initNoWorldGate worldAgrees
 expect_violation tracking initNoFreshShow showStartsOnFreshPose
 expect_violation tracking initNoKeepShown shownThroughRelocalization
+expect_violation tracking initNoLossByPnp lossEnds
+expect_violation tracking initNoStateDrop worldAgrees
 
 # The walks the TypeScript conformance tests replay are the models'.
 node scripts/quint-traces.mjs --check

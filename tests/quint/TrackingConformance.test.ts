@@ -96,11 +96,19 @@ describe("tracking state, world and object visibility conform to the Quint model
 
   it("the state machine takes the model's transitions", () => {
     let steps = 0;
+    let drops = 0;
     const reached = new Set<TrackingState>();
     for (let t = 0; t < file.traces.length; t++) {
       const machine = new TrackingStateMachine(THRESHOLDS);
+      let hadMap = false;
       for (let i = 0; i < file.traces[t].length; i++) {
         const f = parse(file.traces[t][i]);
+        // The engine gave up the map in this frame (before the state update).
+        if (hadMap && f.mapId === null) {
+          machine.mapDropped();
+          drops++;
+        }
+        hadMap = f.mapId !== null;
         // The model's reading of the engine: the map counts as lost beyond the tolerance.
         expect(f.saw.mapLost, `walk ${t}, frame ${i}`).toBe(f.mapId !== null && f.framesSinceTracked > MAP_LOST_TOLERANCE);
         const got = machine.update({
@@ -121,6 +129,7 @@ describe("tracking state, world and object visibility conform to the Quint model
     expect(steps).toBeGreaterThan(5000);
     // Every engine state is on the walks (AR_ACTIVE is the session's view of PLANE_FOUND).
     expect(reached.size).toBe(6);
+    expect(drops).toBeGreaterThan(20);
   });
 
   it("the session has the model's world and shows the objects exactly when the model does", async () => {

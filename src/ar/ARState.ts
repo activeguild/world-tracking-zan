@@ -92,6 +92,18 @@ export class TrackingStateMachine {
    * Advance the machine with the observation of one processed frame.
    * Returns the new state (may be unchanged).
    */
+  /**
+   * The engine gave up the map (and the world established in it). World
+   * tracking ends with it: left in PLANE_FOUND, the state would carry over
+   * to the next map and count it as an established world before any plane
+   * is found there (quint/tracking.qnt `worldAgrees`).
+   */
+  mapDropped(): void {
+    if (this._state === TrackingState.PLANE_FOUND || this._state === TrackingState.AR_ACTIVE) {
+      this._state = TrackingState.TRACKING;
+    }
+  }
+
   update(obs: FrameObservation): TrackingState {
     const t = this.thresholds;
     switch (this._state) {

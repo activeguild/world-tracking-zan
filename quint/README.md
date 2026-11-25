@@ -48,7 +48,7 @@ scaled down; the rules are the same.
 | `pendingIsYoung`, `acceptableIsConfirmed` | a pending candidate is settled in the next frame; a relaxed-bound candidate is never applied unconfirmed |
 | `recoveryOnlyBeforeWorld` | a plane recovery runs only before the world exists and while the map is not lost |
 | `recoversWhenTrackingIsGood` | bounded liveness: after enough good frames in an established world the objects are visible |
-| `lossEnds` | bounded liveness: within a fixed number of frames a loss ends — the camera is located, a relocalization is applied, or the map is given up |
+| `lossEnds` | bounded liveness: within a fixed number of frames a loss ends — the map PnP locates the camera or the map is given up (an applied relocalization the PnP does not follow does not end it) |
 
 The state machine, the session side and the engine's relocalization
 bookkeeping (`RelocalizationLedger`: pending candidate, failed attempts,

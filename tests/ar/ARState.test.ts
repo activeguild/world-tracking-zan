@@ -172,3 +172,36 @@ describe("resolveConfig", () => {
     expect(c.debug.overlay).toBe(DEFAULT_CONFIG.debug.overlay);
   });
 });
+
+describe("TrackingStateMachine.mapDropped", () => {
+  const found = { inlierCount: 50, featureCount: 300, mapInitialized: true, mapLost: false, planeFound: true, worldEstablished: true };
+
+  it("world tracking ends with its map: the next map is not counted as a world before a plane is found in it", () => {
+    const m = new TrackingStateMachine(thresholds);
+    m.update(found); // INITIALIZING → SEARCHING_FEATURES
+    expect(m.update(found)).toBe(TrackingState.PLANE_FOUND);
+    m.mapDropped();
+    expect(m.state).toBe(TrackingState.TRACKING);
+    // A new map without a plane: detecting, not PLANE_FOUND (which would establish the world).
+    expect(m.update({ ...found, planeFound: false, worldEstablished: false })).toBe(TrackingState.PLANE_DETECTING);
+
+    // Without the drop the state would have stuck to PLANE_FOUND through the new map.
+    const stale = new TrackingStateMachine(thresholds);
+    stale.update(found);
+    stale.update(found);
+    expect(stale.update({ ...found, planeFound: false, worldEstablished: false })).toBe(TrackingState.PLANE_FOUND);
+  });
+
+  it("leaves the other states alone", () => {
+    for (const state of [TrackingState.TRACKING, TrackingState.PLANE_DETECTING, TrackingState.TRACKING_LOST, TrackingState.RELOCALIZING, TrackingState.SEARCHING_FEATURES, TrackingState.INITIALIZING]) {
+      const m = new TrackingStateMachine(thresholds);
+      (m as unknown as { _state: TrackingState })._state = state;
+      m.mapDropped();
+      expect(m.state).toBe(state);
+    }
+    const active = new TrackingStateMachine(thresholds);
+    (active as unknown as { _state: TrackingState })._state = TrackingState.AR_ACTIVE;
+    active.mapDropped();
+    expect(active.state).toBe(TrackingState.TRACKING);
+  });
+});

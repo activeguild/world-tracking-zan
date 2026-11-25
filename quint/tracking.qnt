@@ -89,6 +89,11 @@ module tracking {
     freshShow: bool,
     // objects that are shown stay shown through an applied relocalization
     keepShown: bool,
+    // a loss is measured from the last frame the map PnP located the camera, and an
+    // applied relocalization the PnP does not follow counts as a failed attempt
+    lossByPnp: bool,
+    // a dropped map takes the world-tracking state with it
+    dropState: bool,
   }
 
   type State = {
@@ -97,6 +102,9 @@ module tracking {
     mapId: Option[int],
     maps: int,
     framesSinceTracked: int,
+    // frames since the map PnP located the camera (RelocalizationLedger); an applied
+    // relocalization does not reset it
+    lostFrames: int,
     worldEstablished: bool,
     pending: Option[Pending],
     monitorLeft: int,
@@ -120,8 +128,6 @@ module tracking {
     wasVisible: bool,
     sinceApply: int,
     goodRun: int,
-    // consecutive frames the camera is lost in this map without a relocalization being applied
-    lostRun: int,
     staleCandidate: bool,
     unconfirmedAcceptable: bool,
     appliedByConfirmation: bool,
@@ -131,18 +137,18 @@ module tracking {
     resetWithWorld: bool,
   }
 
-  pure val ALL_FIXES: Fixes = { worldGate: true, freshShow: true, keepShown: true }
+  pure val ALL_FIXES: Fixes = { worldGate: true, freshShow: true, keepShown: true, lossByPnp: true, dropState: true }
 
   var s: State
 
   pure def initial(fix: Fixes): State = {
     fix: fix,
-    mapId: None, maps: 0, framesSinceTracked: 0, worldEstablished: false, pending: None,
+    mapId: None, maps: 0, framesSinceTracked: 0, lostFrames: 0, worldEstablished: false, pending: None,
     monitorLeft: 0, attempts: 0, relocalized: false, planeDetected: false, recovery: false,
     state: Initializing, badFrames: 0,
     world: None, visible: false,
     inliers: High, located: false, obsMapLost: false, obsPlaneFound: false, obsWorldEstablished: false,
-    wasVisible: false, sinceApply: MONITOR_FRAMES + 1, goodRun: 0, lostRun: 0,
+    wasVisible: false, sinceApply: MONITOR_FRAMES + 1, goodRun: 0,
     staleCandidate: false, unconfirmedAcceptable: false, appliedByConfirmation: false,
     hiddenInsideTolerance: false, recoveries: 0, resets: 0, resetWithWorld: false,
   }
@@ -180,9 +186,16 @@ module tracking {
   /// The map is gone (tracker.reset): everything attached to it goes with it.
   pure def mapDropped(e: State): State = {
     ...e,
-    mapId: None, framesSinceTracked: 0, worldEstablished: false, pending: None,
+    mapId: None, framesSinceTracked: 0, lostFrames: 0, worldEstablished: false, pending: None,
     monitorLeft: 0, attempts: 0, relocalized: false, planeDetected: false, recovery: false,
     resets: cap(e.resets + 1, 2),
+    // the monitor window of an applied relocalization goes with the map
+    sinceApply: MONITOR_FRAMES + 1,
+    // TrackingStateMachine.mapDropped: world tracking does not outlive its map.
+    // (Since a loss is measured by the PnP, the map can be given up while the
+    // state is still PlaneFound; left there, the next map would count as an
+    // established world before any plane is found in it.)
+    state: if (e.fix.dropState and e.state == PlaneFound) Tracking else e.state,
   }
 
   /// VisionEngine.updateMap with a map: relocalization, PnP, monitor window, reset.
@@ -218,16 +231,22 @@ module tracking {
         | Some(p) => if (i.near) Some({ age: p.age, confirmations: p.confirmations + 1 }) else Some({ age: 0, confirmations: 0 })
       }
     val failed = attempt and (not(candidate) or (pending != None and not(i.near)))
-    val attempts1 = if (failed) attempts0 + 1 else attempts0
+    // … and so does a relocalization that was applied but not followed by the map PnP
+    val unfollowed = apply and not(i.located) and e.fix.lossByPnp
+    val attempts1 = attempts0 + (if (failed) 1 else 0) + (if (unfollowed) 1 else 0)
     // applyRelocalization re-seeds the pose (framesSinceTracked = 0), then the map PnP runs
     val fst0 = if (apply) 0 else e.framesSinceTracked
     val fst = if (i.located) 0 else fst0 + 1
+    val lost = if (i.located) 0 else cap(e.lostFrames + 1, LOSS_ENDS_WITHIN + 1)
+    // the length of the loss the reset rule looks at
+    val lossLength = if (e.fix.lossByPnp) lost else fst
     // post-relocalization monitor: the apply frame and the frames it is still open
     val monitored = apply or e.monitorLeft > 0
     val monitorLeft = if (apply) MONITOR_FRAMES else if (e.monitorLeft > 0) e.monitorLeft - 1 else 0
     val tracked: State = {
       ...e,
       framesSinceTracked: fst,
+      lostFrames: lost,
       pending: match nextPending {
         | None => None
         | Some(p) => Some({ ...p, age: p.age })
@@ -242,8 +261,8 @@ module tracking {
     }
     // Reset: the last resort in an established world, quick before one exists.
     val reset = not(i.located) and (
-      if (e.worldEstablished) fst > LOST_RESET and tracked.attempts >= MIN_ATTEMPTS
-      else fst > PRE_WORLD_RESET
+      if (e.worldEstablished) lossLength > LOST_RESET and tracked.attempts >= MIN_ATTEMPTS
+      else lossLength > PRE_WORLD_RESET
     )
     if (reset) { ...mapDropped(tracked), resetWithWorld: e.resetWithWorld or e.worldEstablished } else tracked
   }
@@ -330,7 +349,6 @@ module tracking {
       visible: visible,
       wasVisible: before.visible,
       goodRun: if (good) cap(before.goodRun + 1, RECOVER_WITHIN) else 0,
-      lostRun: if (e.mapId != None and e.framesSinceTracked > 0 and e.sinceApply != 0) cap(before.lostRun + 1, LOSS_ENDS_WITHIN + 1) else 0,
       hiddenInsideTolerance: e.hiddenInsideTolerance or
         (before.visible and not(visible) and e.relocalized and kept != None and e.worldEstablished
           and e.state == PlaneFound and e.framesSinceTracked <= MAP_LOST_TOLERANCE),
@@ -342,6 +360,8 @@ module tracking {
   action initNoWorldGate = s' = initial({ ...ALL_FIXES, worldGate: false })
   action initNoFreshShow = s' = initial({ ...ALL_FIXES, freshShow: false })
   action initNoKeepShown = s' = initial({ ...ALL_FIXES, keepShown: false })
+  action initNoLossByPnp = s' = initial({ ...ALL_FIXES, lossByPnp: false })
+  action initNoStateDrop = s' = initial({ ...ALL_FIXES, dropState: false })
 
   action step = {
     nondet inliers = oneOf(Set(Low, Mid, High))
@@ -406,15 +426,13 @@ module tracking {
   /// for RECOVER_WITHIN frames in an established world, the objects are visible.
   val recoversWhenTrackingIsGood = (s.goodRun >= RECOVER_WITHIN and s.worldEstablished) implies s.visible
 
-  /// A loss does not last: within LOSS_ENDS_WITHIN frames the camera is
-  /// located again, a relocalization is applied, or the lost map is given up
-  /// (and the scan starts over).
-  ///
-  /// "Located again" alone would not hold: there is a run in which the map
-  /// PnP never locates the camera while a relocalization is applied in every
-  /// frame (each re-seeds the pose, so the loss never gets long and no
-  /// attempt counts as failed). The engine then tracks by relocalization.
-  val lossEnds = s.lostRun <= LOSS_ENDS_WITHIN
+  /// A loss does not last: within LOSS_ENDS_WITHIN frames the map PnP
+  /// locates the camera again or the lost map is given up (and the scan starts
+  /// over). A relocalization being applied does not end it — the PnP has to
+  /// follow. (Was: "… or a relocalization is applied", which let the engine
+  /// track by relocalization alone, frame after frame, without ever giving up
+  /// a map the PnP cannot use.)
+  val lossEnds = s.lostFrames <= LOSS_ENDS_WITHIN
 
   val safety = and {
     worldAgrees,

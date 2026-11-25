@@ -13,6 +13,13 @@
  *   begin → [settle, when begin says to attempt] → (map PnP) → afterTracking
  *         → [shouldResetMap → clear, when the PnP did not locate the camera]
  *
+ * A loss is measured by the map PnP alone: applying a relocalization re-seeds
+ * the tracker's pose (and its frames-since-tracked count), but the loss goes
+ * on until the PnP follows, and an applied relocalization the PnP does not
+ * follow in the same frame counts as a failed attempt. Otherwise a map the
+ * PnP cannot use would never be given up while relocalizations keep being
+ * applied to it, frame after frame.
+ *
  * quint/tracking.qnt models exactly this sequence (`mapFrame`);
  * tests/quint/RelocalizationLedgerConformance.test.ts replays the model's
  * walks on this class.
@@ -74,6 +81,7 @@ export type LedgerOutcome =
 export class RelocalizationLedger<T> {
   private _pending: PendingCandidate<T> | null = null;
   private _failedAttempts = 0;
+  private _lostFrames = 0;
   /** Frames the monitor window stays open; null = no window. */
   private _monitorLeft: number | null = null;
   private appliedThisFrame = false;
@@ -87,6 +95,11 @@ export class RelocalizationLedger<T> {
   /** Failed attempts since the camera was last located. */
   get failedAttempts(): number {
     return this._failedAttempts;
+  }
+
+  /** Frames since the map PnP located the camera (an applied relocalization does not reset it). */
+  get lostFrames(): number {
+    return this._lostFrames;
   }
 
   /** The post-relocalization monitor window is open. */
@@ -163,26 +176,34 @@ export class RelocalizationLedger<T> {
       this._monitorLeft = this._monitorLeft! - 1;
       if (this._monitorLeft <= 0) this._monitorLeft = null;
     }
-    if (located) this._failedAttempts = 0;
+    if (located) {
+      this._failedAttempts = 0;
+      this._lostFrames = 0;
+    } else {
+      this._lostFrames++;
+      // The relocalization was applied and the PnP did not follow it.
+      if (this.appliedThisFrame) this._failedAttempts++;
+    }
     return { monitored, watch };
   }
 
   /**
-   * The map is given up (asked when the PnP did not locate the camera;
-   * `framesSinceTracked` after this frame). In an established world it is the
-   * last resort: a long loss and enough failed attempts. Before a world
-   * exists the lost map is dropped quickly.
+   * The map is given up (asked after `afterTracking`, when the PnP did not
+   * locate the camera). In an established world it is the last resort: a
+   * long loss and enough failed attempts. Before a world exists the lost map
+   * is dropped quickly.
    */
-  shouldResetMap(framesSinceTracked: number, worldEstablished: boolean): boolean {
+  shouldResetMap(worldEstablished: boolean): boolean {
     return worldEstablished
-      ? framesSinceTracked > this.cfg.lostResetFrames && this._failedAttempts >= this.cfg.minAttemptsBeforeReset
-      : framesSinceTracked > this.cfg.preWorldLostResetFrames;
+      ? this._lostFrames > this.cfg.lostResetFrames && this._failedAttempts >= this.cfg.minAttemptsBeforeReset
+      : this._lostFrames > this.cfg.preWorldLostResetFrames;
   }
 
   /** The map is gone (or the engine was reset). */
   clear(): void {
     this._pending = null;
     this._failedAttempts = 0;
+    this._lostFrames = 0;
     this._monitorLeft = null;
   }
 }

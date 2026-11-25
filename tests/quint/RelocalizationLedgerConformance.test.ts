@@ -16,7 +16,8 @@ import { candidateAction } from "../../src/vision/RelocalizationSchedule";
  * after the frame. The real ledger is driven in the engine's call order
  * (begin → settle → afterTracking → shouldResetMap) with the real
  * `requiredConfirmations` / `candidateAction`; the only thing imitated is the
- * tracker's "frames since the camera was located" counter.
+ * tracker's "frames since the camera was located" counter (which an applied
+ * relocalization resets; the ledger's own loss count is not reset by it).
  *
  * Regenerate the walks with `npm run quint:export` after changing the model.
  */
@@ -33,6 +34,8 @@ const file = JSON.parse(
 /** The model's scaled configuration (quint/tracking.qnt). */
 const CONFIRMATIONS = 1;
 const MIN_ATTEMPTS = 2;
+/** The model counts lost frames up to LOSS_ENDS_WITHIN + 1 (= LOST_RESET + MIN_ATTEMPTS + 1). */
+const LOST_CAP = 7;
 const CONFIG: RelocalizationLedgerConfig = {
   startAfterLostFrames: 1,
   attemptEveryNFrames: 2,
@@ -65,11 +68,12 @@ interface Frame {
   relocalized: boolean;
   applied: boolean;
   worldEstablished: boolean;
+  lostFrames: number;
 }
 
 /** `inputs|map|fst|pending|attempts|monitor|relocalized|applied|established` (scripts/quint-traces.mjs). */
 function parse(view: string): Frame {
-  const [inp, map, fst, pending, attempts, monitor, reloc, applied, west] = view.split("|");
+  const [inp, map, fst, pending, attempts, monitor, reloc, applied, west, lost] = view.split("|");
   const [age, confirmations] = pending === "-" ? [0, 0] : pending.split(".").map(Number);
   return {
     located: inp[0] === "1",
@@ -83,6 +87,7 @@ function parse(view: string): Frame {
     relocalized: reloc === "1",
     applied: applied === "1",
     worldEstablished: west === "1",
+    lostFrames: Number(lost),
   };
 }
 
@@ -94,7 +99,7 @@ describe("the relocalization ledger conforms to the Quint model", () => {
 
   it("every frame of every walk leaves the ledger in the model's state", () => {
     let frames = 0;
-    const seen = { applied: 0, confirmed: 0, immediate: 0, moved: 0, lost: 0, resetWithWorld: 0, resetBeforeWorld: 0, monitored: 0, acceptableHeld: 0 };
+    const seen = { applied: 0, confirmed: 0, immediate: 0, moved: 0, lost: 0, resetWithWorld: 0, resetBeforeWorld: 0, monitored: 0, acceptableHeld: 0, appliedThenReset: 0 };
     for (let t = 0; t < file.traces.length; t++) {
       const ledger = new RelocalizationLedger<string>(CONFIG);
       // Engine state the ledger is fed from, at the start of the frame.
@@ -143,13 +148,16 @@ describe("the relocalization ledger conforms to the Quint model", () => {
           relocalized = applied || after.monitored;
           expect(after.watch, where).toBe(after.monitored && !applied);
           if (after.monitored) seen.monitored++;
-          if (!f.located && ledger.shouldResetMap(fst, world)) {
+          if (!f.located && ledger.shouldResetMap(world)) {
             if (world) seen.resetWithWorld++;
             else seen.resetBeforeWorld++;
             ledger.clear();
             map = false;
             fst = 0;
             relocalized = false;
+            // The monitor window (and with it this frame's apply) goes with the map.
+            if (applied) seen.appliedThenReset++;
+            applied = false;
           }
         }
 
@@ -161,6 +169,7 @@ describe("the relocalization ledger conforms to the Quint model", () => {
           ledger.monitoring ? "mon" : "-",
           relocalized,
           applied,
+          Math.min(ledger.lostFrames, LOST_CAP),
         ].join("|");
         const want = [
           f.map ? "map" : "-",
@@ -170,6 +179,7 @@ describe("the relocalization ledger conforms to the Quint model", () => {
           f.monitorLeft > 0 ? "mon" : "-",
           f.relocalized,
           f.applied,
+          f.lostFrames,
         ].join("|");
         if (got !== want) throw new Error(`${where}\n  model  ${want}\n  ledger ${got}`);
         world = f.worldEstablished;
