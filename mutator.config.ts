@@ -12,4 +12,5 @@ export default defineConfig({
     "src/vision/PlaneRecovery.ts",
   ],
   runner: "vitest",
+  config: "vitest.mutation.config.ts",
 });
