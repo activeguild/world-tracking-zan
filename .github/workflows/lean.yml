@@ -42,7 +42,7 @@ jobs:
       # the table the model just reproduced.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci --no-audit --no-fund
       - name: TypeScript conforms to the Lean model
