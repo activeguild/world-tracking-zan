@@ -46,6 +46,8 @@ module tracking {
   pure val MAX_MAPS = 2
   /// Frames of good tracking after which objects must be visible again.
   pure val RECOVER_WITHIN = MONITOR_FRAMES + 2
+  /// Frames after which a loss has ended one way or another.
+  pure val LOSS_ENDS_WITHIN = LOST_RESET + MIN_ATTEMPTS
 
   // ----------------------------------------------------------------- types
   /// Frame-to-frame inliers: below `lostBelow`, between, at least `minTrackedForTracking`.
@@ -118,6 +120,8 @@ module tracking {
     wasVisible: bool,
     sinceApply: int,
     goodRun: int,
+    // consecutive frames the camera is lost in this map without a relocalization being applied
+    lostRun: int,
     staleCandidate: bool,
     unconfirmedAcceptable: bool,
     appliedByConfirmation: bool,
@@ -138,7 +142,7 @@ module tracking {
     state: Initializing, badFrames: 0,
     world: None, visible: false,
     inliers: High, located: false, obsMapLost: false, obsPlaneFound: false, obsWorldEstablished: false,
-    wasVisible: false, sinceApply: MONITOR_FRAMES + 1, goodRun: 0,
+    wasVisible: false, sinceApply: MONITOR_FRAMES + 1, goodRun: 0, lostRun: 0,
     staleCandidate: false, unconfirmedAcceptable: false, appliedByConfirmation: false,
     hiddenInsideTolerance: false, recoveries: 0, resets: 0, resetWithWorld: false,
   }
@@ -326,6 +330,7 @@ module tracking {
       visible: visible,
       wasVisible: before.visible,
       goodRun: if (good) cap(before.goodRun + 1, RECOVER_WITHIN) else 0,
+      lostRun: if (e.mapId != None and e.framesSinceTracked > 0 and e.sinceApply != 0) cap(before.lostRun + 1, LOSS_ENDS_WITHIN + 1) else 0,
       hiddenInsideTolerance: e.hiddenInsideTolerance or
         (before.visible and not(visible) and e.relocalized and kept != None and e.worldEstablished
           and e.state == PlaneFound and e.framesSinceTracked <= MAP_LOST_TOLERANCE),
@@ -401,6 +406,16 @@ module tracking {
   /// for RECOVER_WITHIN frames in an established world, the objects are visible.
   val recoversWhenTrackingIsGood = (s.goodRun >= RECOVER_WITHIN and s.worldEstablished) implies s.visible
 
+  /// A loss does not last: within LOSS_ENDS_WITHIN frames the camera is
+  /// located again, a relocalization is applied, or the lost map is given up
+  /// (and the scan starts over).
+  ///
+  /// "Located again" alone would not hold: there is a run in which the map
+  /// PnP never locates the camera while a relocalization is applied in every
+  /// frame (each re-seeds the pose, so the loss never gets long and no
+  /// attempt counts as failed). The engine then tracks by relocalization.
+  val lossEnds = s.lostRun <= LOSS_ENDS_WITHIN
+
   val safety = and {
     worldAgrees,
     visibleOnlyWhenTrusted,
@@ -411,6 +426,7 @@ module tracking {
     acceptableIsConfirmed,
     recoveryOnlyBeforeWorld,
     recoversWhenTrackingIsGood,
+    lossEnds,
   }
 
   // ---------------------------------------------- the model is not vacuous
@@ -420,23 +436,4 @@ module tracking {
   observation resetInEstablishedWorld = s.resetWithWorld
   /// A relocalization applied while the objects are shown, and they stay shown.
   observation relocalizedWhileShown = s.sinceApply == 0 and s.visible and s.wasVisible
-
-  // ------------------------------------------------------------- liveness
-  /// Frames keep coming.
-  temporal fairness = weakFair(step, s)
-
-  // "Good tracking from some frame on ⇒ shown from some frame on" needs no
-  // temporal property: the invariant `recoversWhenTrackingIsGood` bounds the
-  // number of frames, which is stronger.
-
-  /// A loss does not last forever: the camera is located again, a
-  /// relocalization is applied, or the lost map is given up (and the scan
-  /// starts over).
-  ///
-  /// "Located again" alone does not hold: there is a run in which the map PnP
-  /// never locates the camera while a relocalization is applied in every
-  /// frame (each re-seeds the pose, so the loss never gets long and no
-  /// attempt counts as failed). The engine then tracks by relocalization.
-  temporal lossEnds = fairness implies
-    always(s.framesSinceTracked > 0 implies eventually(s.framesSinceTracked == 0 or s.sinceApply == 0 or s.mapId == None))
 }

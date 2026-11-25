@@ -48,6 +48,7 @@ scaled down; the rules are the same.
 | `pendingIsYoung`, `acceptableIsConfirmed` | a pending candidate is settled in the next frame; a relaxed-bound candidate is never applied unconfirmed |
 | `recoveryOnlyBeforeWorld` | a plane recovery runs only before the world exists and while the map is not lost |
 | `recoversWhenTrackingIsGood` | bounded liveness: after enough good frames in an established world the objects are visible |
+| `lossEnds` | bounded liveness: within a fixed number of frames a loss ends — the camera is located, a relocalization is applied, or the map is given up |
 
 The state machine, the session side and the engine's relocalization
 bookkeeping (`RelocalizationLedger`: pending candidate, failed attempts,
@@ -57,7 +58,9 @@ monitor window, map reset rule) are replayed against the code.
 
 Temporal properties, checked by TLC over the whole state graph under weak
 fairness (what stays enabled eventually happens: a start settles, a message
-is delivered, frames keep coming). Nothing is assumed about the user's calls.
+is delivered). Nothing is assumed about the user's calls. The tracking model
+states its liveness as frame-bounded invariants instead (cheaper to check and
+stronger).
 
 | Model | Property | Meaning |
 |---|---|---|
@@ -66,7 +69,6 @@ is delivered, frames keep coming). Nothing is assumed about the user's calls.
 | session | `lastStartRuns` | when `start()` was the last call and nothing failed, the session ends up running |
 | mapcorrection | `everyResultHandled` | no frame stays in flight |
 | mapcorrection | `anchorCatchesUp` | again and again the anchor is where the engine's map is |
-| tracking | `lossEnds` | a loss ends: the camera is located, a relocalization is applied, or the map is given up |
 
 `busyEnds`, `lastStartRuns` and `anchorCatchesUp` each have a run that
 violates them when the corresponding repair is switched off.
