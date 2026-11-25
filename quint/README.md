@@ -41,9 +41,10 @@ scaled down; the rules are the same.
 | Invariant | Meaning |
 |---|---|
 | `worldAgrees` | the session has a world exactly when the engine has established one, for the same map |
-| `visibleOnlyWhenTrusted` | objects are shown only in world tracking, located within the tolerance, not while a relocalized pose is being confirmed |
+| `visibleOnlyWhenTrusted` | objects are shown only in world tracking, located within the tolerance; on a relocalized pose being confirmed only if they were shown already |
 | `showStartsOnFreshPose` | showing starts on a frame whose pose came from the map |
-| `hiddenWhileConfirming` | nothing is shown in the apply frame nor while the monitor window is open |
+| `noShowStartWhileConfirming` | showing never starts in the apply frame nor while the monitor window is open (was `hiddenWhileConfirming`: nothing shown at all) |
+| `shownThroughRelocalization` | a relocalization applied inside the tolerated dropout does not hide what is shown |
 | `pendingIsYoung`, `acceptableIsConfirmed` | a pending candidate is settled in the next frame; a relaxed-bound candidate is never applied unconfirmed |
 | `recoveryOnlyBeforeWorld` | a plane recovery runs only before the world exists and while the map is not lost |
 | `recoversWhenTrackingIsGood` | bounded liveness: after enough good frames in an established world the objects are visible |

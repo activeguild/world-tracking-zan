@@ -85,6 +85,8 @@ module tracking {
     worldGate: bool,
     // a new world starts hidden: nothing is shown before a frame with a fresh pose
     freshShow: bool,
+    // objects that are shown stay shown through an applied relocalization
+    keepShown: bool,
   }
 
   type State = {
@@ -125,7 +127,7 @@ module tracking {
     resetWithWorld: bool,
   }
 
-  pure val ALL_FIXES: Fixes = { worldGate: true, freshShow: true }
+  pure val ALL_FIXES: Fixes = { worldGate: true, freshShow: true, keepShown: true }
 
   var s: State
 
@@ -293,11 +295,13 @@ module tracking {
   /// decideObjectVisibility (ObjectVisibility.ts)
   pure def decide(
     st: TrackingState, worldReady: bool, established: bool,
-    fst: int, relocalized: bool, currentlyVisible: bool
+    fst: int, relocalized: bool, currentlyVisible: bool, keepShown: bool
   ): bool =
     if (not(worldReady) or not(established)) false
     else if (st != PlaneFound) false
-    else if (relocalized) false
+    // a relocalized pose being confirmed never *starts* showing; what is
+    // already shown (a dropout inside the tolerance) stays shown
+    else if (relocalized and not(currentlyVisible and keepShown)) false
     else if (fst == 0) true
     else currentlyVisible and fst <= MAP_LOST_TOLERANCE
 
@@ -314,7 +318,7 @@ module tracking {
     val currentlyVisible = if (create) not(e.fix.freshShow) else if (kept == None) false else before.visible
     val visible =
       if (world == None or e.mapId == None) false
-      else decide(e.state, true, e.worldEstablished, e.framesSinceTracked, e.relocalized, currentlyVisible)
+      else decide(e.state, true, e.worldEstablished, e.framesSinceTracked, e.relocalized, currentlyVisible, e.fix.keepShown)
     val good = e.mapId != None and before.worldEstablished and e.located and e.inliers != Low
     {
       ...e,
@@ -323,7 +327,8 @@ module tracking {
       wasVisible: before.visible,
       goodRun: if (good) cap(before.goodRun + 1, RECOVER_WITHIN) else 0,
       hiddenInsideTolerance: e.hiddenInsideTolerance or
-        (before.visible and not(visible) and e.relocalized and before.framesSinceTracked <= MAP_LOST_TOLERANCE and world != None),
+        (before.visible and not(visible) and e.relocalized and kept != None and e.worldEstablished
+          and e.state == PlaneFound and e.framesSinceTracked <= MAP_LOST_TOLERANCE),
     }
   }
 
@@ -331,6 +336,7 @@ module tracking {
   action init = s' = initial(ALL_FIXES)
   action initNoWorldGate = s' = initial({ ...ALL_FIXES, worldGate: false })
   action initNoFreshShow = s' = initial({ ...ALL_FIXES, freshShow: false })
+  action initNoKeepShown = s' = initial({ ...ALL_FIXES, keepShown: false })
 
   action step = {
     nondet inliers = oneOf(Set(Low, Mid, High))
@@ -349,22 +355,30 @@ module tracking {
   val worldAgrees = (s.world != None) == s.worldEstablished and (s.world == None or s.world == s.mapId)
 
   /// Objects are only shown on a pose that can be trusted: world tracking in
-  /// an established world, located within the tolerance, not a relocalized
-  /// pose still being confirmed.
+  /// an established world, located within the tolerance; on a relocalized
+  /// pose still being confirmed only if they were shown already.
   val visibleOnlyWhenTrusted = s.visible implies and {
     s.world != None,
     s.worldEstablished,
     s.state == PlaneFound,
     s.framesSinceTracked <= MAP_LOST_TOLERANCE,
-    not(s.relocalized),
+    s.relocalized implies s.wasVisible,
   }
 
   /// Showing starts on a frame whose pose came from the map, never on a held pose.
   val showStartsOnFreshPose = (s.visible and not(s.wasVisible)) implies s.framesSinceTracked == 0
 
-  /// Nothing is shown in the frame a relocalization is applied nor while its
-  /// monitor window is open (no one-frame flash of an unconfirmed pose).
-  val hiddenWhileConfirming = s.sinceApply <= MONITOR_FRAMES implies not(s.visible)
+  /// Showing never starts in the frame a relocalization is applied nor while
+  /// its monitor window is open (no one-frame flash of an unconfirmed pose).
+  /// (Was `hiddenWhileConfirming`: nothing shown at all in that window. Given
+  /// up for objects that were already shown, see `shownThroughRelocalization`.)
+  val noShowStartWhileConfirming = (s.sinceApply <= MONITOR_FRAMES and s.visible) implies s.wasVisible
+
+  /// Objects shown through a tolerated PnP dropout are not hidden because a
+  /// relocalization is applied inside that tolerance: while the state machine
+  /// stays in world tracking and the camera is located within the tolerance,
+  /// a relocalization never hides what is shown.
+  val shownThroughRelocalization = not(s.hiddenInsideTolerance)
 
   /// A pending candidate is confirmed or replaced in the very next frame:
   /// it never reaches its age limit (`candidateStale` cannot fire).
@@ -391,7 +405,8 @@ module tracking {
     worldAgrees,
     visibleOnlyWhenTrusted,
     showStartsOnFreshPose,
-    hiddenWhileConfirming,
+    noShowStartWhileConfirming,
+    shownThroughRelocalization,
     pendingIsYoung,
     acceptableIsConfirmed,
     recoveryOnlyBeforeWorld,
@@ -403,8 +418,6 @@ module tracking {
   observation worldLostAndRebuilt = s.resets >= 1 and s.world == Some(1) and s.visible
   observation planeRecoveryRan = s.recoveries >= 1 and s.worldEstablished
   observation resetInEstablishedWorld = s.resetWithWorld
-  /// Not a violation of the rules above, but worth knowing: objects that were
-  /// shown through a tolerated PnP dropout are hidden when a relocalization is
-  /// applied inside that tolerance (CONFIRMING wins over the hysteresis).
-  observation hiddenByRelocalizationInsideTolerance = s.hiddenInsideTolerance
+  /// A relocalization applied while the objects are shown, and they stay shown.
+  observation relocalizedWhileShown = s.sinceApply == 0 and s.visible and s.wasVisible
 }

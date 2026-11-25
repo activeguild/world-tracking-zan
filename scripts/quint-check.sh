@@ -70,9 +70,10 @@ expect_violation mapcorrection initNoAnchorPointsFix anchorPointsFresh
 expect_violation mapcorrection initTwoInFlight anchorPointsFresh
 
 # Tracking pipeline: map loss, relocalization, tracking state, world, visibility, plane recovery.
-check_model tracking relocalizedByConfirmation worldLostAndRebuilt planeRecoveryRan resetInEstablishedWorld hiddenByRelocalizationInsideTolerance
+check_model tracking relocalizedByConfirmation worldLostAndRebuilt planeRecoveryRan resetInEstablishedWorld relocalizedWhileShown
 expect_violation tracking initNoWorldGate worldAgrees
 expect_violation tracking initNoFreshShow showStartsOnFreshPose
+expect_violation tracking initNoKeepShown shownThroughRelocalization
 
 # The walks the TypeScript conformance tests replay are the models'.
 node scripts/quint-traces.mjs --check
