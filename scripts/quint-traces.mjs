@@ -74,6 +74,29 @@ const mapCorrectionView = (s) =>
 // The engine's event is fully described by the result it appends; the walk carries no pick.
 const mapCorrectionPick = () => "";
 
+// ---- tracking.qnt ---------------------------------------------------------
+const bit = (b) => (b ? "1" : "0");
+const idOf = (o) => {
+  const v = some(o);
+  return v === null ? "-" : String(int(v));
+};
+// inliers | what the state machine saw: mapInitialized,mapLost,planeFound,worldEstablished
+// | state | map | framesSinceTracked | relocalized | plane detected | world established
+// | session world | objects visible
+const trackingView = (s) =>
+  [
+    tag(s.inliers)[0],
+    [bit(some(s.mapId) !== null), bit(s.obsMapLost), bit(s.obsPlaneFound), bit(s.obsWorldEstablished)].join(""),
+    tag(s.state),
+    idOf(s.mapId),
+    int(s.framesSinceTracked),
+    bit(s.relocalized),
+    bit(s.planeDetected),
+    bit(s.worldEstablished),
+    idOf(s.world),
+    bit(s.visible),
+  ].join("|");
+
 const MODELS = [
   {
     name: "session",
@@ -94,6 +117,18 @@ const MODELS = [
     view: mapCorrectionView,
     pick: mapCorrectionPick,
     legend: "anchor map[corrections]|requests id+/- (anchor points)|results id;map[corrections];stage tag;ba tag;plane found",
+  },
+  {
+    name: "tracking",
+    samples: 700,
+    maxSteps: 24,
+    steps: ["step"],
+    view: trackingView,
+    // One action, and the frame's inputs that matter are in the state it
+    // leads to: a step is just that state.
+    compact: true,
+    pick: () => "",
+    legend: "inliers L/M/H|state machine saw mapInitialized,mapLost,planeFound,worldEstablished|state|map|framesSinceTracked|relocalized|plane detected|world established|session world|visible",
   },
 ];
 
@@ -128,7 +163,7 @@ function generate(model) {
           seen.add(key);
           last = i - 1;
         }
-        steps.push(step);
+        steps.push(model.compact ? step[2] : step);
       }
       if (last >= 0) traces.push(steps.slice(0, last + 1));
     }

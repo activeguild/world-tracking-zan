@@ -1403,6 +1403,8 @@ export class ARSession {
       this.world.setWorldReady(false);
       this.arCamera.resetSmoothing();
       this.worldChangeReason = "map_reset";
+      // Nothing is shown without a world (the placed objects went with it).
+      this.objectVisibility = { visible: false, reason: "WORLD_NOT_READY" };
       this.logger.info("world lost (map reset)");
       this.emit("worldLost");
     }
@@ -1410,8 +1412,16 @@ export class ARSession {
     // first PLANE_FOUND; the same plane is the reference of the plane-relative
     // pose, so world and pose share one definition). Without plane tracking
     // the first found plane is used directly.
+    //
+    // Only once the engine has established the world (its tracking state
+    // reached PLANE_FOUND for this map): the detector can report a plane in a
+    // frame the state machine does not accept (too few inliers, still lost),
+    // and a world the engine does not know about is one it neither
+    // relocalizes into nor keeps — it re-initializes the map after a short
+    // loss and the session would drop the world and whatever was placed in
+    // it (quint/tracking.qnt: worldAgrees).
     const anchorPlane = r.planeAnchor ?? (r.plane?.found ? r.plane : null);
-    if (!this.worldAnchor.isReady && anchorPlane && r.mapPose) {
+    if (!this.worldAnchor.isReady && anchorPlane && r.mapPose && r.worldEstablished) {
       if (this.worldAnchor.create(anchorPlane, r.mapPose)) {
         this.worldChangeReason = "created";
         const scale = this.worldAnchor.frame!.scale;
@@ -1422,6 +1432,11 @@ export class ARSession {
         // shown right now follows the debug HUD toggle.
         this.world.showPlaneGrid(extent, this.config.debug.overlay && this.config.world.showPlaneGrid);
         this.world.setPlaneGridVisible(this.debugVisualization);
+        // A new world starts hidden: showing begins on a frame whose pose
+        // came from the map (decided below), never on a held pose — also in
+        // the frame the world is created (quint/tracking.qnt: showStartsOnFreshPose).
+        this.world.setObjectsVisible(false);
+        this.objectVisibility = { visible: false, reason: "WORLD_NOT_READY" };
         this.arCamera.resetSmoothing();
         this.logger.info(`world ready scale=${scale.toFixed(3)} m/unit grid=${extent.toFixed(2)} m`);
         this.emit("worldReady");

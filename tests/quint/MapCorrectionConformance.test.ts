@@ -4,9 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorldAnchor } from "../../src/ar/WorldAnchor";
 import type { WorldFrame } from "../../src/math/CoordinateSystem";
 import type { RigidTransform } from "../../src/math/Pose";
-import type { MapPoseOutput, PlaneOutput } from "../../src/vision/types";
 import type { FrameRequest, ResultResponse } from "../../src/worker/protocol";
-import { FakeWorker, Harness, stubBrowser } from "./harness";
+import { FLOOR, mapFrameIdOf, mapPoseOf, runningSession, stubBrowser } from "./harness";
 
 /**
  * `ARSession` and `WorldAnchor` against the Quint model of map corrections
@@ -48,32 +47,6 @@ function correctionOf(tag: number): RigidTransform {
         : [c, -s, 0, s, c, 0, 0, 0, 1];
   return { rotation: new Float64Array(rotation), translation: new Float64Array([0.1 * (tag + 1), -0.05, 0.2 + 0.03 * tag]) };
 }
-
-const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-const mapFrameIdOf = (modelId: number) => 100 + modelId;
-
-/** Camera at the map origin looking along +Z; the floor one unit below it (map Y is down). */
-function mapPoseOf(modelMapId: number): MapPoseOutput {
-  return {
-    rotation: [...IDENTITY],
-    translation: [0, 0, 0],
-    inlierCount: 100,
-    meanReprojectionErrorPx: 0.5,
-    landmarkCount: 0,
-    mapFrameId: mapFrameIdOf(modelMapId),
-    framesSinceTracked: 0,
-    cameraCenter: [0, 0, 0],
-    source: "map",
-    relocalized: false,
-    translationHeld: false,
-    sourceDeltaTranslation: 0,
-    sourceDeltaRotationDeg: 0,
-    mapCandidate: null,
-    planeCandidate: null,
-  } as unknown as MapPoseOutput;
-}
-
-const FLOOR = { normal: [0, -1, 0], d: 1, center: [0, 1, 3], found: true, areaEstimate: 4 } as unknown as PlaneOutput;
 
 interface ModelAnchor {
   mapId: number;
@@ -153,18 +126,7 @@ describe("map corrections × world anchor conform to the Quint model", () => {
     let both = 0;
     for (let t = 0; t < file.traces.length; t++) {
       // A running session on the worker backend, and one real result as the template.
-      const h = new Harness();
-      await h.apply("start", "");
-      await h.apply("cameraSettles", "ok");
-      await h.apply("workerHandles", "Ok");
-      await h.apply("mainHandles", "");
-      await h.apply("videoFrame", "");
-      await h.apply("workerHandles", "Ok");
-      const worker = FakeWorker.live!;
-      const template = worker.responses[0] as ResultResponse;
-      expect(template.type).toBe("result");
-      await h.apply("mainHandles", "");
-      const firstFrameId = h.internals.nextFrameId;
+      const { h, worker, template, firstFrameId } = await runningSession();
 
       const session = h.session as unknown as { worldAnchor: WorldAnchor; config: { world: { assumedPlaneDistanceMeters: number } } };
       const reference = new WorldAnchor({ assumedPlaneDistanceMeters: session.config.world.assumedPlaneDistanceMeters });
@@ -196,6 +158,8 @@ describe("map corrections × world anchor conform to the Quint model", () => {
             frameId: req.frameId,
             gray: req.gray,
             mapPose: r.mapId === null ? null : mapPoseOf(r.mapId),
+            // The engine establishes the world with the plane (tracking.qnt covers when).
+            worldEstablished: r.mapId !== null,
             plane: r.planeFound ? FLOOR : null,
             planeAnchor: null,
             // A BA that did not move the map either did not run or was rejected.

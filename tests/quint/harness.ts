@@ -1,5 +1,7 @@
 import { vi } from "vitest";
+import type { PartialARConfig } from "../../src/ar/ARConfig";
 import { ARSession } from "../../src/ar/ARSession";
+import type { MapPoseOutput, PlaneOutput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
 import { MainThreadVisionBackend, VisionWorkerClient } from "../../src/worker/VisionWorkerClient";
 import { createWorkerHandler } from "../../src/worker/VisionWorkerHost";
@@ -49,7 +51,7 @@ export class Harness {
   private applied = 0;
   private now = 0;
 
-  constructor() {
+  constructor(config: PartialARConfig = {}) {
     // A walk may end mid-start, with its worker still up.
     FakeWorker.live = null;
     vi.stubGlobal("navigator", {
@@ -74,7 +76,7 @@ export class Harness {
     };
     this.session = new ARSession({
       video: video as unknown as HTMLVideoElement,
-      config: { processing: { width: 160, height: 120, grabber: "canvas2d", maxVisionFps: 0 } },
+      config: { ...config, processing: { width: 160, height: 120, grabber: "canvas2d", maxVisionFps: 0 } },
     });
     this.session.on("started", () => (this.applied = 0));
     this.session.on("frame", () => this.applied++);
@@ -218,4 +220,47 @@ export function stubBrowser(): void {
   vi.stubGlobal("HTMLMediaElement", { HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2 });
   vi.stubGlobal("requestAnimationFrame", () => 1);
   vi.stubGlobal("cancelAnimationFrame", () => undefined);
+}
+
+/** Engine map ids of the walks → `mapFrameId`. */
+export const mapFrameIdOf = (modelId: number): number => 100 + modelId;
+
+/** A map pose for a fabricated result: camera at the map origin looking along +Z. */
+export function mapPoseOf(modelMapId: number, framesSinceTracked = 0, relocalized = false): MapPoseOutput {
+  return {
+    rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    translation: [0, 0, 0],
+    inlierCount: 100,
+    meanReprojectionErrorPx: 0.5,
+    landmarkCount: 0,
+    mapFrameId: mapFrameIdOf(modelMapId),
+    framesSinceTracked,
+    cameraCenter: [0, 0, 0],
+    source: framesSinceTracked === 0 ? "map" : "propagated",
+    relocalized,
+    translationHeld: false,
+    sourceDeltaTranslation: 0,
+    sourceDeltaRotationDeg: 0,
+    mapCandidate: null,
+    planeCandidate: null,
+  } as unknown as MapPoseOutput;
+}
+
+/** A found floor one unit below that camera (map Y is down). */
+export const FLOOR = { normal: [0, -1, 0], d: 1, center: [0, 1, 3], found: true, areaEstimate: 4 } as unknown as PlaneOutput;
+
+/** A running session on the worker backend, and one real engine result to build fabricated ones from. */
+export async function runningSession(config: PartialARConfig = {}): Promise<{ h: Harness; worker: FakeWorker; template: import("../../src/worker/protocol").ResultResponse; firstFrameId: number }> {
+  const h = new Harness(config);
+  await h.apply("start", "");
+  await h.apply("cameraSettles", "ok");
+  await h.apply("workerHandles", "Ok");
+  await h.apply("mainHandles", "");
+  await h.apply("videoFrame", "");
+  await h.apply("workerHandles", "Ok");
+  const worker = FakeWorker.live!;
+  const template = worker.responses[0] as import("../../src/worker/protocol").ResultResponse;
+  if (template.type !== "result") throw new Error("the template frame did not produce a result");
+  await h.apply("mainHandles", "");
+  return { h, worker, template, firstFrameId: h.internals.nextFrameId };
 }

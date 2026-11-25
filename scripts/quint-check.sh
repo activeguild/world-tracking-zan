@@ -69,6 +69,11 @@ expect_violation mapcorrection initNoAnchorPointsFix anchorPointsFresh
 # Not a repair but the assumption the anchor points rest on: one frame in flight.
 expect_violation mapcorrection initTwoInFlight anchorPointsFresh
 
+# Tracking pipeline: map loss, relocalization, tracking state, world, visibility, plane recovery.
+check_model tracking relocalizedByConfirmation worldLostAndRebuilt planeRecoveryRan resetInEstablishedWorld hiddenByRelocalizationInsideTolerance
+expect_violation tracking initNoWorldGate worldAgrees
+expect_violation tracking initNoFreshShow showStartsOnFreshPose
+
 # The walks the TypeScript conformance tests replay are the models'.
 node scripts/quint-traces.mjs --check
 echo "quint-check: models checked, bugs detectable, conformance walks up to date."

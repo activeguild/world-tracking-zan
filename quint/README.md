@@ -30,6 +30,28 @@ equality of tag lists (rigid transforms do not commute). Bounds: 5 frames,
 | `anchorFollowsMap` | after a result is handled, the anchor is attached to that result's map and reflects exactly its corrections, in order |
 | `anchorPointsFresh` | a correction is never fitted around anchor points of another map or of an earlier state of this one (needs one frame in flight) |
 
+## Tracking pipeline (`tracking.qnt`)
+
+One step is one frame: the engine (pending relocalization candidate →
+confirmation → apply → monitor window, map reset rules, plane recovery, the
+tracking state machine, `worldEstablished`), then the session (world created
+/ dropped, object visibility). The frame counts of the configuration are
+scaled down; the rules are the same.
+
+| Invariant | Meaning |
+|---|---|
+| `worldAgrees` | the session has a world exactly when the engine has established one, for the same map |
+| `visibleOnlyWhenTrusted` | objects are shown only in world tracking, located within the tolerance, not while a relocalized pose is being confirmed |
+| `showStartsOnFreshPose` | showing starts on a frame whose pose came from the map |
+| `hiddenWhileConfirming` | nothing is shown in the apply frame nor while the monitor window is open |
+| `pendingIsYoung`, `acceptableIsConfirmed` | a pending candidate is settled in the next frame; a relaxed-bound candidate is never applied unconfirmed |
+| `recoveryOnlyBeforeWorld` | a plane recovery runs only before the world exists and while the map is not lost |
+| `recoversWhenTrackingIsGood` | bounded liveness: after enough good frames in an established world the objects are visible |
+
+The state machine and the session side are replayed against the code; the
+engine's relocalization bookkeeping is the model's reading of
+`VisionEngine.updateMap` and has no automatic check.
+
 ## Commands
 
 - `npm run quint:check` — exhaustive model check (TLC), each repaired bug is
@@ -37,7 +59,8 @@ equality of tag lists (rigid transforms do not commute). Bounds: 5 frames,
   date. Needs Java 17+; Quint downloads the checker on first use.
 - `npm run quint:export` — regenerate `conformance/*-traces.json`.
 - `npx vitest run tests/quint` — replay the walks on the real `ARSession`,
-  `VisionWorkerClient`, worker handler and `WorldAnchor` (part of `npm test`;
+  `VisionWorkerClient`, worker handler, `WorldAnchor` and `TrackingStateMachine`
+  (part of `npm test`;
   no Java, no Quint).
 - Explore a counterexample:
   `npx quint run quint/session.qnt --backend typescript --init initNoWorkerErrorFix --invariant busyIffOneInFlight --verbosity 3`
@@ -45,7 +68,8 @@ equality of tag lists (rigid transforms do not commute). Bounds: 5 frames,
 ## Changing the code
 
 When `start` / `stop` / `reset` / the worker protocol / how map corrections
-are reported and applied changes: change the
+are reported and applied / the relocalization flow, the tracking states, world
+creation or object visibility changes: change the
 model first, run `quint:check`, then `quint:export` and the conformance
 test. An invariant that no longer holds is a rule being dropped — say so in
 the change, do not delete it silently.
