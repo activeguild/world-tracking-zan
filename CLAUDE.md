@@ -220,8 +220,9 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
   - 傾向: 生き残りの大半は「閾値ちょうど」のテストがなかったもの。**実装の誤りは見つかっていない**（追加テストはすべて現在の挙動のまま合格）
   - 受理した 12 件: `ARState` の失探分岐 1（SEARCHING_FEATURES への再代入は no-op）、`ObjectGestures` 4（3 本目の move は 2 本の位置を変えない / rotate 中に pointer 数 0 にはならない ×2 / `wrapAngle(π)`）、`InitStageValidation` 3（`minGainFraction ≤ 0` の 2 行は後の行が包含 ×2、`errorBefore = 0` のときだけ差が出る 1 = 厳密には等価ではない）、`RelocalizationSchedule` 4（`lkFailureReason` の `second` は書くだけで読まれない ×3、最大値 0 の早期 return）
   - 見つかった死にコード: `lkFailureReason` の変数 `second`（未修正。消せば受理 3 件が不要になる）
-- **変更時のルール**: 対象 8 ファイルを変えたら `npm run mutate`（または `mutate:diff`）。新しい生き残りはテストを足すか、等価なら `npx mutator accept <key> --reason "…"` で理由を残す
-- **未対応**: 品質ゲート（`thresholds.break` / `critical` / `--fail-on-survived`）、CI ジョブ。パッケージは Node 24 以上を要求するがこのリポジトリと CI は Node 22（動くが `node:sqlite` の ExperimentalWarning が出る、サポート外）
+- **変更時のルール**: 対象 8 ファイルを変えたら `npm run mutate`（または `mutate:diff`。CI と同じ判定は `npm run mutate:ci`）。新しい生き残りはテストを足すか、等価なら `npx mutator accept <key> --reason "…"` で理由を残す
+- **CI（同日）**: `.github/workflows/mutation.yml` が PR ごと（と `main` への push）に `npm run mutate:ci`（= `mutator --fail-on-survived`）を Node 24 で実行する。生き残りが 1 件でもあれば失敗（終了コード 2）、`mutator.accepted.json` の受理分は数えない。`.mutator/` は `actions/cache` で引き継ぐ（キャッシュなしのコールド実行は CI で約 4 分、ローカル 4 コアで 3 分 24 秒）。あわせて `lean.yml` の Node を 22 → 24 に（パッケージが Node 24 以上を要求。22 でも動くが `node:sqlite` の ExperimentalWarning が出てサポート外）。ローカルの開発環境と Vercel のビルドの Node は変えていない
+- **未対応**: スコア下限（`thresholds.break`）と `critical` 指定（`--fail-on-survived` があるので現状は不要）
 
 ### Lean による形式ガードレール（2026-11-21、ユーザー要望）
 
