@@ -1,0 +1,46 @@
+name: Quint guardrails
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quint-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Quint downloads the model checker (Apalache distribution, with TLC) here.
+      - name: Cache the model checker
+        uses: actions/cache@v4
+        with:
+          path: ~/.quint
+          key: quint-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Model check, bugs detectable, conformance walks up to date
+        run: bash scripts/quint-check.sh
+
+      # The other half: the TypeScript session and worker against those walks.
+      - name: TypeScript conforms to the Quint model
+        run: npx vitest run tests/quint

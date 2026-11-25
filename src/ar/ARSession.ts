@@ -303,6 +303,8 @@ export class ARSession {
    * and as identity (keyframe gaps, landmark ages, "this frame" tests).
    */
   private nextFrameId = 0;
+  /** Results of frames below this id were computed before the last `reset()`. */
+  private resetBeforeFrameId = 0;
 
   private _state: TrackingState = TrackingState.INITIALIZING;
   private readonly listeners: { [K in keyof ARSessionEvents]: Set<Listener<K>> } = {
@@ -453,12 +455,18 @@ export class ARSession {
    */
   start(): Promise<void> {
     if (this.running) return Promise.resolve();
-    if (this.starting) return this.starting;
+    if (this.starting) {
+      // start() after a stop() that the start in flight has not acted on yet:
+      // the last call wins, the start goes on (it used to resolve stopped).
+      this.stopRequested = false;
+      return this.starting;
+    }
     this.stopRequested = false;
-    this.starting = this.doStart().finally(() => {
-      this.starting = null;
+    const p: Promise<void> = this.doStart().finally(() => {
+      if (this.starting === p) this.starting = null;
     });
-    return this.starting;
+    this.starting = p;
+    return p;
   }
 
   private async doStart(): Promise<void> {
@@ -470,7 +478,7 @@ export class ARSession {
       throw err;
     }
     if (this.stopRequested) {
-      this.releaseResources();
+      this.abortStart();
       return;
     }
 
@@ -485,6 +493,7 @@ export class ARSession {
       this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
       this.grabSamplesMs = [];
       this.nextFrameId = 0;
+      this.resetBeforeFrameId = 0;
       this.grabDecided = this.config.processing.grabber !== "auto";
       this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
       // The projection is cached per viewport size; new intrinsics need a rebuild.
@@ -507,7 +516,7 @@ export class ARSession {
       throw err;
     }
     if (this.stopRequested) {
-      this.releaseResources();
+      this.abortStart();
       return;
     }
     this.backend.onResult = (r) => this.handleResult(r);
@@ -534,6 +543,17 @@ export class ARSession {
     this.renderer?.resize();
     this.scheduleFrame();
     this.emit("started");
+  }
+
+  /**
+   * stop() during the start: release what it acquired. The start is over
+   * from here on, so a start() called before the promise settles begins a
+   * new one instead of joining this one.
+   */
+  private abortStart(): void {
+    this.releaseResources();
+    this.stopRequested = false;
+    this.starting = null;
   }
 
   /** Camera, backend and grabber of a run (or of a start that did not complete). */
@@ -767,6 +787,9 @@ export class ARSession {
 
   /** Forget all tracks and restart from INITIALIZING (keeps the camera running). */
   reset(): void {
+    // The worker handles messages in order: a frame sent before this point is
+    // processed by the engine as it was before the reset.
+    this.resetBeforeFrameId = this.nextFrameId;
     this.backend?.reset();
     this.setState(TrackingState.INITIALIZING);
   }
@@ -1048,6 +1071,9 @@ export class ARSession {
   private handleResult(r: VisionResult): void {
     if (!this.running) return;
     this.grabber?.release(r.grayBuffer);
+    // In flight when reset() was called: computed by the engine before the
+    // reset, so it is not applied (state, pose, world) after it.
+    if (r.frameId < this.resetBeforeFrameId) return;
     this.framesProcessed++;
     this.poseFrameId = r.frameId;
     const arrived = performance.now();

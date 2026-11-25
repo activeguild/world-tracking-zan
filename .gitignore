@@ -6,3 +6,4 @@ dist/
 coverage/
 test-results/
 .mutator/
+_apalache-out/

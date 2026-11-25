@@ -207,6 +207,24 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### Quint によるモデル検査 — セッションのライフサイクル × Worker プロトコル（2026-11-25、ユーザー要望）
+
+Lean（単体の規則を全パラメータで証明）と重複しない「複数コンポーネントの順序・非同期の絡み」を [Quint](https://quint-lang.org) 0.34.0（固定、devDependency）でモデル化。Lean の 4 モデルはそのまま。**Vision エンジン・閾値・状態機械は不変**。
+
+- **モデル**（`quint/session.qnt`）: `ARSession.start / stop / reset` を任意の時点で呼ぶ、カメラ・Worker の起動が後から成功 / 失敗する、フレームは 1 枚だけ飛行中、応答は順序どおりだが任意の時刻に届く。エンジンの計算内容・main-thread バックエンドのフレーム・グラバー切替・描画はモデル外。範囲は 1 回の実行あたりフレーム 3 枚・`reset()` 2 回
+- **不変条件**: `busyIffOneInFlight`（busy ⇔ 飛行中のフレームがちょうど 1 枚）、`idleHoldsNothing`（停止中はカメラ・バックエンド・メッセージを持たない）、`cameraMatchesPhase` / `backendMatchesPhase`、`lastCallWins`（保留がなくなったとき、最後に呼ばれた start / stop の状態にいる。start が失敗した場合を除く）、`noStaleResult` / `filterIsExact`（`reset()` 後に、それ以前にエンジンが計算した結果を適用しない。フレーム id のフィルタはちょうどそれだけを落とす）
+- **検査で見つかり修正した 3 件**（各修正はモデル内の `fix` フラグで外せ、外すと対応する不変条件に反例が出ることを毎回確認する）:
+  1. **Worker の `error` イベントで busy が解除されない**（未対応一覧にあった件）: フレーム処理中に捕捉されない例外が出ると `busy` が立ったままになり、以後フレームが 1 枚も送られない。`VisionWorkerClient` の `onerror` で `busy` を解除。あわせて Worker 側で `engine.reset()` の例外を捕捉して `error` メッセージ（フレーム id なし）で返し、クライアントは**フレーム id つきの error だけ**で busy を解除する（reset の失敗で、後ろに並んだフレームの飛行中に busy を外さない）
+  2. **`start()` → `stop()` → `start()`**: 開始中に stop して再度 start すると、同じ Promise が返って「停止した状態」で resolve していた（最後の呼び出しが start なのに動かない）。開始中の `start()` は中断要求を取り消す。中断で終わった開始は `starting` をその場で外し、Promise が settle する前の `start()` が古い Promise に合流しない
+  3. **`reset()` 後に古い結果が適用される**: reset 時に飛行中だったフレームの結果（リセット前のエンジンが計算）が `INITIALIZING` に戻した後に届き、状態・姿勢がそのまま適用されていた。`reset()` 時点の `nextFrameId` を覚え、それ未満の結果はバッファだけ返して捨てる（開始時に 0 へ戻す）。デモは `reset()` を呼んでいないので実機の挙動には影響なし
+- **検査**（`npm run quint:check`、約 50 秒、Java 17 以上が必要）: (1) TLC による網羅検査 — 到達可能な **1790 状態すべて**で全不変条件が成立、(2) 到達可能性（3 フレーム適用 / main-thread へのフォールバック / 古い結果の破棄 / 開始の中断 がモデル内で起きる = 不変条件が空虚に成り立っていない）、(3) 修正を 1 つ外した 3 つの変種それぞれで反例が出る、(4) 突き合わせ用トレースが最新。Apalache の配布物（TLC 同梱）は初回に Quint が `~/.quint` へダウンロードする
+- **実装との結合**（Lean の遷移表と同じ考え方）: `npm run quint:export`（`scripts/quint-traces.mjs`）がモデルのランダムウォーク（seed 固定、`step` と stop なしの `stepWithoutStop` の 2 種）から、新しい遷移を含むものだけを `quint/conformance/session-traces.json`（237 ウォーク / 5576 ステップ / 767 遷移、コミット済み）に書き出す。`tests/quint/SessionConformance.test.ts` が各ウォークを**本物の `ARSession`・`VisionWorkerClient`・Worker ハンドラ（本物の `VisionEngine`）**に再生し、毎ステップ後に実装の状態（フェーズ / 中断要求 / カメラ / バックエンド / busy / フレーム id / 適用数 / 両方向のメッセージ列）がモデルと一致することを確認する。偽物はブラウザだけ（カメラ・`Worker` の配送・Canvas）。通常の `npm test` に含まれ、Java も Quint も不要。修正 3 件をそれぞれ戻すとこのテストが落ちることを確認済み
+- **そのための変更**: Worker のメッセージ処理を `src/worker/VisionWorkerHost.ts`（`createWorkerHandler(post)`）に切り出し、`VisionWorker.ts` は Worker スコープへの結線だけ（処理内容は reset の try/catch 以外不変）
+- **変更時のルール**: `start` / `stop` / `reset` / Worker プロトコルを変えるときは (1) モデルを先に変える、(2) `npm run quint:check`、(3) `npm run quint:export` → 突き合わせテスト。成り立たなくなった不変条件は「ルールを捨てる」ことなので黙って消さず変更内容に書く
+- **CI**: `.github/workflows/quint.yml`（PR ごとと `main` への push、Node 24 + Java 21、`~/.quint` をキャッシュ）が `quint:check` と `tests/quint` を実行
+- **限界**: 保証は範囲内（フレーム 3・reset 2）の網羅で、Lean のような全パラメータの証明ではない。突き合わせはランダムウォークが通った 767 遷移で、全遷移ではない。HTML 仕様どおり「`terminate()` 後は Worker からのメッセージが届かない」を前提にしている。時相性質（活性）は未記述
+- **次の候補（未着手）**: Map 補正の適用（BA 採用 / 初期化ステージ / Map リセット / `attachedMapFrameId` の順序、「補正はちょうど 1 回」）、再局所化パイプライン + 表示制御（「復帰可能なら最終的に表示に戻る」「1 フレームだけの表示は起きない」）、`PlaneRecovery`
+
 ### ミューテーションテスト — `@mizchi/mutator`（2026-11-25、ユーザー要望）
 
 テストが「壊れたコードを本当に落とすか」を測る。[mizchi/mutator](https://github.com/mizchi/mutator) 0.5.5（固定）を devDependency に追加。エンジンの処理は不変、既存テストも未変更。
@@ -254,7 +272,7 @@ freee の記事（業務ルールを Lean に写し、検査を通らない操�
 - **再試行 cooldown**: `frameId > cooldownUntil`（試行間隔 3 フレームで 3 試行が 8 枚を一巡する、という v14 の意図どおりに）
 - **予測フレームの `poseDeltaTranslation`**: `prevCenter` のコピーに速度を足す（HUD の Δt と次フレームのゲート速度項が 0 になっていた）
 - **レビューで棄却したもの**: PnP の事前値が t を回していない件は、原点から 30 単位・6° でも同じ解に収束し影響なし
-- **未対応（一覧外）**: 起動後の端末回転、同期表示のコピーが取り込みの後、PlaneTracker への Map 補正（`?planetrack=1`）、`?refine=1` の BA 前アンカー姿勢、ワーカー `onerror` の busy 解除、`?video=1` の `<source>` 失敗時フォールバック、`trackingStateChanged` が `AR_ACTIVE` を通知しない、設定マージの `undefined`、HUD が `pointer-events: none` でスクロールできない
+- **未対応（一覧外）**: 起動後の端末回転、同期表示のコピーが取り込みの後、PlaneTracker への Map 補正（`?planetrack=1`）、`?refine=1` の BA 前アンカー姿勢、`?video=1` の `<source>` 失敗時フォールバック、`trackingStateChanged` が `AR_ACTIVE` を通知しない、設定マージの `undefined`、HUD が `pointer-events: none` でスクロールできない
 - **実機で読むべきもの**: 低テクスチャの床での `Feat` / LK の維持、`relink … purge` の数（大幅に減るはず）、失探 → 復帰直後の `LM` 総数、失探後に `AR_ACTIVE` へ戻るまでの時間、Map リセット後の `BA` 行が `kf N/N+1 ref …`（`fix origin` でない）こと、Android の auto 切替後も `Age lm` が負にならないこと
 
 ### v16 — 一周後の再局所化: 長時間失探では保持姿勢との Jump 上限を外す（2026-10-08、実機確認待ち）
