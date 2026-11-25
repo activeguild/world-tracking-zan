@@ -11,9 +11,9 @@
  * relocalization attempt returns, whether the camera moved fast.
  *
  * Modelled code:
- *   - src/vision/VisionEngine.ts          updateMap: pending candidate →
- *                                         confirmation → apply → monitor window,
- *                                         map reset rules, worldEstablished
+ *   - src/vision/RelocalizationLedger.ts  pending candidate → confirmation →
+ *                                         apply → monitor window, map reset rule
+ *   - src/vision/VisionEngine.ts          updateMap (drives the ledger), worldEstablished
  *   - src/vision/RelocalizationSchedule.ts  shouldAttempt / candidateStale / candidateAction
  *   - src/vision/PlaneRecovery.ts         update
  *   - src/ar/ARState.ts                   TrackingStateMachine.update
@@ -420,4 +420,23 @@ module tracking {
   observation resetInEstablishedWorld = s.resetWithWorld
   /// A relocalization applied while the objects are shown, and they stay shown.
   observation relocalizedWhileShown = s.sinceApply == 0 and s.visible and s.wasVisible
+
+  // ------------------------------------------------------------- liveness
+  /// Frames keep coming.
+  temporal fairness = weakFair(step, s)
+
+  // "Good tracking from some frame on ⇒ shown from some frame on" needs no
+  // temporal property: the invariant `recoversWhenTrackingIsGood` bounds the
+  // number of frames, which is stronger.
+
+  /// A loss does not last forever: the camera is located again, a
+  /// relocalization is applied, or the lost map is given up (and the scan
+  /// starts over).
+  ///
+  /// "Located again" alone does not hold: there is a run in which the map PnP
+  /// never locates the camera while a relocalization is applied in every
+  /// frame (each re-seeds the pose, so the loss never gets long and no
+  /// attempt counts as failed). The engine then tracks by relocalization.
+  temporal lossEnds = fairness implies
+    always(s.framesSinceTracked > 0 implies eventually(s.framesSinceTracked == 0 or s.sinceApply == 0 or s.mapId == None))
 }

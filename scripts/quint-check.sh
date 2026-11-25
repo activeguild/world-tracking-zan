@@ -56,11 +56,41 @@ expect_violation() {
   echo "quint-check: $spec: $init violates $invariant (as it must)."
 }
 
+# Temporal properties (liveness under weak fairness), over the whole state graph.
+check_liveness() {
+  local spec="quint/$1.qnt" props="$2"
+  if ! "$quint" verify "$spec" --backend tlc --no-invariant --temporal "$props" >"$log" 2>&1; then
+    cat "$log" >&2
+    echo "quint-check: $spec violates a temporal property ($props)." >&2
+    exit 1
+  fi
+  echo "quint-check: $spec: $props hold."
+}
+
+# … and the same for a liveness property: without the repair there is a run
+# in which the awaited thing never happens.
+expect_liveness_violation() {
+  local spec="quint/$1.qnt" init="$2" prop="$3"
+  if "$quint" verify "$spec" --backend tlc --no-invariant --init "$init" --temporal "$prop" >"$log" 2>&1; then
+    echo "quint-check: $spec: $prop holds from $init — the model no longer detects that bug." >&2
+    exit 1
+  fi
+  if ! grep -q "found a counterexample" "$log"; then
+    cat "$log" >&2
+    echo "quint-check: $spec: $init / $prop failed for another reason than a counterexample." >&2
+    exit 1
+  fi
+  echo "quint-check: $spec: $init violates $prop (as it must)."
+}
+
 # Session lifecycle × worker protocol.
 check_model session appliesThreeFrames runsOnMainBackend dropsStaleResult abortsStart
 expect_violation session initNoWorkerErrorFix busyIffOneInFlight
 expect_violation session initNoRestartFix lastCallWins
 expect_violation session initNoStaleResetFix noStaleResult
+check_liveness session busyEnds,startSettles,lastStartRuns
+expect_liveness_violation session initNoWorkerErrorFix busyEnds
+expect_liveness_violation session initNoRestartFix lastStartRuns
 
 # Map corrections × world anchor.
 check_model mapcorrection anchorAfterTwoCorrections stageAndBaInOneFrame worldDroppedAndRecreated mapIdReused
@@ -68,6 +98,8 @@ expect_violation mapcorrection initNoOrderFix anchorFollowsMap
 expect_violation mapcorrection initNoAnchorPointsFix anchorPointsFresh
 # Not a repair but the assumption the anchor points rest on: one frame in flight.
 expect_violation mapcorrection initTwoInFlight anchorPointsFresh
+check_liveness mapcorrection everyResultHandled,anchorCatchesUp
+expect_liveness_violation mapcorrection initNoOrderFix anchorCatchesUp
 
 # Tracking pipeline: map loss, relocalization, tracking state, world, visibility, plane recovery.
 check_model tracking relocalizedByConfirmation worldLostAndRebuilt planeRecoveryRan resetInEstablishedWorld relocalizedWhileShown

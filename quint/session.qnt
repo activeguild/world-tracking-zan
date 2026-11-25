@@ -332,4 +332,27 @@ module session {
     | _ => false
   })
   observation abortsStart = s.phase == StartingBackend and s.stopRequested
+
+  // ------------------------------------------------------------- liveness
+  /// What the environment owes: a pending camera / worker start settles, a
+  /// posted message is delivered and handled. (Weak fairness: an action that
+  /// stays enabled is eventually taken.) Nothing is assumed about the calls
+  /// to start / stop / reset nor about video frames arriving.
+  temporal fairness = and {
+    weakFair(cameraSettles, s),
+    weakFair(workerHandles, s),
+    weakFair(mainHandles, s),
+  }
+
+  /// A frame in flight is answered: the client does not stay busy forever.
+  temporal busyEnds = fairness implies always(s.busy implies eventually(not(s.busy)))
+
+  /// A start settles: the session does not stay in a starting phase forever.
+  temporal startSettles = fairness implies
+    always((s.phase == StartingCamera or s.phase == StartingBackend) implies eventually(s.phase == Idle or s.phase == Running))
+
+  /// When start() was the last call and nothing failed, the session ends up
+  /// running (or another call is made).
+  temporal lastStartRuns = fairness implies
+    always(s.lastCall == StartCall implies eventually(s.phase == Running or s.lastCall != StartCall or s.startFailed))
 }

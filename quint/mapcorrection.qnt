@@ -285,4 +285,24 @@ module mapcorrection {
       | Some(m) => a.mapId == m.id and m.corr.length() == 0 and s.corrections > 0
     }
   })
+
+  // ------------------------------------------------------------- liveness
+  /// The transport delivers: a frame sent is processed, a result is handled.
+  temporal fairness = weakFair(engineProcesses, s) and weakFair(handleResult, s)
+
+  /// Every frame sent comes back and is handled (no frame stays in flight).
+  temporal everyResultHandled = fairness implies
+    always((s.toEngine.length() + s.toSession.length() > 0) implies eventually(s.toEngine.length() + s.toSession.length() == 0))
+
+  /// With nothing in flight the anchor is where the engine's map is: attached
+  /// to it (if the session has a world) with exactly its corrections. Reached
+  /// again and again, whatever the engine did in between.
+  val anchorOnEngineMap = match s.anchor {
+    | None => true
+    | Some(a) => match s.map {
+      | None => false
+      | Some(m) => a.mapId == m.id and a.view == m.corr
+    }
+  }
+  temporal anchorCatchesUp = fairness implies always(eventually(anchorOnEngineMap))
 }

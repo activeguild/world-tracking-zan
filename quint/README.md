@@ -49,9 +49,27 @@ scaled down; the rules are the same.
 | `recoveryOnlyBeforeWorld` | a plane recovery runs only before the world exists and while the map is not lost |
 | `recoversWhenTrackingIsGood` | bounded liveness: after enough good frames in an established world the objects are visible |
 
-The state machine and the session side are replayed against the code; the
-engine's relocalization bookkeeping is the model's reading of
-`VisionEngine.updateMap` and has no automatic check.
+The state machine, the session side and the engine's relocalization
+bookkeeping (`RelocalizationLedger`: pending candidate, failed attempts,
+monitor window, map reset rule) are replayed against the code.
+
+## Liveness
+
+Temporal properties, checked by TLC over the whole state graph under weak
+fairness (what stays enabled eventually happens: a start settles, a message
+is delivered, frames keep coming). Nothing is assumed about the user's calls.
+
+| Model | Property | Meaning |
+|---|---|---|
+| session | `busyEnds` | a frame in flight is answered: the client does not stay busy forever |
+| session | `startSettles` | a start ends in running or idle |
+| session | `lastStartRuns` | when `start()` was the last call and nothing failed, the session ends up running |
+| mapcorrection | `everyResultHandled` | no frame stays in flight |
+| mapcorrection | `anchorCatchesUp` | again and again the anchor is where the engine's map is |
+| tracking | `lossEnds` | a loss ends: the camera is located, a relocalization is applied, or the map is given up |
+
+`busyEnds`, `lastStartRuns` and `anchorCatchesUp` each have a run that
+violates them when the corresponding repair is switched off.
 
 ## Commands
 
@@ -60,8 +78,8 @@ engine's relocalization bookkeeping is the model's reading of
   date. Needs Java 17+; Quint downloads the checker on first use.
 - `npm run quint:export` — regenerate `conformance/*-traces.json`.
 - `npx vitest run tests/quint` — replay the walks on the real `ARSession`,
-  `VisionWorkerClient`, worker handler, `WorldAnchor` and `TrackingStateMachine`
-  (part of `npm test`;
+  `VisionWorkerClient`, worker handler, `WorldAnchor`, `TrackingStateMachine`
+  and `RelocalizationLedger` (part of `npm test`;
   no Java, no Quint).
 - Explore a counterexample:
   `npx quint run quint/session.qnt --backend typescript --init initNoWorkerErrorFix --invariant busyIffOneInFlight --verbosity 3`
