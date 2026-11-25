@@ -268,7 +268,10 @@ session.on("stopped", () => {
   gestures.reset();
 });
 
+/** A placement is waiting for the GLB to load: further taps wait for it (one model, one object). */
+let placing = false;
 async function placeOrMoveAt(x: number, y: number): Promise<void> {
+  if (placing) return;
   const hit = session.hitTest(x, y);
   if (!hit) return;
   // An object placed through the session API (test hook) counts as placed too.
@@ -281,12 +284,18 @@ async function placeOrMoveAt(x: number, y: number): Promise<void> {
     sampleVideo.play().catch((e) => console.warn("[AR] video play() was refused:", e));
     manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   } else if (modelPromise) {
+    placing = true;
+    let model: THREE.Object3D | null = null;
     try {
-      const model = await modelPromise;
-      placed = session.placeObject(model, hit, modelSize);
+      model = await modelPromise;
     } catch {
-      placed = session.placeCube(hit);
+      model = null;
+    } finally {
+      placing = false;
     }
+    // The world the hit belongs to may be gone by the time the GLB arrives.
+    if (!session.isWorldReady) return;
+    placed = model ? session.placeObject(model, hit, modelSize) : session.placeCube(hit);
     manipulationHintUntil = performance.now() + MANIPULATION_HINT_MS;
   } else {
     placed = session.placeCube(hit);

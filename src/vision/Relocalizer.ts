@@ -844,18 +844,22 @@ export class Relocalizer {
         guesses[j * 2] = candidates[list[j].index].x;
         guesses[j * 2 + 1] = candidates[list[j].index].y;
       }
-      // The tracker's displacement gate (from the guess = the candidate
-      // track) is left wide so that a patch landing beyond the radius still
-      // reports where it landed; the radius itself is applied here.
-      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, radiusPx * 4);
+      // No displacement gate in the tracker: the radius is applied here, and
+      // a landing beyond it must still pass the forward-backward check
+      // before it is reported as `too_far`. A gated-out (TOO_FAR) point
+      // skips that check; such unverified landings used to be reported with
+      // a distance and purged healthy landmarks whenever the current image
+      // under the candidate was simply not the keyframe patch (occlusion,
+      // blur, another scene) and the forward LK ran away.
+      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, Number.POSITIVE_INFINITY);
       for (let j = 0; j < n; j++) {
         const v = verdicts[list[j].index];
         v.keyframeFrameId = kf.frameId;
         const st = res.status[j];
-        if (st === TrackStatus.OK || st === TrackStatus.TOO_FAR) {
+        if (st === TrackStatus.OK) {
           const lx = res.positions[j * 2], ly = res.positions[j * 2 + 1];
           const d = Math.hypot(lx - guesses[j * 2], ly - guesses[j * 2 + 1]);
-          if (st === TrackStatus.OK && d <= radiusPx) {
+          if (d <= radiusPx) {
             v.status = "verified";
             v.x = lx;
             v.y = ly;
@@ -1016,7 +1020,11 @@ export class Relocalizer {
   private suppressed(kf: Keyframe, rank: CoarseImage, frameId: number | undefined): boolean {
     if (frameId === undefined) return false;
     const s = this.retry.get(kf.id);
-    if (!s || frameId >= s.cooldownUntil) return false;
+    // Strictly after: with attempts every `attemptEveryNFrames` (3) and a
+    // cooldown of two periods (6), `>=` freed the keyframe exactly on the
+    // second following attempt, so the top-ranked batches alternated and the
+    // lower-ranked keyframes were never tried on an unchanged view.
+    if (!s || frameId > s.cooldownUntil) return false;
     return coarseShift(s.failedRank, rank, 0).score >= this.config.retryImageChangeScore;
   }
 

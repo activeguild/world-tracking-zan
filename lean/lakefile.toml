@@ -1,0 +1,10 @@
+name = "guardrails"
+version = "0.1.0"
+defaultTargets = ["Guardrails"]
+
+[[lean_lib]]
+name = "Guardrails"
+
+[[lean_exe]]
+name = "conformance"
+root = "Main"

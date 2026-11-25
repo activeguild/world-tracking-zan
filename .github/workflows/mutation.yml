@@ -1,0 +1,45 @@
+name: Mutation testing
+
+# Mutants of the decision-logic modules (mutator.config.ts) must be killed by
+# a test or recorded as equivalent in mutator.accepted.json. A survivor fails
+# the job (exit code 2).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # @mizchi/mutator requires Node 24 or later.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+
+      # Verdicts of unchanged mutants are reused from the snapshot; a run
+      # without it starts cold and executes every mutant.
+      - name: Restore the mutator snapshot
+        uses: actions/cache@v4
+        with:
+          path: .mutator
+          key: mutator-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            mutator-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
+
+      - name: No surviving mutant
+        run: npm run mutate:ci

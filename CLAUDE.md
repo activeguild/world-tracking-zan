@@ -207,6 +207,56 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### ミューテーションテスト — `@mizchi/mutator`（2026-11-25、ユーザー要望）
+
+テストが「壊れたコードを本当に落とすか」を測る。[mizchi/mutator](https://github.com/mizchi/mutator) 0.5.5（固定）を devDependency に追加。エンジンの処理は不変、既存テストも未変更。
+
+- **対象**（`mutator.config.ts`）: 判定ロジック 8 ファイル — `ARState` / `ObjectVisibility` / `Guidance` / `ObjectGestures` / `PoseValidation` / `InitStageValidation` / `RelocalizationSchedule` / `PlaneRecovery`（Lean ガードレールと同じ「壊れても気づきにくい判定」）
+- **使うテスト**（`vitest.mutation.config.ts`）: それらの単体テスト 14 ファイルだけ。通常の設定のままだと合成映像のエンジンテスト 40 ファイルが対象を通り、テストごとのカバレッジ取得が 10 分で終わらなかった
+- **コマンド**: `npm run mutate`（対象全体。初回 約 7 分、以後は `.mutator/` のキャッシュで変更箇所だけ）、`npm run mutate:diff`（`origin/main` との差分に触れるミュータントだけ）。`.mutator/` はコミットしない
+- **初回の結果**: 1033 ミュータント — Killed 566 / Survived 104 / Timeout 4 / NoCoverage 6 / 型エラーで除外 353、スコア 83.8%
+- **仕分けとテスト追加（同日）**: 検出されなかった 110 件（Survived 104 + NoCoverage 6）のうち **98 件はテスト追加で検出**、**12 件は等価として受理**（`mutator.accepted.json`、理由つき、コミット済み）。現在 Killed 664 / Timeout 4 / 受理 12 / 型エラー 353、**スコア 100%**。単体 424 件（+46）
+  - 追加したテスト: `tests/vision/RelocalizationSchedule.test.ts`（LK 失敗理由の同数・ちょうど半分、準備 / 試行の境界、タイムラインの「最初の成功だけ記録」・frame 0・失探時刻不明）、`tests/ar/ObjectGesturesEdges.test.ts`（slop / 時間ちょうど、同じ pointer の二重 down、3 本目、dead 状態、reset、ピンチの 8 px 下限、ひねり中心の y）、`tests/vision/PoseValidationEdges.test.ts`（`R·C + t = 0`、上限ちょうど、既定ラベル、回転の不一致コード）、`tests/vision/InitStageValidationEdges.test.ts`（各上限ちょうど、棄却時 `accepted: false`）、`tests/vision/PlaneRecoveryController.test.ts`（二視点トリガの閾値ちょうど、`reset`、アイドル診断）、既存の `Guidance.test.ts`（全文言が空でない、`stable` な回復候補は横移動の誘導に勝つ）と `ARState.test.ts`（`ARError` の名前と既定メッセージ）
+  - 傾向: 生き残りの大半は「閾値ちょうど」のテストがなかったもの。**実装の誤りは見つかっていない**（追加テストはすべて現在の挙動のまま合格）
+  - 受理した 12 件: `ARState` の失探分岐 1（SEARCHING_FEATURES への再代入は no-op）、`ObjectGestures` 4（3 本目の move は 2 本の位置を変えない / rotate 中に pointer 数 0 にはならない ×2 / `wrapAngle(π)`）、`InitStageValidation` 3（`minGainFraction ≤ 0` の 2 行は後の行が包含 ×2、`errorBefore = 0` のときだけ差が出る 1 = 厳密には等価ではない）、`RelocalizationSchedule` 4（`lkFailureReason` の `second` は書くだけで読まれない ×3、最大値 0 の早期 return）
+  - 見つかった死にコード: `lkFailureReason` の変数 `second`（未修正。消せば受理 3 件が不要になる）
+- **変更時のルール**: 対象 8 ファイルを変えたら `npm run mutate`（または `mutate:diff`。CI と同じ判定は `npm run mutate:ci`）。新しい生き残りはテストを足すか、等価なら `npx mutator accept <key> --reason "…"` で理由を残す
+- **CI（同日）**: `.github/workflows/mutation.yml` が PR ごと（と `main` への push）に `npm run mutate:ci`（= `mutator --fail-on-survived`）を Node 24 で実行する。生き残りが 1 件でもあれば失敗（終了コード 2）、`mutator.accepted.json` の受理分は数えない。`.mutator/` は `actions/cache` で引き継ぐ（キャッシュなしのコールド実行は CI で約 4 分、ローカル 4 コアで 3 分 24 秒）。あわせて `lean.yml` の Node を 22 → 24 に（パッケージが Node 24 以上を要求。22 でも動くが `node:sqlite` の ExperimentalWarning が出てサポート外）。ローカルの開発環境と Vercel のビルドの Node は変えていない
+- **未対応**: スコア下限（`thresholds.break`）と `critical` 指定（`--fail-on-survived` があるので現状は不要）
+
+### Lean による形式ガードレール（2026-11-21、ユーザー要望）
+
+freee の記事（業務ルールを Lean に写し、検査を通らない操作は実行しない）の考え方を、**壊れても気づきにくい判定ロジック**に適用。`lean/`（Lean 4.24.0、Mathlib なし、Lake）。エンジンの処理は不変。
+
+- **モデルと定理**（`lean/Guardrails/`）: `TrackingState`（`ARState.update` の全分岐。RELOCALIZING は World 確立時のみ / Map で位置決めでき inlier ≥ `lostBelow` なら失探状態を抜けてそこに留まる / LOST には `lostFrameTolerance` 回の不良フレームが要る）、`RetryCooldown`（失敗 Keyframe はちょうど次の 2 試行だけ抑制）、`LandmarkPurge`（追跡フレーム以外・1 回目・距離上限超では削除しない）、`PlaneFound`（1 回の乱れは猶予、3 回目の不整合で `found` を落とし、戻るのは安定フレーム規則だけ）
+- **実装との結合**: 状態機械だけ機械的に結合。`lake exe conformance` がモデルの全遷移表（8 状態 × badFrames 3 × inlier 6 × フラグ 16 = 2304 行、`lean/conformance/tracking-state.json`、コミット済み）を出力し、`tests/lean/Conformance.test.ts` が TypeScript 実装を全行で突き合わせる（通常の `npm test` に含まれ、Lean 不要）。修正 8 を戻すと `SEARCHING_FEATURES inl=20 … model PLANE_FOUND` で落ちることを確認。**他の 3 モデルは仕様の記述で、実装との自動突き合わせはない**
+- **検査**: `npm run lean:check`（証明のビルド、`sorry` / `admit` / `axiom` / `unsafe` / `native_decide` の禁止、遷移表が最新か）。Lean が要るのはこのコマンドだけ。**CI**: `.github/workflows/lean.yml` が PR ごと（と既定ブランチへの push）に `lean:check` と突き合わせテスト（`tests/lean`）を実行する（elan でツールチェーンを入れ `~/.elan` をキャッシュ）。単体テスト全体・ブラウザテストは CI では走らせていない
+- **変更時のルール**: 対応する TypeScript を変えるときは (1) Lean モデルを先に変える、(2) 定理を通す。通らなくなった定理は「ルールを捨てる」ことなので黙って消さず変更内容に書く、(3) `npm run lean:export` → 突き合わせテストを通す
+- 証明中に見つかったこと: `PlaneFound` の「`found` が戻るのは安定フレーム規則だけ」は `stableFramesRequired = 0` だと成り立たない（不安定な候補でも即 `found`）。既定は 5 なので実害はないが、定理は `0 < required` を前提にしている
+
+### コードレビュー対応 — 15 件の修正（2026-11-20、実機確認待ち）
+
+`src/` 全体のレビュー（行単位の精読 + 履歴監査 + ファイル横断 + 規約）で確定した 15 件を修正。各修正は「修正なしで失敗・修正ありで合格」のテストつき（フレーム ID の件のみコードのみ）。**PnP / RANSAC のゲート値・BA の数式・再局所化の検証値は変更していない**。単体 376 件（+11）、ブラウザ 5 件（+1）、`tsc` / `npm run build` OK。
+
+- **Essential RANSAC の早期終了**（`EssentialMatrix.ts`）: inlier 比 < 0.93% で `w⁸` が倍精度 ε を下回り `log(1−p) = 0` → 必要反復数 −∞ → その場で終了し null。n = 250 で外れ値なし 2.5% / 30% で 27% の呼び出しが失敗していた（Map 初期化・H/E モデル選択に影響）。分母が負のときだけ反復数を更新
+- **v21 の Landmark 削除を絞る**（`Relocalizer.verifyRelinks` / `MapTracker.reassociateWith`）: 従来の `far@` は変位ゲートで打ち切られ前後方向チェックを通っていない着地で、しかも失探フレーム・誘導付き復帰の仮姿勢でも削除していた（無関係な景色 20 フレームで 31 点、中央 60% の遮蔽で 20 点）。(1) 照合 LK はゲートなしで走らせ、報告される着地はすべて FB 通過済み、(2) 削除は追跡フレームの再関連付けのみ（`canPurge`）、(3) 着地が `maxObservationErrorPx`〜`relocalization.lkMaxDisplacementPx`（`purgeFarMaxPx`）の範囲、(4) 同じ Landmark の 2 回目の遠い着地で削除（`farStrikes`）。本当に矛盾する Landmark は従来どおり消える（2 フレーム目）。**実機ログの `far 3@44.1px` などは LK の暴走だった可能性が高く、v21 以降の録画の `purge` 数は割り引いて読む**。HUD の `lk` / `far` の内訳は変わる（FB 失敗は `lk` 側）
+- **再初期化後の原点 Keyframe**（`VisionEngine.renewReference`）: 参照画像を Map が無い間しか保存していなかったため、Map リセット後の再初期化では初期化フレーム（|t| ≈ 1）が `origin` になり、ステージがそれを再姿勢化せず BA が固定していた。Map の有無に関わらず保存。`reset()` はスロットと `lastImageMotion` も消す
+- **フレーム ID はセッションが採番**（`ARSession.nextFrameId`）: グラバーごとのカウンタだったため、Android の auto 切替（30 フレーム目）と WebGL コンテキスト喪失時に 0 へ戻り、Keyframe 作成間隔・Landmark 寿命・`lastStage.frameId === r.frameId`（補正の二重適用）が狂っていた
+- **`pickObject` の線分しきい値**: Raycaster の既定 1 m が Cube の輪郭線に当たり、画面のどこから始めたドラッグでも Cube を掴んでいた。0 に設定。ブラウザテストのドラッグはこのバグに依存していたので、Cube の投影位置を押すよう修正
+- **`ARWorld.setWorldReady(false)`**: 反復中の `splice` で 1 個おきにしか削除していなかった
+- **参照更新直後の回転事前値**: 視差で参照を更新したフレームの `prevFrameRotation` は恒等（そのフレームが新しい参照）。旧参照に対する回転を残していたため次フレームの事前値が蓄積回転ぶん（0.4°/frame × 34 フレームで 13.6°）ずれ、そのフレームで PnP が失敗すると保持姿勢がそのまま回っていた
+- **状態機械**: World 確立済み・Map で位置決め済み・フレーム間 inlier ≥ `lostBelow` なら `RELOCALIZING` / `TRACKING_LOST` から `PLANE_FOUND` へ戻る（従来は 40 inlier が唯一の出口で、低テクスチャの床では姿勢が出ていても非表示のままになりえた）
+- **長い失探後の寿命削除**: 失探フレーム数を最初の追跡フレームで `lastSeenFrame` に加算（寿命は追跡フレームだけを数える、というコメントどおりに）
+- **LK の粗い段**: テクスチャ不足は画像外と同じく段を飛ばし、level 0 だけが `LOW_TEXTURE` を返す（4×4・コントラスト 25 の斑点 40 個: 4/40 → 40/40）。低テクスチャ面で特徴点が毎フレーム入れ替わる原因だった
+- **GLB の再配置**（`ARObject.fromModel`）: 読み込み時の変換を `userData` に保存して毎回そこから正規化（親から外す、モデル自身の位置も考慮）。デモは GLB 読み込み待ちの間のタップを無視
+- **`start()` / `stop()`**: 開始中の再呼び出しは同じ Promise、開始中の `stop()` は有効、カメラ起動後の失敗でカメラ・グラバー・バックエンドを解放、`stop()` は World があれば `worldLost` を発行。`CameraManager` も同様（メタデータ失敗時にストリーム停止）
+- **PlaneDetector**: 連続する不整合候補を数え、1 回の乱れ（2 比較）までは猶予、3 回目で `found` を落とす
+- **再試行 cooldown**: `frameId > cooldownUntil`（試行間隔 3 フレームで 3 試行が 8 枚を一巡する、という v14 の意図どおりに）
+- **予測フレームの `poseDeltaTranslation`**: `prevCenter` のコピーに速度を足す（HUD の Δt と次フレームのゲート速度項が 0 になっていた）
+- **レビューで棄却したもの**: PnP の事前値が t を回していない件は、原点から 30 単位・6° でも同じ解に収束し影響なし
+- **未対応（一覧外）**: 起動後の端末回転、同期表示のコピーが取り込みの後、PlaneTracker への Map 補正（`?planetrack=1`）、`?refine=1` の BA 前アンカー姿勢、ワーカー `onerror` の busy 解除、`?video=1` の `<source>` 失敗時フォールバック、`trackingStateChanged` が `AR_ACTIVE` を通知しない、設定マージの `undefined`、HUD が `pointer-events: none` でスクロールできない
+- **実機で読むべきもの**: 低テクスチャの床での `Feat` / LK の維持、`relink … purge` の数（大幅に減るはず）、失探 → 復帰直後の `LM` 総数、失探後に `AR_ACTIVE` へ戻るまでの時間、Map リセット後の `BA` 行が `kf N/N+1 ref …`（`fix origin` でない）こと、Android の auto 切替後も `Age lm` が負にならないこと
+
 ### v16 — 一周後の再局所化: 長時間失探では保持姿勢との Jump 上限を外す（2026-10-08、実機確認待ち）
 
 7 本目の録画（`e93ca8c`、19.5 s、廊下）: スマホをその場で一周させると「先ほど見ていた場所にカメラを戻してください」のまま復帰しない。HUD: 一周の前半は Map が追跡を続け（PnP 123i → 64i 3.07 px → 16i 2.60 px、`LM 326 → 758 → 1170`、ほぼ純回転なので新規 Landmark の奥行きは不確か）、約 140° で失探。元の視点に戻ると `Rank KF1 0.97 / KF4 0.91`、`LKpts 130/183`、`pnp 2–3 ran`、**`val 0`、`Stage PNP`** を 6 フレーム cooldown ごとに繰り返す。`Stage PNP` は「PnP まで進んだが検証を通らない」の意味で、拒否理由（`Best` / `Reject` 行）は HUD の折り返しの下で読めなかった。

@@ -163,3 +163,22 @@ describe("worldPhase (v10 §3, §26)", () => {
     expect(p({ state: TrackingState.RELOCALIZING, worldEstablished: true, lostMs: DELAY, planeRecovery: "inactive" })).toBe("RELOCALIZING");
   });
 });
+
+describe("guidance wording and the stable recovery candidate (found by mutation testing)", () => {
+  it("every key has wording, except NONE which shows nothing", () => {
+    for (const [key, text] of Object.entries(GUIDANCE_TEXT_JA)) {
+      if (key === "NONE") expect(text).toBe("");
+      else expect(text.trim().length, key).toBeGreaterThan(0);
+    }
+    expect(GUIDANCE_TEXT_JA.INITIALIZING).toBe("Initializing…");
+    expect(GUIDANCE_TEXT_JA.TAP_TO_PLACE).toContain("タップ");
+    expect(new Set(Object.values(GUIDANCE_TEXT_JA)).size).toBe(Object.keys(GUIDANCE_TEXT_JA).length);
+  });
+
+  it("a recovery whose candidate is already stable is a candidate: no sideways request over it", () => {
+    const base = { state: TrackingState.PLANE_DETECTING, planeSearchStage: "extent" as const, planeSearchStageMs: 5000, sidewaysGuidanceDelayMs: 1500 };
+    expect(getGuidance(ctx({ ...base, planeRecovery: "stable" }))).toBe("PLANE_DETECTING");
+    expect(getGuidance(ctx({ ...base, planeRecovery: "candidate" }))).toBe("PLANE_DETECTING");
+    expect(getGuidance(ctx({ ...base }))).toBe("MOVE_SIDEWAYS");
+  });
+});

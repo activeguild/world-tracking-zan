@@ -234,6 +234,57 @@ describe("Phase 1 browser smoke test", () => {
     await ctxOn.close();
   });
 
+  it("start() is re-entrant and stop() during a start is honoured", async () => {
+    const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
+    const page = await context.newPage();
+    await page.goto(`https://localhost:${PORT}/`, { waitUntil: "load" });
+    const r = (await page.evaluate(async () => {
+      let streams = 0;
+      const md = navigator.mediaDevices;
+      const real = md.getUserMedia.bind(md);
+      md.getUserMedia = (c) => {
+        streams++;
+        return real(c);
+      };
+      let workers = 0;
+      const RealWorker = window.Worker;
+      window.Worker = class extends RealWorker {
+        constructor(url: string | URL, opts?: WorkerOptions) {
+          super(url, opts);
+          workers++;
+        }
+      };
+      const session = window.__ar.session;
+      const video = document.getElementById("video") as HTMLVideoElement;
+      // Two overlapping starts: one camera stream, one worker.
+      await Promise.all([session.start(), session.start()]);
+      const double = { running: session.isRunning, streams, workers };
+      session.stop();
+      const stopped = { running: session.isRunning, hasStream: video.srcObject !== null };
+      // stop() while the next start is still awaiting the camera.
+      const p = session.start();
+      session.stop();
+      await p;
+      const during = { running: session.isRunning, hasStream: video.srcObject !== null };
+      // And it starts normally afterwards.
+      await session.start();
+      const again = { running: session.isRunning, hasStream: video.srcObject !== null };
+      session.stop();
+      return { double, stopped, during, again };
+    })) as {
+      double: { running: boolean; streams: number; workers: number };
+      stopped: { running: boolean; hasStream: boolean };
+      during: { running: boolean; hasStream: boolean };
+      again: { running: boolean; hasStream: boolean };
+    };
+    console.log("[browser-smoke] lifecycle " + JSON.stringify(r));
+    await context.close();
+    expect(r.double).toEqual({ running: true, streams: 1, workers: 1 });
+    expect(r.stopped).toEqual({ running: false, hasStream: false });
+    expect(r.during).toEqual({ running: false, hasStream: false });
+    expect(r.again).toEqual({ running: true, hasStream: true });
+  });
+
   it("v16: the WebGL frame grabber reproduces the 2D grabber's gray image and tracks to a world", async () => {
     const context = await browser!.newContext({ ignoreHTTPSErrors: true, permissions: ["camera"] });
     const page = await context.newPage();
@@ -439,8 +490,23 @@ describe("Phase 1 browser smoke test", () => {
       const fire = (type: string, id: number, x: number, y: number) =>
         app.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: rect.left + x, clientY: rect.top + y, bubbles: true, pointerType: "touch", isPrimary: id === 1 }));
       const wait = () => new Promise((r) => setTimeout(r, 30));
-      const cx = rect.width / 2, cy = rect.height * 0.6; // where the cube was placed
+      // Where the cube is on screen *now* (the synthetic camera has moved
+      // since it was placed): its projected centre.
+      const session = window.__ar.session;
+      const proj = session.placedObjects[0].position;
+      proj.y += 0.05;
+      proj.project(session.threeCamera);
+      const cx = ((proj.x + 1) / 2) * rect.width, cy = ((1 - proj.y) / 2) * rect.height;
       const before = window.__ar.stats().objects[0];
+      // Far from the cube nothing is picked (the cube's edge lines must not
+      // count as hits through the raycaster's default 1 m line threshold).
+      const farPicks = [
+        [10, 10],
+        [rect.width - 10, 10],
+        [10, rect.height - 10],
+        [rect.width - 10, rect.height - 10],
+      ].filter(([x, y]) => window.__ar.session.pickObject(x, y, 0) !== null).length;
+      const nearPick = window.__ar.session.pickObject(cx, cy) !== null;
       // Drag: press on the cube, move 80 px right in a few steps, release.
       fire("pointerdown", 1, cx, cy);
       await wait();
@@ -484,9 +550,11 @@ describe("Phase 1 browser smoke test", () => {
       fire("pointerup", 2, ncx + 50, cy);
       await wait();
       const afterPinch = window.__ar.stats().objects[0];
-      return { before, afterDrag, afterTwist, afterPinch, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
+      return { before, farPicks, nearPick, afterDrag, afterTwist, afterPinch, expected: expected ? [expected.position.x, expected.position.y, expected.position.z] : null, placed: window.__ar.stats().placedObjects };
     })) as {
       before: { position: number[]; yaw: number; scale: number };
+      farPicks: number;
+      nearPick: boolean;
       afterDrag: { position: number[]; yaw: number; scale: number };
       afterTwist: { position: number[]; yaw: number; scale: number };
       afterPinch: { position: number[]; yaw: number; scale: number };
@@ -621,6 +689,8 @@ describe("Phase 1 browser smoke test", () => {
     // finger (still one object, no re-placement), the twist turned it by
     // −90° about the plane normal without moving it.
     expect(manipulation.placed).toBe(1);
+    expect(manipulation.farPicks).toBe(0);
+    expect(manipulation.nearPick).toBe(true);
     expect(manipulation.expected).not.toBeNull();
     const dragMove = Math.hypot(manipulation.afterDrag.position[0] - manipulation.before.position[0], manipulation.afterDrag.position[2] - manipulation.before.position[2]);
     expect(dragMove).toBeGreaterThan(0.02);
