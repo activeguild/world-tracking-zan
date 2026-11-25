@@ -22,6 +22,8 @@ export default defineConfig({
       "tests/vision/PlaneRecoveryController.test.ts",
       "tests/vision/PlaneRecovery.test.ts",
       "tests/vision/RelocalizationSpeed.test.ts",
+      "tests/quint/RelocalizationLedgerConformance.test.ts",
+      "tests/vision/RelocalizationLedger.test.ts",
     ],
     testTimeout: 30_000,
   },

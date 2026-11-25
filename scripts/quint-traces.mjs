@@ -97,6 +97,27 @@ const trackingView = (s) =>
     bit(s.visible),
   ].join("|");
 
+// The engine's relocalization bookkeeping (RelocalizationLedger), same model.
+// frame inputs: located, relocalization result N/S/I/A, near
+// | map | framesSinceTracked | pending "age.confirmations" | failed attempts (capped)
+// | monitor frames left | relocalized | applied this frame | world established
+const pickOf = (o) => (o && o.tag === "Some" ? o.value : null);
+const ledgerView = (s, picks) => {
+  const p = some(s.pending);
+  const reloc = pickOf(picks?.reloc);
+  return [
+    picks ? [bit(pickOf(picks.located)), reloc ? { NoCandidate: "N", Strong: "S", StrongImmediate: "I", Acceptable: "A" }[tag(reloc)] : "N", bit(pickOf(picks.near))].join("") : "---",
+    idOf(s.mapId),
+    int(s.framesSinceTracked),
+    p ? `${int(p.age)}.${int(p.confirmations)}` : "-",
+    int(s.attempts),
+    int(s.monitorLeft),
+    bit(s.relocalized),
+    bit(int(s.sinceApply) === 0),
+    bit(s.worldEstablished),
+  ].join("|");
+};
+
 const MODELS = [
   {
     name: "session",
@@ -130,6 +151,17 @@ const MODELS = [
     pick: () => "",
     legend: "inliers L/M/H|state machine saw mapInitialized,mapLost,planeFound,worldEstablished|state|map|framesSinceTracked|relocalized|plane detected|world established|session world|visible",
   },
+  {
+    name: "relocalization",
+    spec: "tracking",
+    samples: 700,
+    maxSteps: 24,
+    steps: ["step"],
+    view: ledgerView,
+    compact: true,
+    pick: () => "",
+    legend: "inputs located,reloc N/S/I/A,near|map|framesSinceTracked|pending age.confirmations|failed attempts (capped)|monitor frames left|relocalized|applied|world established",
+  },
 ];
 
 function generate(model) {
@@ -139,7 +171,7 @@ function generate(model) {
       execFileSync(
         join(root, "node_modules/.bin/quint"),
         [
-          "run", join(root, `quint/${model.name}.qnt`),
+          "run", join(root, `quint/${model.spec ?? model.name}.qnt`),
           "--backend", "typescript", "--mbt", "--invariant", "safety", "--step", step,
           "--max-steps", String(model.maxSteps), "--max-samples", String(model.samples), "--n-traces", String(model.samples),
           "--seed", SEED, "--out-itf", join(dir, `${"abcdef"[i]}_{seq}.itf.json`),
@@ -157,8 +189,9 @@ function generate(model) {
       const steps = [];
       let last = -1;
       for (let i = 1; i < states.length; i++) {
-        const step = [states[i]["mbt::actionTaken"], model.pick(states[i]["mbt::nondetPicks"]), model.view(states[i].s)];
-        const key = `${model.view(states[i - 1].s)} ${step.join(" ")}`;
+        const picks = states[i]["mbt::nondetPicks"];
+        const step = [states[i]["mbt::actionTaken"], model.pick(picks), model.view(states[i].s, picks)];
+        const key = `${model.view(states[i - 1].s, states[i - 1]["mbt::nondetPicks"])} ${step.join(" ")}`;
         if (!seen.has(key)) {
           seen.add(key);
           last = i - 1;
@@ -168,7 +201,7 @@ function generate(model) {
       if (last >= 0) traces.push(steps.slice(0, last + 1));
     }
     const head = {
-      model: `quint/${model.name}.qnt`,
+      model: `quint/${model.spec ?? model.name}.qnt`,
       seed: SEED,
       samples: model.samples,
       maxSteps: model.maxSteps,

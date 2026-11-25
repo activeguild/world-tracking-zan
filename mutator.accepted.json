@@ -3,6 +3,10 @@
     "reason": "Equivalent: with minGainFraction <= 0 the next line (errorAfter < errorBefore) is strictly stronger than this one, so evaluating this line too changes nothing.",
     "where": "src/vision/InitStageValidation.ts:100:7 l.minGainFraction > 0 -> l.minGainFraction >= 0"
   },
+  "1l89cbzmj72": {
+    "reason": "Equivalent: the initial value is only read by afterTracking(), where it matters only while the monitor window is open; the window opens in settle(), which follows a begin() that sets the flag to false.",
+    "where": "src/vision/RelocalizationLedger.ts:79:30 false -> true"
+  },
   "1x7zazkfv7s": {
     "reason": "Equivalent: rotate mode needs two pointers, so after one is released at least one is still down; size is never 0 here.",
     "where": "src/ar/ObjectGestures.ts:167:21 this.pointers.size > 0 -> this.pointers.size >= 0"
