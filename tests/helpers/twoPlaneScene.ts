@@ -120,13 +120,20 @@ export function tpRender(p: TPPose): Uint8Array {
 
 const I: Mat3 = new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
-/** Camera pose from a world-from-camera yaw (about y) then pitch (about x) and a centre. */
-export function tpPose(C: number[], yawRad: number, pitchRad: number): TPPose {
-  if (yawRad === 0 && pitchRad === 0) return { R: I, C };
+/**
+ * Camera pose from a world-from-camera yaw (about y), then pitch (about x),
+ * then roll (about the camera's own z), and a centre. `rollRad` defaults to
+ * 0 so the earlier two-angle callers are unchanged.
+ */
+export function tpPose(C: number[], yawRad: number, pitchRad: number, rollRad = 0): TPPose {
+  if (yawRad === 0 && pitchRad === 0 && rollRad === 0) return { R: I, C };
   const ry = rotationAxisAngle([0, 1, 0], yawRad);
   const rx = rotationAxisAngle([1, 0, 0], pitchRad);
+  const rz = rotationAxisAngle([0, 0, 1], rollRad);
+  const yx = new Float64Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) yx[i * 3 + j] = ry[i * 3] * rx[j] + ry[i * 3 + 1] * rx[3 + j] + ry[i * 3 + 2] * rx[6 + j];
   const rot = new Float64Array(9);
-  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) rot[i * 3 + j] = ry[i * 3] * rx[j] + ry[i * 3 + 1] * rx[3 + j] + ry[i * 3 + 2] * rx[6 + j];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) rot[i * 3 + j] = yx[i * 3] * rz[j] + yx[i * 3 + 1] * rz[3 + j] + yx[i * 3 + 2] * rz[6 + j];
   const R: Mat3 = new Float64Array([rot[0], rot[3], rot[6], rot[1], rot[4], rot[7], rot[2], rot[5], rot[8]]);
   return { R, C };
 }

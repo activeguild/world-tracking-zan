@@ -240,6 +240,14 @@ describe("accumulated BA corrections through a session (改善指示書 Phase 2)
         twice.applyMapCorrection(c);
         baFrames.push({ f, corr: Math.hypot(c.translation[0], c.translation[1], c.translation[2]), kf: b.keyframeCorrectionShift, local: b.localCorrectionShift, n: b.localFitLandmarks });
       }
+      // ARSession: an accepted multi-view init stage (v25) moves the anchor the same way.
+      const st = o.initRefinement?.lastStage;
+      if (st && st.applied && st.frameId === f && o.mapPose && once.attachedMapFrameId === o.mapPose.mapFrameId) {
+        const c = { rotation: st.correctionRotation, translation: st.correctionTranslation };
+        once.applyMapCorrection(c);
+        twice.applyMapCorrection(c);
+        twice.applyMapCorrection(c);
+      }
       const mp = o.mapPose;
       if (mp && mp.framesSinceTracked > 0) lost++;
       if (mp && mp.framesSinceTracked === 0) {

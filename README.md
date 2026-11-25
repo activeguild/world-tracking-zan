@@ -136,6 +136,29 @@ conserved within 0.3 %, placed points within 1 px through the whole scenario.
 `?initba=0` turns it off for A/B. The BA also rejects any run that produces a
 non-finite value (`invalid`) instead of silently doing nothing.
 
+On device the two-view problem is degenerate in the translation direction
+(floor-dominant view, 30 px baseline: the refinement moved the direction 3.5°
+without changing the residual), and the fresh map jumped from 0.5 to ~2 px as
+soon as a third viewpoint arrived. v25 adds multi-view stages: when the median
+parallax of the tracked init landmarks from the reference view reaches 60 /
+120 / 240 px, the init landmarks and the current pose are re-solved against
+the fixed reference view; the stored keyframes are re-posed, the landmarks
+built in the meantime are re-triangulated from all their views, and the world
+anchor follows the stage's correction (`init_stage`). `?initstages=0` keeps
+the two-view refinement only. A stage triggers on the camera *baseline* from
+the reference view (×2 / ×4 / ×8 of the initialization baseline), never on
+pixel parallax alone, and is accepted only through `validateInitStage`
+(finite, ≥ 15 % gain, spread observations, positive depths, pose change
+within the BA pose-jump limits, few far-moved landmarks); the solve, the
+keyframe poses (PnP on the solved landmarks only, else carried by the rigid
+correction) and the rebuilt landmarks are prepared in temporary storage and
+committed atomically. The keyframe BA holds the reference view itself fixed
+(every stored keyframe free), so one immutable map frame serves the
+initialization, the stages and the BA. On the synthetic scene a laterally graded ±3 %
+depth distortion injected after the initialization is removed by the stages
+(direction error 0.58° → 0.13°), and the clean map's PnP error drops from
+0.51 to 0.16 px.
+
 ## Phase 5 — keyframes and relocalization
 
 ```
@@ -153,6 +176,10 @@ camera lost in the map (PnP fails) → RELOCALIZING, world kept, objects hold 1.
 
 Placing a GLB instead of the cube: `?model=URL&size=0.15` (same-origin or
 CORS-enabled URL); in code `ar.placeObject(gltf.scene, hit, 0.15)`.
+Placing a video as a standing screen: `?video=1` (the bundled
+`public/sample.mp4` / `.webm`) or `?video=URL`, `?size=` = screen width in
+meters (default 0.3); in code `ar.placeVideo(videoElement, hit, 0.3)` and
+`videoElement.play()` from the tap (muted / playsinline).
 
 ## Phase 4 — world coordinate, hit test, Three.js placement
 
@@ -260,6 +287,7 @@ Query parameters:
 | `?hud=0`    | hide the HUD                                |
 | `?gravity=x,y,z` | override the gravity direction (camera frame) |
 | `?model=URL&size=0.15` | place this GLB (footprint in meters) instead of the cube |
+| `?video=1` / `?video=URL` | place the bundled sample video (or this video) as a standing screen; `?size=` = width in meters (0.3) |
 | `?fov=66`   | camera field of view along the long side (degrees) |
 | `?dist=0.5` | assumed camera→plane distance in meters (monocular scale; ~1.3 for a floor) |
 | `?sync=0`   | show the live video instead of the pose-synchronized frame |

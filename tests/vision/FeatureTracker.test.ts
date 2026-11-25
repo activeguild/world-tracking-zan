@@ -174,4 +174,30 @@ describe("FeatureTracker (pyramidal LK + forward-backward)", () => {
     // Includes the backward pass. Generous for CI machines.
     expect(ms).toBeLessThan(150);
   });
+
+  it("tracks small low-contrast corners on a uniform surface (a coarse level without texture is skipped)", () => {
+    // 40 isolated 4×4 specks, contrast 25, on flat grey: averaged away at
+    // the coarse pyramid levels, plainly trackable at level 0.
+    const make = (shift: number) => {
+      const img = new Uint8Array(W * H).fill(120);
+      for (let i = 0; i < 40; i++) {
+        const bx = 60 + (i % 8) * 65 + shift;
+        const by = 60 + Math.floor(i / 8) * 80;
+        for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) img[(by + y) * W + bx + x] = 145;
+      }
+      return img;
+    };
+    const pts = new Float32Array(80);
+    for (let i = 0; i < 40; i++) {
+      pts[i * 2] = 60 + (i % 8) * 65;
+      pts[i * 2 + 1] = 60 + Math.floor(i / 8) * 80;
+    }
+    const tracker = new FeatureTracker(DEFAULT_CONFIG.tracker);
+    const res = tracker.track(buildPyr(make(0)), buildPyr(make(2)), pts, 40);
+    expect(res.okCount).toBe(40);
+    for (let i = 0; i < 40; i++) {
+      expect(Math.abs(res.positions[i * 2] - (pts[i * 2] + 2))).toBeLessThan(0.5);
+      expect(Math.abs(res.positions[i * 2 + 1] - pts[i * 2 + 1])).toBeLessThan(0.5);
+    }
+  });
 });

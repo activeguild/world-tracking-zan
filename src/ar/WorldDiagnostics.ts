@@ -2,7 +2,8 @@ import type { WorldFrame } from "../math/CoordinateSystem";
 import { rotationDistance } from "../math/Pose";
 import type { PoseRejectCode, PoseSource } from "../vision/PoseValidation";
 import type { TrackingQuality } from "../vision/TrackingQuality";
-import type { BundleAdjustmentOutput, BundleAdjustmentRejectReason, MapPoseOutput, PlaneOutput, PlaneRecoveryDiagnostics } from "../vision/types";
+import type { BundleAdjustmentOutput, BundleAdjustmentRejectReason, InitStageOutput, MapPoseOutput, PlaneOutput, PlaneRecoveryDiagnostics } from "../vision/types";
+import type { InitStageRejectReason } from "../vision/InitStageValidation";
 
 /**
  * 修正指示書「World Tracking の空間固定性」§8: one record per processed
@@ -13,13 +14,14 @@ import type { BundleAdjustmentOutput, BundleAdjustmentRejectReason, MapPoseOutpu
  * per frame); the HUD formats them only when it is shown and the log line
  * is written only when the world transform changed and logging is on.
  *
- * The world transform may change for exactly three reasons: it is created
+ * The world transform may change for exactly four reasons: it is created
  * on the first found plane, it follows an accepted bundle-adjustment
- * correction (the map moved under the camera, v18 / Phase 2), or it is
- * dropped with the map. Any other change is a bug; the anchor-invariance
- * test asserts `worldTransformChanged ⇒ reason ≠ "none"`.
+ * correction (the map moved under the camera, v18 / Phase 2), it follows an
+ * accepted multi-view init stage (v25, the init map re-constrained from a
+ * wider baseline), or it is dropped with the map. Any other change is a
+ * bug; the anchor-invariance test asserts `worldTransformChanged ⇒ reason ≠ "none"`.
  */
-export type WorldTransformChangeReason = "none" | "created" | "ba_correction" | "map_reset";
+export type WorldTransformChangeReason = "none" | "created" | "ba_correction" | "init_stage" | "map_reset";
 
 export interface WorldTrackingDiagnostics {
   frameId: number;
@@ -39,8 +41,18 @@ export interface WorldTrackingDiagnostics {
   /** World origin move (meters) and world-axes rotation (deg) since the previous frame; 0 when nothing changed. */
   anchorPositionDelta: number;
   anchorRotationDeltaDeg: number;
+  /**
+   * The world transform's *values* (origin, axes, scale) differ from the
+   * previous frame's (指示書「座標系整合性と空間固定性」§9: not object
+   * identity — the session replaces the frame object on every correction,
+   * including an identity one).
+   */
   worldTransformChanged: boolean;
+  /** The frame object was replaced this frame, whether or not its values changed (diagnostic). */
+  worldFrameReplaced: boolean;
   worldTransformChangeReason: WorldTransformChangeReason;
+  /** The session named a reason but the values did not change (e.g. an identity correction); nothing moved. */
+  worldChangeReasonWithoutChange: boolean;
   /** Angle between this frame's and the previous frame's plane normal (deg); 0 without two consecutive planes. */
   planeNormalDeltaDeg: number;
   planeConfidence: number;
@@ -55,6 +67,14 @@ export interface WorldTrackingDiagnostics {
   baMaxLandmarkShift: number;
   baMaxPoseShift: number;
   baMaxPoseRotationDeg: number;
+  /** A multi-view init stage ran in this frame (v25; 指示書「座標系整合性」§8). */
+  initStageExecuted: boolean;
+  initStageAccepted: boolean;
+  initStageRejectReason: InitStageRejectReason;
+  /** The stage's change of the current pose (deg / map units) and its anchor correction length (map units). */
+  initStageRotationDeg: number;
+  initStageCameraShift: number;
+  initStageCorrection: number;
 }
 
 /**
@@ -96,23 +116,47 @@ export interface WorldDiagnosticsInput {
   previousPlaneNormal: ArrayLike<number> | null;
   planeRecovery: PlaneRecoveryDiagnostics | null;
   bundleAdjustment: BundleAdjustmentOutput | null;
+  /** The last init stage record; counted as this frame's when its frameId matches. */
+  initStage?: InitStageOutput | null;
   previousWorld: WorldFrame | null;
   world: WorldFrame | null;
   /** Why the session changed the world frame in this frame (it knows; the frames alone do not say). */
   changeReason: WorldTransformChangeReason;
 }
 
+/**
+ * Whether two world frames differ in value (origin, rotation, scale), beyond
+ * floating-point noise. Null vs a frame is a change (created / dropped).
+ */
+export function worldFrameValuesDiffer(a: WorldFrame | null, b: WorldFrame | null, epsilon = 1e-12): boolean {
+  if (a === b) return false;
+  if (!a || !b) return true;
+  if (Math.abs(a.scale - b.scale) > epsilon * Math.max(1, Math.abs(a.scale))) return true;
+  for (let k = 0; k < 3; k++) if (Math.abs(a.plane.origin[k] - b.plane.origin[k]) > epsilon * Math.max(1, Math.abs(a.plane.origin[k]))) return true;
+  for (let k = 0; k < 9; k++) if (Math.abs(a.rotation[k] - b.rotation[k]) > epsilon) return true;
+  return false;
+}
+
 export function buildWorldDiagnostics(i: WorldDiagnosticsInput): WorldTrackingDiagnostics {
   const m = i.mapPose;
   const scale = i.world?.scale ?? 0;
   const frameDelta = worldFrameDelta(i.previousWorld, i.world);
-  const changed = i.previousWorld !== i.world;
+  const replaced = i.previousWorld !== i.world;
+  const changed = worldFrameValuesDiffer(i.previousWorld, i.world);
   const fresh = !!m && m.framesSinceTracked === 0 && m.source !== "propagated";
   // The candidate that was chosen (or would have been) and why it was not used.
   const reject = m ? (m.planeCandidate?.reject ?? m.mapCandidate?.reject ?? null) : null;
   const ba = i.bundleAdjustment;
   const ran = !!ba && ba.ranThisFrame;
+  const st = i.initStage && i.initStage.frameId === i.frameId ? i.initStage : null;
+  const corr = st ? Math.hypot(st.correctionTranslation[0], st.correctionTranslation[1], st.correctionTranslation[2]) : 0;
   return {
+    initStageExecuted: !!st,
+    initStageAccepted: !!st && st.applied,
+    initStageRejectReason: st ? st.rejectReason : "none",
+    initStageRotationDeg: st ? st.rotationDeg : 0,
+    initStageCameraShift: st ? st.cameraShift : 0,
+    initStageCorrection: corr,
     frameId: i.frameId,
     poseSource: m ? m.source : "none",
     poseAccepted: fresh && !m!.jumpRejected,
@@ -124,7 +168,9 @@ export function buildWorldDiagnostics(i: WorldDiagnosticsInput): WorldTrackingDi
     anchorPositionDelta: Number.isFinite(frameDelta.positionDelta) ? frameDelta.positionDelta : 0,
     anchorRotationDeltaDeg: Number.isFinite(frameDelta.rotationDeltaDeg) ? frameDelta.rotationDeltaDeg : 0,
     worldTransformChanged: changed,
+    worldFrameReplaced: replaced,
     worldTransformChangeReason: changed ? i.changeReason : "none",
+    worldChangeReasonWithoutChange: !changed && i.changeReason !== "none",
     planeNormalDeltaDeg: planeNormalDeltaDeg(i.previousPlaneNormal, i.plane?.normal ?? null),
     planeConfidence: i.plane?.confidence ?? 0,
     planeAccepted: !!i.plane?.found,
@@ -142,8 +188,8 @@ export function buildWorldDiagnostics(i: WorldDiagnosticsInput): WorldTrackingDi
 
 /** One log line for a frame whose world transform changed (debug logging only). */
 export function formatWorldChange(d: WorldTrackingDiagnostics): string {
-  const delta = Number.isFinite(d.anchorPositionDelta) && d.worldTransformChangeReason === "ba_correction"
+  const delta = Number.isFinite(d.anchorPositionDelta) && (d.worldTransformChangeReason === "ba_correction" || d.worldTransformChangeReason === "init_stage")
     ? `Δ ${(d.anchorPositionDelta * 100).toFixed(2)} cm / ${d.anchorRotationDeltaDeg.toFixed(2)}°`
     : "";
-  return `WORLD TRANSFORM ${d.worldTransformChangeReason} at frame ${d.frameId}${delta ? ` ${delta}` : ""}${d.baExecuted ? `  (BA ${d.baAccepted ? "accepted" : `rejected ${d.baRejectReason}`} ${d.baErrorBefore.toFixed(2)} → ${d.baErrorAfter.toFixed(2)} px, kf ${d.baMaxPoseShift.toFixed(3)} u / ${d.baMaxPoseRotationDeg.toFixed(2)}°)` : ""}`;
+  return `WORLD TRANSFORM ${d.worldTransformChangeReason} at frame ${d.frameId}${delta ? ` ${delta}` : ""}${d.baExecuted ? `  (BA ${d.baAccepted ? "accepted" : `rejected ${d.baRejectReason}`} ${d.baErrorBefore.toFixed(2)} → ${d.baErrorAfter.toFixed(2)} px, kf ${d.baMaxPoseShift.toFixed(3)} u / ${d.baMaxPoseRotationDeg.toFixed(2)}°)` : ""}${d.initStageExecuted ? `  (init stage ${d.initStageAccepted ? "accepted" : `rejected ${d.initStageRejectReason}`}, pose ${d.initStageRotationDeg.toFixed(2)}° / ${d.initStageCameraShift.toFixed(3)} u, correction ${d.initStageCorrection.toFixed(3)} u)` : ""}`;
 }

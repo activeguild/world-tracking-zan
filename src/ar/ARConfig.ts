@@ -193,6 +193,27 @@ export interface LandmarkConfig {
    * `?initba=0` in the demo turns it off for A/B.
    */
   initRefineWithBA: boolean;
+  /**
+   * v25 (Android recordings 39/40): on device the two-view problem is
+   * degenerate in the translation direction (floor-dominant view, 30 px of
+   * parallax): the two-view refinement moved the direction 3.5° without
+   * changing the residual, and the fresh map (0.5 px) jumped to ~2 px as
+   * soon as a third viewpoint arrived. Each stage k (1…`initRefineStages`)
+   * re-solves the init landmarks and the current pose against the fixed
+   * reference view once the camera's *baseline* from the reference view (the
+   * camera-centre distance, in units of the initialization baseline) has
+   * grown by `initRefineBaselineFactor^k` (×2 → ×4 → ×8) and the tracked
+   * init landmarks show at least `initMinParallaxPx` of median parallax. The
+   * baseline, not the pixel parallax, is what conditions the depth: a pure
+   * rotation moves the pixels by hundreds of px without adding any
+   * (修正指示書「座標系整合性」, the §9.2 scenario's yaw phase). Landmarks not
+   * in the solve are re-triangulated against the re-posed keyframes and the
+   * world anchor follows the stage's correction (§5–§7 of that document);
+   * a stage is accepted only through `validateInitStage`. 0 = two-view
+   * refinement only. `?initstages=N` in the demo.
+   */
+  initRefineStages: number;
+  initRefineBaselineFactor: number;
   /** Minimum ray parallax angle (degrees) for a triangulated point. */
   minTriangulationAngleDeg: number;
   /** Maximum reprojection error (px, both views summed) for a triangulated point. */
@@ -666,6 +687,19 @@ export interface DebugConfig {
   overlay: boolean;
   /** Pose age (render time − frame capture time) above which the HUD shows POSE STALE (ms). */
   poseStaleMs: number;
+  /**
+   * Object-floor diagnostic (HUD `ObjFlr`): the landmarks around the world
+   * origin and each placed object, within `objectFloorRadiusDepthRatio` ×
+   * the object's depth horizontally and `objectFloorHeightWindowDepthRatio`
+   * × depth above / below the world plane, say how far the plane the
+   * object sits on is from the floor the map knows there. Statistics need
+   * `objectFloorMinLandmarks` neighbours; landmarks younger than
+   * `objectFloorYoungFrames` are the "young" generation.
+   */
+  objectFloorRadiusDepthRatio: number;
+  objectFloorHeightWindowDepthRatio: number;
+  objectFloorMinLandmarks: number;
+  objectFloorYoungFrames: number;
 }
 
 /**
@@ -902,6 +936,8 @@ export const DEFAULT_CONFIG: ARConfig = {
     initMinTranslationConfidence: 0.5,
     initMinLandmarks: 30,
     initRefineWithBA: true,
+    initRefineStages: 3,
+    initRefineBaselineFactor: 2,
     minTriangulationAngleDeg: 1.0,
     // The map is fixed once built (no depth refinement), so landmarks must
     // be well conditioned when created: 20 px of parallax from the anchor
@@ -1105,6 +1141,10 @@ export const DEFAULT_CONFIG: ARConfig = {
     logIntervalMs: 1000,
     overlay: true,
     poseStaleMs: 100,
+    objectFloorRadiusDepthRatio: 0.1,
+    objectFloorHeightWindowDepthRatio: 0.25,
+    objectFloorMinLandmarks: 5,
+    objectFloorYoungFrames: 30,
   },
   useWorker: true,
 };

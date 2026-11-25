@@ -213,6 +213,13 @@ describe("Relocalization (Phase 5)", () => {
     const last = outs[outs.length - 1];
     expect(last.mapPose!.mapFrameId).not.toBe(mapA);
     expect(last.worldEstablished).toBe(true);
+    // The re-initialized map has the reference view as its origin keyframe
+    // too (identity pose, fixed gauge), not the init frame.
+    const origins = engine.keyframes.filter((kf) => kf.origin);
+    expect(origins.length).toBe(1);
+    expect(origins[0].frameId).toBe(last.mapPose!.mapFrameId);
+    expect(Array.from(origins[0].pose.translation)).toEqual([0, 0, 0]);
+    expect(Array.from(origins[0].pose.rotation)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
     console.log(`[v10] desk B: plane found after ${found} frames, new map ${last.mapPose!.mapFrameId} (old ${mapA})`);
   });
 

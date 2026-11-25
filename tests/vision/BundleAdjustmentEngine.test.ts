@@ -61,7 +61,13 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
         // consistent synthetic map the mean may move by a few hundredths of a px.
         expect(ba.errorAfterPx).toBeLessThanOrEqual(ba.errorBeforePx + 0.05);
         expect(ba.errorAfterPx).toBeLessThan(1.0);
+        // 指示書「座標系整合性」§3 / 「空間固定性」§3, §7.1: the one fixed view is the
+        // origin keyframe = the reference camera (the map frame); every other stored keyframe is free.
+        expect(ba.gauge).toBe("reference");
         expect(ba.freeKeyframes).toBe(ba.keyframes - 1);
+        expect(ba.referenceObservations).toBeGreaterThanOrEqual(12);
+        const origin = engine.keyframes.find((kf) => kf.origin)!;
+        expect([...origin.pose.rotation, ...origin.pose.translation]).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
         expect(ba.landmarks).toBeGreaterThan(20);
         expect(ba.observations).toBeGreaterThan(40);
         expect(engine.timing.ba).toBeGreaterThan(0);
@@ -116,7 +122,12 @@ describe("local bundle adjustment in the engine (Phase 7)", () => {
     );
     expect(corrupted).toBeGreaterThan(baseline + 1.0);
     expect(ba.errorAfterPx).toBeLessThan(ba.errorBeforePx / 2);
-    expect(repaired).toBeLessThan(baseline + 0.4);
+    // v25: the multi-view init stages lowered the clean baseline from 0.51 to
+    // 0.16 px; the repair (one BA on the keyframe observations, ~70
+    // landmarks purged) lands at ~0.6 px either way, so the margin is
+    // absolute rather than relative to the (now small) baseline.
+    expect(repaired).toBeLessThan(baseline + 0.6);
+    expect(repaired).toBeLessThan(0.8);
     expect(repaired).toBeLessThan(corrupted / 2);
     // Tracking continued through the corruption and the repair (no reset).
     expect(new Set(outs.filter((o) => o.mapPose).map((o) => o.mapPose!.mapFrameId)).size).toBe(1);

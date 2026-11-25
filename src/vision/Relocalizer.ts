@@ -716,8 +716,12 @@ export class Relocalizer {
     let victim: Keyframe | null = null;
     let victimKey = Number.POSITIVE_INFINITY;
     let victimAlive = Number.POSITIVE_INFINITY;
-    for (let i = 1; i < n - 1; i++) {
+    // The origin keyframe (explicit flag, 指示書 §3; the first stored one when
+    // no keyframe carries the flag) and the newest one are never evicted.
+    const flagged = this.keyframes.some((kf) => kf.origin);
+    for (let i = 0; i < n - 1; i++) {
       const kf = this.keyframes[i];
+      if (kf.origin || (!flagged && i === 0)) continue;
       const alive = map ? this.aliveObservations(kf, map) : kf.observations.length;
       // A keyframe with fewer live landmarks than a relocalization needs can
       // never succeed: it is the most redundant whatever its viewpoint.
@@ -728,7 +732,7 @@ export class Relocalizer {
         victimAlive = alive;
       }
     }
-    if (!victim) victim = this.keyframes[1];
+    if (!victim) victim = this.keyframes.find((kf, i) => !kf.origin && i < n - 1) ?? this.keyframes[1];
     const idx = this.keyframes.indexOf(victim);
     this.keyframes.splice(idx, 1);
     this.retry.delete(victim.id);
@@ -840,18 +844,22 @@ export class Relocalizer {
         guesses[j * 2] = candidates[list[j].index].x;
         guesses[j * 2 + 1] = candidates[list[j].index].y;
       }
-      // The tracker's displacement gate (from the guess = the candidate
-      // track) is left wide so that a patch landing beyond the radius still
-      // reports where it landed; the radius itself is applied here.
-      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, radiusPx * 4);
+      // No displacement gate in the tracker: the radius is applied here, and
+      // a landing beyond it must still pass the forward-backward check
+      // before it is reported as `too_far`. A gated-out (TOO_FAR) point
+      // skips that check; such unverified landings used to be reported with
+      // a distance and purged healthy landmarks whenever the current image
+      // under the candidate was simply not the keyframe patch (occlusion,
+      // blur, another scene) and the forward LK ran away.
+      const res = this.tracker.track(kf.pyramid, current, pts, n, undefined, guesses, Number.POSITIVE_INFINITY);
       for (let j = 0; j < n; j++) {
         const v = verdicts[list[j].index];
         v.keyframeFrameId = kf.frameId;
         const st = res.status[j];
-        if (st === TrackStatus.OK || st === TrackStatus.TOO_FAR) {
+        if (st === TrackStatus.OK) {
           const lx = res.positions[j * 2], ly = res.positions[j * 2 + 1];
           const d = Math.hypot(lx - guesses[j * 2], ly - guesses[j * 2 + 1]);
-          if (st === TrackStatus.OK && d <= radiusPx) {
+          if (d <= radiusPx) {
             v.status = "verified";
             v.x = lx;
             v.y = ly;
@@ -894,17 +902,38 @@ export class Relocalizer {
     timestamp: number,
     map: LandmarkMap | null = null,
     sceneDepth = 0,
+    origin = false,
   ): Keyframe {
     const observations: KeyframeObservation[] = [];
     for (const t of tracks) {
       if (t.landmarkId >= 0) observations.push({ landmarkId: t.landmarkId, x: t.x, y: t.y });
     }
+    return this.createWithObservations(pyramid, pose, observations, frameId, timestamp, map, sceneDepth, origin);
+  }
+
+  /**
+   * Store a keyframe from an explicit observation list (指示書 §3: the origin
+   * keyframe is the two-view reference view — its image is the reference
+   * frame's, its pose the identity, its observations the init landmarks at
+   * their reference pixels, none of which is a live track at that point).
+   */
+  createWithObservations(
+    pyramid: ImagePyramid,
+    pose: RigidTransform,
+    observations: KeyframeObservation[],
+    frameId: number,
+    timestamp: number,
+    map: LandmarkMap | null = null,
+    sceneDepth = 0,
+    origin = false,
+  ): Keyframe {
     const coarseSrc = pyramid.levels[Math.min(2, pyramid.levels.length - 1)];
     const coarse = downsampleToCoarse(coarseSrc);
     const kf: Keyframe = {
       id: this.nextId++,
       frameId,
       timestamp,
+      origin,
       pose: { rotation: Float64Array.from(pose.rotation), translation: Float64Array.from(pose.translation) },
       pyramid: clonePyramid(pyramid),
       coarse,
@@ -991,7 +1020,11 @@ export class Relocalizer {
   private suppressed(kf: Keyframe, rank: CoarseImage, frameId: number | undefined): boolean {
     if (frameId === undefined) return false;
     const s = this.retry.get(kf.id);
-    if (!s || frameId >= s.cooldownUntil) return false;
+    // Strictly after: with attempts every `attemptEveryNFrames` (3) and a
+    // cooldown of two periods (6), `>=` freed the keyframe exactly on the
+    // second following attempt, so the top-ranked batches alternated and the
+    // lower-ranked keyframes were never tried on an unchanged view.
+    if (!s || frameId > s.cooldownUntil) return false;
     return coarseShift(s.failedRank, rank, 0).score >= this.config.retryImageChangeScore;
   }
 

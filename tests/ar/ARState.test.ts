@@ -111,6 +111,28 @@ describe("TrackingStateMachine", () => {
     expect(sm3.state).toBe(TrackingState.TRACKING);
   });
 
+  it("leaves RELOCALIZING once the map locates the camera again, without waiting for 40 frame-to-frame inliers", () => {
+    const sm = new TrackingStateMachine(thresholds);
+    const world = { mapInitialized: true, planeFound: true, worldEstablished: true };
+    sm.update({ inlierCount: 0, featureCount: 0 });
+    sm.update({ inlierCount: 100, featureCount: 200, ...world, mapLost: false });
+    expect(sm.state).toBe(TrackingState.PLANE_FOUND);
+    // Lost: features and map gone.
+    for (let i = 0; i < 4; i++) sm.update({ inlierCount: 5, featureCount: 30, ...world, mapLost: true });
+    expect(sm.update({ inlierCount: 5, featureCount: 30, ...world, mapLost: true })).toBe(TrackingState.RELOCALIZING);
+    // Low-texture floor: 30 inliers (between lostBelow 20 and 40), map still lost → stays.
+    expect(sm.update({ inlierCount: 30, featureCount: 80, ...world, mapLost: true })).toBe(TrackingState.RELOCALIZING);
+    // Below lostBelow even a located map does not count (the tracking states would drop again).
+    expect(sm.update({ inlierCount: 15, featureCount: 80, ...world, mapLost: false })).toBe(TrackingState.RELOCALIZING);
+    // Located again at 30 inliers → world tracking, and it holds there.
+    expect(sm.update({ inlierCount: 30, featureCount: 80, ...world, mapLost: false })).toBe(TrackingState.PLANE_FOUND);
+    expect(sm.update({ inlierCount: 30, featureCount: 80, ...world, mapLost: false })).toBe(TrackingState.PLANE_FOUND);
+    // Without an established world nothing changes: the scan needs the full count.
+    const sm2 = new TrackingStateMachine(thresholds);
+    sm2.update({ inlierCount: 0, featureCount: 0 });
+    expect(sm2.update({ inlierCount: 30, featureCount: 80, mapInitialized: true, planeFound: true, mapLost: false })).toBe(TrackingState.SEARCHING_FEATURES);
+  });
+
   it("reset() returns to INITIALIZING", () => {
     const sm = new TrackingStateMachine(thresholds);
     sm.update({ inlierCount: 0, featureCount: 300 });

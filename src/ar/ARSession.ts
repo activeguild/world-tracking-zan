@@ -8,7 +8,7 @@ import { FeatureRenderer } from "../debug/FeatureRenderer";
 import { PlaneRenderer } from "../debug/PlaneRenderer";
 import { viewportIntrinsics, worldToMap, type WorldFrame } from "../math/CoordinateSystem";
 import { ARCamera } from "../rendering/ARCamera";
-import type { ARObject } from "../rendering/ARObject";
+import { yawFacing, type ARObject, type ARObjectKind, type VideoLike } from "../rendering/ARObject";
 import { ARRenderer } from "../rendering/ARRenderer";
 import { ARWorld } from "../rendering/ARWorld";
 import { FramePresenter } from "../rendering/FramePresenter";
@@ -30,6 +30,7 @@ import type {
 import type { PoseRejectCode } from "../vision/PoseValidation";
 import { wallNow, type EngineTiming } from "../worker/protocol";
 import { decideObjectVisibility, type ObjectVisibilityDecision, type ObjectVisibilityReason } from "./ObjectVisibility";
+import { objectFloorDiagnostics, type ObjectFloorRecord } from "./ObjectFloorDiagnostics";
 import { WorldAnchor } from "./WorldAnchor";
 import { buildWorldDiagnostics, formatWorldChange, type WorldTrackingDiagnostics, type WorldTransformChangeReason } from "./WorldDiagnostics";
 import {
@@ -150,12 +151,24 @@ export interface ARStats {
   poseAgeMs: number;
   /** poseAgeMs above `debug.poseStaleMs`. */
   poseStale: boolean;
+  /**
+   * 修正指示書「傾斜時の回転ずれ」§5: frame ↔ pose correspondence. The Three.js
+   * camera is set from the result of `poseFrameId`; with synchronized display
+   * the image on screen is the frame `presentedFrameId` (−1 = live video).
+   * `presentMisses` counts results whose frame had already left the
+   * presenter's ring (the previous image stayed under a newer pose).
+   */
+  poseFrameId: number;
+  presentedFrameId: number;
+  presentMisses: number;
+  /** True when the displayed frame is the one the current pose belongs to (or display sync is off). */
+  frameSync: boolean;
   /** Three.js camera position in world meters (null before the world exists). */
   cameraWorldPosition: number[] | null;
   /** How long tracking has been lost (ms), 0 while tracking. */
   lostMs: number;
   /** Placed objects' world poses — must not change when only the camera moves. */
-  objects: { id: number; position: number[]; yaw: number }[];
+  objects: { id: number; kind: ARObjectKind; position: number[]; yaw: number; scale: number }[];
   /** Whether the placed objects are shown, and why not (v13 §15–§16). */
   objectVisibility: { visible: boolean; reason: ObjectVisibilityReason };
   /** Focal length in processing pixels. */
@@ -173,6 +186,12 @@ export interface ARStats {
   worldDiagnostics: WorldTrackingDiagnostics | null;
   /** Two-view refinement of the current map's initialization (指示書「空間固定性」§7); null without a map. */
   initRefinement: InitRefinementOutput | null;
+  /**
+   * Height of the floor the map knows around the world origin (id 0) and
+   * each placed object, relative to the world plane they sit on (recording
+   * 43: cube size vs floor texture). Empty before the world exists.
+   */
+  objectFloor: ObjectFloorRecord[];
 }
 
 /**
@@ -238,9 +257,19 @@ export class ARSession {
   private intrinsics: CameraIntrinsics | null = null;
 
   private running = false;
+  /** The start in flight, if any (start() is not re-entered; stop() during it is honoured). */
+  private starting: Promise<void> | null = null;
+  private stopRequested = false;
   private rafHandle = 0;
   private vfcHandle = 0;
   private lastSentTime = 0;
+  /**
+   * Frame id of the next frame sent to the engine. Owned by the session, not
+   * by the grabber: the grabber is replaced mid-session (auto 2D → WebGL
+   * switch, WebGL context loss) and the engine uses frame ids as its clock
+   * and as identity (keyframe gaps, landmark ages, "this frame" tests).
+   */
+  private nextFrameId = 0;
 
   private _state: TrackingState = TrackingState.INITIALIZING;
   private readonly listeners: { [K in keyof ARSessionEvents]: Set<Listener<K>> } = {
@@ -267,6 +296,7 @@ export class ARSession {
   private worldEstablished = false;
   private worldDiagnostics: WorldTrackingDiagnostics | null = null;
   private initRefinement: InitRefinementOutput | null = null;
+  private objectFloor: ObjectFloorRecord[] = [];
   /** World frame object of the previous frame: the anchor replaces it on every change, so identity says "changed". */
   private prevWorldFrame: WorldFrame | null = null;
   private prevPlaneNormal: number[] | null = null;
@@ -289,6 +319,9 @@ export class ARSession {
   private lastGravity: number[] | null = null;
   private visionMs = 0;
   private poseAgeMs = 0;
+  private poseFrameId = -1;
+  private presentedFrameId = -1;
+  private presentMisses = 0;
   private frameTimestampMs = 0;
   private poseTimestampMs = 0;
   private translationHeldLogged = false;
@@ -366,8 +399,23 @@ export class ARSession {
     }
   }
 
-  async start(): Promise<void> {
-    if (this.running) return;
+  /**
+   * Start the camera and the vision backend. Safe to call again while a
+   * start is in flight (the same promise is returned) and to `stop()` during
+   * it (the start then releases what it acquired and resolves without
+   * running). Any failure releases the camera and the backend.
+   */
+  start(): Promise<void> {
+    if (this.running) return Promise.resolve();
+    if (this.starting) return this.starting;
+    this.stopRequested = false;
+    this.starting = this.doStart().finally(() => {
+      this.starting = null;
+    });
+    return this.starting;
+  }
+
+  private async doStart(): Promise<void> {
     try {
       await this.camera.start();
     } catch (e) {
@@ -375,32 +423,62 @@ export class ARSession {
       this.emit("error", err);
       throw err;
     }
-
-    const size = FrameGrabber.fitProcessingSize(
-      this.camera.width,
-      this.camera.height,
-      this.config.processing.width,
-      this.config.processing.height,
-    );
-    this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
-    this.grabSamplesMs = [];
-    this.grabDecided = this.config.processing.grabber !== "auto";
-    this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
-
-    // Frame-synchronized display.
-    this.syncActive = false;
-    if (this.config.processing.syncVideoToPose && this.frameCanvas) {
-      this.presenter ??= new FramePresenter(this.frameCanvas);
-      this.syncActive = this.presenter.available;
+    if (this.stopRequested) {
+      this.releaseResources();
+      return;
     }
-    if (this.frameCanvas) this.frameCanvas.style.display = this.syncActive ? "block" : "none";
 
-    this.backend = await this.createBackend(size.width, size.height);
+    let size: { width: number; height: number };
+    try {
+      size = FrameGrabber.fitProcessingSize(
+        this.camera.width,
+        this.camera.height,
+        this.config.processing.width,
+        this.config.processing.height,
+      );
+      this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
+      this.grabSamplesMs = [];
+      this.nextFrameId = 0;
+      this.grabDecided = this.config.processing.grabber !== "auto";
+      this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
+      // The projection is cached per viewport size; new intrinsics need a rebuild.
+      this.viewportSize = null;
+
+      // Frame-synchronized display.
+      this.syncActive = false;
+      if (this.config.processing.syncVideoToPose && this.frameCanvas) {
+        this.presenter ??= new FramePresenter(this.frameCanvas);
+        this.syncActive = this.presenter.available;
+      }
+      if (this.frameCanvas) this.frameCanvas.style.display = this.syncActive ? "block" : "none";
+
+      this.backend = await this.createBackend(size.width, size.height);
+    } catch (e) {
+      // The camera is already on: do not leave it (or a half-built backend) behind.
+      this.releaseResources();
+      const err = e instanceof ARError ? e : new ARError(ARErrorCode.CAMERA_UNAVAILABLE, String(e), { cause: e });
+      this.emit("error", err);
+      throw err;
+    }
+    if (this.stopRequested) {
+      this.releaseResources();
+      return;
+    }
     this.backend.onResult = (r) => this.handleResult(r);
     this.backend.onError = (message, gray) => {
       if (gray) this.grabber?.release(gray);
       this.logger.warn(`vision backend error: ${message}`);
     };
+
+    // A fresh run: nothing of a previous one is carried over.
+    this.planeWasFound = false;
+    this.prevWorldFrame = null;
+    this.prevPlaneNormal = null;
+    this.lastMapPose = null;
+    this.worldEstablished = false;
+    this.lastResultAt = 0;
+    this.lastWorldUpdateMs = 0;
+    this.objectVisibility = { visible: false, reason: "WORLD_NOT_READY" };
 
     this.running = true;
     this.setState(TrackingState.INITIALIZING);
@@ -412,8 +490,21 @@ export class ARSession {
     this.emit("started");
   }
 
+  /** Camera, backend and grabber of a run (or of a start that did not complete). */
+  private releaseResources(): void {
+    this.backend?.dispose();
+    this.backend = null;
+    this.grabber?.dispose?.();
+    this.grabber = null;
+    this.camera.stop();
+  }
+
   stop(): void {
-    if (!this.running) return;
+    if (!this.running) {
+      // A start in flight finishes its await, sees the request and releases.
+      if (this.starting) this.stopRequested = true;
+      return;
+    }
     this.running = false;
     if (this.rafHandle) cancelAnimationFrame(this.rafHandle);
     if (this.vfcHandle && "cancelVideoFrameCallback" in this.video) {
@@ -423,15 +514,17 @@ export class ARSession {
     }
     this.rafHandle = 0;
     this.vfcHandle = 0;
-    this.backend?.dispose();
-    this.backend = null;
-    this.grabber?.dispose?.();
-    this.grabber = null;
-    this.camera.stop();
+    this.releaseResources();
     this.renderer?.clear();
+    // The placed objects go with the world: tell the application like on a map reset.
+    const hadWorld = this.worldAnchor.isReady;
     this.worldAnchor.reset();
     this.world.setWorldReady(false);
+    if (hadWorld) this.emit("worldLost");
     this.presenter?.clear();
+    this.poseFrameId = -1;
+    this.presentedFrameId = -1;
+    this.presentMisses = 0;
     this.video.style.opacity = "";
     this.emit("stopped");
   }
@@ -477,10 +570,102 @@ export class ARSession {
     return obj;
   }
 
-  /** Move an already placed object to a new hit. */
-  moveObject(obj: ARObject, hit: ARHitResult): void {
-    obj.place([hit.position.x, hit.position.y, hit.position.z]);
+  /**
+   * Place a video panel (`width` m wide, standing on the plane) at a hit,
+   * turned so that its screen faces the camera at placement time; a twist
+   * gesture turns it afterwards like any object. Playback is not started
+   * here: call `video.play()` from the user gesture (muted / playsinline).
+   */
+  placeVideo(video: VideoLike, hit: ARHitResult, width: number): ARObject {
+    const obj = this.world.addVideo(video, width);
+    const cam = this.arCamera.camera.position;
+    obj.place([hit.position.x, hit.position.y, hit.position.z], yawFacing(hit.position.x, hit.position.z, cam.x, cam.z));
     this.renderNow();
+    return obj;
+  }
+
+  /** Move an already placed object to a new hit, keeping its yaw. */
+  moveObject(obj: ARObject, hit: ARHitResult): void {
+    obj.place([hit.position.x, hit.position.y, hit.position.z], obj.yaw);
+    this.renderNow();
+  }
+
+  /** The objects currently placed in the world (in placement order). */
+  get placedObjects(): ARObject[] {
+    return this.world.objects.filter((o) => o.placed);
+  }
+
+  /** Turn a placed object about the world up axis by `deltaRad` (user gesture). */
+  rotateObject(obj: ARObject, deltaRad: number): void {
+    if (!Number.isFinite(deltaRad) || deltaRad === 0) return;
+    obj.setYaw(obj.yaw + deltaRad);
+    this.renderNow();
+  }
+
+  /**
+   * Multiply a placed object's uniform scale by `factor` (user pinch),
+   * clamped to [`minScale`, `maxScale`] relative to its placed size. Returns
+   * the scale now in effect.
+   */
+  scaleObject(obj: ARObject, factor: number, minScale = 0.25, maxScale = 4): number {
+    if (Number.isFinite(factor) && factor > 0 && factor !== 1) {
+      obj.setScale(Math.min(maxScale, Math.max(minScale, obj.scale * factor)));
+      this.renderNow();
+    }
+    return obj.scale;
+  }
+
+  /**
+   * The placed object under a screen point (`x, y` in CSS pixels relative to
+   * the video element, like `hitTest`): a ray through the point hitting the
+   * object's meshes, or, failing that, the object whose projected position is
+   * within `tolerancePx` (a 10 cm cube is a small target on a phone). Null
+   * when nothing is placed or the world is not ready.
+   */
+  pickObject(x: number, y: number, tolerancePx = 44): ARObject | null {
+    if (!this.worldAnchor.isReady) return null;
+    const rect = this.video.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    const camera = this.arCamera.camera;
+    camera.updateMatrixWorld(true);
+    const ndc = new THREE.Vector2((x / rect.width) * 2 - 1, 1 - (y / rect.height) * 2);
+    const raycaster = new THREE.Raycaster();
+    // Three's default line / point thresholds are 1 world unit — 1 m here.
+    // The demo cube carries its edges as LineSegments, so with the default
+    // every ray within a metre of an edge "hit" the cube and a drag started
+    // anywhere on screen grabbed it. Only meshes are pick targets; near
+    // misses are the tolerance fallback's job below.
+    raycaster.params.Line.threshold = 0;
+    raycaster.params.Points.threshold = 0;
+    raycaster.setFromCamera(ndc, camera);
+    let best: ARObject | null = null;
+    let bestDistance = Infinity;
+    for (const obj of this.world.objects) {
+      if (!obj.placed) continue;
+      obj.root.updateWorldMatrix(true, true);
+      const hits = raycaster.intersectObject(obj.root, true);
+      if (hits.length && hits[0].distance < bestDistance) {
+        best = obj;
+        bestDistance = hits[0].distance;
+      }
+    }
+    if (best) return best;
+    // Fallback: nearest projected object position within the tolerance.
+    let bestPx = tolerancePx;
+    const p = new THREE.Vector3();
+    for (const obj of this.world.objects) {
+      if (!obj.placed) continue;
+      obj.root.getWorldPosition(p).project(camera);
+      if (!(p.z < 1) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const sx = ((p.x + 1) / 2) * rect.width;
+      const sy = ((1 - p.y) / 2) * rect.height;
+      const d = Math.hypot(sx - x, sy - y);
+      if (d <= bestPx) {
+        bestPx = d;
+        best = obj;
+      }
+    }
+    return best;
   }
 
   private renderNow(): void {
@@ -550,14 +735,19 @@ export class ARSession {
       poseTimestampMs: this.poseTimestampMs,
       poseAgeMs: this.poseAgeMs,
       poseStale: this.poseAgeMs > this.config.debug.poseStaleMs,
+      poseFrameId: this.poseFrameId,
+      presentedFrameId: this.presentedFrameId,
+      presentMisses: this.presentMisses,
+      frameSync: !this.syncActive || this.presentedFrameId === this.poseFrameId,
       cameraWorldPosition: this.worldAnchor.isReady ? this.arCamera.camera.position.toArray() : null,
       lostMs: this.world.lostDurationMs(performance.now()),
       objectVisibility: this.objectVisibility,
       worldDiagnostics: this.worldDiagnostics,
       initRefinement: this.initRefinement,
+      objectFloor: this.objectFloor,
       objects: this.world.objects
         .filter((o) => o.placed)
-        .map((o) => ({ id: o.id, position: o.root.position.toArray(), yaw: o.root.rotation.y })),
+        .map((o) => ({ id: o.id, kind: o.kind, position: o.root.position.toArray(), yaw: o.root.rotation.y, scale: o.scale })),
       state: this.state,
       fastThreshold: this.fastThreshold,
       framesProcessed: this.framesProcessed,
@@ -638,6 +828,7 @@ export class ARSession {
       this.grabDecided = true;
       frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
     }
+    frame.frameId = this.nextFrameId++;
     this.maybeSwitchGrabber(g1 - g0);
     // Phase 2: the BA's anchor correction is fitted to the landmarks around
     // the world origin and the placed objects (map frame, current anchor).
@@ -774,7 +965,15 @@ export class ARSession {
 
   /** Show the frame the result belongs to, time-aligned with the pose. */
   private presentFrame(frameId: number): void {
-    if (!this.presenter?.present(frameId)) return;
+    if (!this.presenter) return;
+    if (!this.presenter.present(frameId)) {
+      // The frame left the ring (resize, or more frames captured than the
+      // ring holds while this one was processed): the previous image stays
+      // on screen under the new pose. Counted for the HUD (§5).
+      this.presentMisses++;
+      return;
+    }
+    this.presentedFrameId = frameId;
     // Hide the live video once a synchronized frame is on screen.
     if (this.video.style.opacity !== "0") this.video.style.opacity = "0";
   }
@@ -783,6 +982,7 @@ export class ARSession {
     if (!this.running) return;
     this.grabber?.release(r.grayBuffer);
     this.framesProcessed++;
+    this.poseFrameId = r.frameId;
     const arrived = performance.now();
     this.visionFpsCounter.tick(arrived);
     this.visionMs = r.processingMs;
@@ -830,6 +1030,22 @@ export class ARSession {
         );
       }
     }
+    // v25: an accepted multi-view init stage re-constrained the init map;
+    // the world anchor follows its correction the same way (once, this frame).
+    const st = r.initRefinement?.lastStage;
+    if (st && st.frameId === r.frameId) {
+      let anchorMoved = false;
+      if (st.applied && this.worldAnchor.isReady && this.worldAnchor.attachedMapFrameId === (r.mapPose?.mapFrameId ?? -1)) {
+        anchorMoved = this.worldAnchor.applyMapCorrection({ rotation: st.correctionRotation, translation: st.correctionTranslation });
+        if (anchorMoved) this.worldChangeReason = "init_stage";
+      }
+      if (this.config.debug.log) {
+        const t = st.correctionTranslation;
+        this.logger.info(
+          `INIT STAGE ${st.stage} at frame ${st.frameId} ${st.applied ? "applied" : `REJECTED (${st.rejectReason})`}: parallax ${st.parallaxPx.toFixed(0)} px, ${st.landmarks} init landmarks, ${st.errorBeforePx.toFixed(2)} → ${st.errorAfterPx.toFixed(2)} px, pose moved ${st.rotationDeg.toFixed(2)}° / ${st.cameraShift.toFixed(3)} u, cells ${st.spatialCells}, shifted ${(st.shiftedFraction * 100).toFixed(0)}%, later landmarks rebuilt ${st.rebuilt} / dropped ${st.removed}, kf re-posed ${st.keyframesReposed} / carried ${st.keyframesPropagated}, correction ${Math.hypot(t[0], t[1], t[2]).toFixed(4)} u${anchorMoved ? " (world anchor moved)" : ""}`,
+        );
+      }
+    }
     this.worldEstablished = r.worldEstablished;
     // v16 guidance: how long the plane search has been stuck at one stage
     // (e.g. `extent` for 7 s on device while the user held the phone still).
@@ -858,11 +1074,33 @@ export class ARSession {
       previousPlaneNormal: this.prevPlaneNormal,
       planeRecovery: r.planeRecovery,
       bundleAdjustment: r.bundleAdjustment,
+      initStage: r.initRefinement?.lastStage ?? null,
       previousWorld: this.prevWorldFrame,
       world: worldNow,
       changeReason: this.worldChangeReason,
     });
     if (this.worldDiagnostics.worldTransformChanged) this.logger.info(formatWorldChange(this.worldDiagnostics));
+    // Recording 43: the floor the map knows around the origin and the placed
+    // objects vs the plane they sit on (diagnostics only; a few ops per landmark).
+    if (worldNow && r.mapPose && r.mapPose.framesSinceTracked === 0) {
+      const d = this.config.debug;
+      this.objectFloor = objectFloorDiagnostics(
+        r.landmarks,
+        r.landmarkCount,
+        worldNow,
+        r.mapPose.rotation,
+        r.mapPose.cameraCenter,
+        this.world.objects.filter((o) => o.placed).map((o) => ({ id: o.id, position: o.position.toArray() })),
+        {
+          radiusDepthRatio: d.objectFloorRadiusDepthRatio,
+          heightWindowDepthRatio: d.objectFloorHeightWindowDepthRatio,
+          minLandmarks: d.objectFloorMinLandmarks,
+          youngFrames: d.objectFloorYoungFrames,
+        },
+      );
+    } else if (!worldNow) {
+      this.objectFloor = [];
+    }
     this.prevWorldFrame = worldNow;
     this.prevPlaneNormal = r.plane ? r.plane.normal : null;
     const w1 = performance.now();
