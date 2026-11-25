@@ -103,6 +103,8 @@ export class VisionEngine {
   // Phase 2: two-view pose relative to a reference frame.
   private readonly poseEstimator: PoseEstimator;
   private referenceFrameId = -1;
+  /** The reference was renewed while processing the current frame. */
+  private referenceRenewed = false;
   /**
    * 指示書「座標系整合性と空間固定性」§3: the image of the two-view reference
    * frame, kept while no map exists so that the map's origin keyframe can be
@@ -251,7 +253,10 @@ export class VisionEngine {
         verify: (candidates, pose, radiusPx, choice) => this.relocalizer.verifyRelinks(candidates, this.curPyramid, pose, radiusPx, choice),
       };
       // v21: a keyframe patch landing a BA-outlier distance away removes the landmark.
-      if (config.landmarks.purgeInconsistent) this.mapTracker.purgeFarPx = config.bundleAdjustment.maxObservationErrorPx;
+      if (config.landmarks.purgeInconsistent) {
+        this.mapTracker.purgeFarPx = config.bundleAdjustment.maxObservationErrorPx;
+        this.mapTracker.purgeFarMaxPx = config.relocalization.lkMaxDisplacementPx;
+      }
       // v24: the re-anchor probe (diagnostics only) rides on the same check.
       this.mapTracker.reanchorProbeEveryFrames = config.landmarks.reanchorProbeEveryFrames;
       this.mapTracker.reanchorProbeMaxTracks = config.landmarks.reanchorProbeMaxTracks;
@@ -340,6 +345,8 @@ export class VisionEngine {
     this.stateMachine.reset();
     this.lastQuality = emptyQuality();
     this.referenceFrameId = -1;
+    for (const s of this.referenceSlots) s.frameId = -1;
+    this.lastImageMotion = null;
     this.referenceRotation = mat3Identity();
     this.lastRelativeRotation = mat3Identity();
     this.lastAccumulatedRotation = mat3Identity();
@@ -1579,7 +1586,16 @@ export class VisionEngine {
       this.lastMapPose = null;
     }
     // Remember this frame's relative rotation for the next prior.
-    this.prevFrameRotation = this.lastRelative && this.lastRelative.model !== "none" ? this.lastRelative.rotation : null;
+    // When the reference was renewed in this frame, this frame *is* the new
+    // reference: its rotation relative to it is the identity. Keeping the
+    // rotation relative to the old reference made the next frame's prior
+    // wrong by everything accumulated since the old reference (13.6° after
+    // 34 frames of 0.4°/frame yaw).
+    this.prevFrameRotation = this.referenceRenewed
+      ? mat3Identity()
+      : this.lastRelative && this.lastRelative.model !== "none"
+        ? this.lastRelative.rotation
+        : null;
   }
 
   /**
@@ -2037,6 +2053,7 @@ export class VisionEngine {
     const frameId = input.frameId;
 
     this.lastRelative = null;
+    this.referenceRenewed = false;
     if (this.referenceFrameId < 0) {
       // First frame with features becomes the reference.
       if (this.tracks.length >= cfg.minCorrespondences) this.renewReference(frameId, mat3Identity(), input.timestamp);
@@ -2117,9 +2134,14 @@ export class VisionEngine {
     this.referenceRotation = mat3Multiply(relativeRotation, this.referenceRotation);
     this.lastRelativeRotation = mat3Identity();
     this.referenceFrameId = frameId;
-    // Keep this frame's image while no map exists: if the map initializes
-    // against this reference, it becomes the origin keyframe (指示書 §3).
-    if (!this.mapTracker.initialized) {
+    this.referenceRenewed = true;
+    // Keep this frame's image: if a map initializes against this reference,
+    // it becomes the origin keyframe (指示書 §3). Also while a map exists —
+    // a lost map stays "initialized" until its reset, and the map that
+    // replaces it initializes against a reference renewed in that time; with
+    // no image stored for it the init frame took the origin role instead
+    // (not an identity pose, yet treated as the fixed reference view).
+    {
       if (this.referenceSlots.length < 2) {
         this.referenceSlots.push({ pyramid: new ImagePyramid(this.width, this.height, this.config.tracker.pyramidLevels), frameId: -1, timestamp: 0 });
       }

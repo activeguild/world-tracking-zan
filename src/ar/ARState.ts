@@ -121,6 +121,17 @@ export class TrackingStateMachine {
                 ? TrackingState.PLANE_FOUND
                 : TrackingState.TRACKING;
           this.badFrames = 0;
+        } else if (relocatable && !obs.mapLost && obs.planeFound && obs.inlierCount >= t.lostBelow) {
+          // The camera is located in the established world again although
+          // the frame-to-frame inliers have not climbed back to
+          // `minTrackedForTracking` (a low-texture floor: 20–39 inliers, map
+          // PnP needs 12). The pose is fresh, so this is world tracking: at
+          // this inlier level the tracking states would not drop either
+          // (they leave below `lostBelow`). Waiting for the higher count kept
+          // the session in RELOCALIZING — camera not updated, objects hidden,
+          // "go back to where you were" shown — with a valid pose every frame.
+          this._state = TrackingState.PLANE_FOUND;
+          this.badFrames = 0;
         } else if (this._state === TrackingState.TRACKING_LOST) {
           // Nothing tracked for a while → searching (or relocalizing when an established world exists).
           this._state = relocatable ? TrackingState.RELOCALIZING : TrackingState.SEARCHING_FEATURES;

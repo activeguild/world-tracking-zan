@@ -257,9 +257,19 @@ export class ARSession {
   private intrinsics: CameraIntrinsics | null = null;
 
   private running = false;
+  /** The start in flight, if any (start() is not re-entered; stop() during it is honoured). */
+  private starting: Promise<void> | null = null;
+  private stopRequested = false;
   private rafHandle = 0;
   private vfcHandle = 0;
   private lastSentTime = 0;
+  /**
+   * Frame id of the next frame sent to the engine. Owned by the session, not
+   * by the grabber: the grabber is replaced mid-session (auto 2D → WebGL
+   * switch, WebGL context loss) and the engine uses frame ids as its clock
+   * and as identity (keyframe gaps, landmark ages, "this frame" tests).
+   */
+  private nextFrameId = 0;
 
   private _state: TrackingState = TrackingState.INITIALIZING;
   private readonly listeners: { [K in keyof ARSessionEvents]: Set<Listener<K>> } = {
@@ -389,8 +399,23 @@ export class ARSession {
     }
   }
 
-  async start(): Promise<void> {
-    if (this.running) return;
+  /**
+   * Start the camera and the vision backend. Safe to call again while a
+   * start is in flight (the same promise is returned) and to `stop()` during
+   * it (the start then releases what it acquired and resolves without
+   * running). Any failure releases the camera and the backend.
+   */
+  start(): Promise<void> {
+    if (this.running) return Promise.resolve();
+    if (this.starting) return this.starting;
+    this.stopRequested = false;
+    this.starting = this.doStart().finally(() => {
+      this.starting = null;
+    });
+    return this.starting;
+  }
+
+  private async doStart(): Promise<void> {
     try {
       await this.camera.start();
     } catch (e) {
@@ -398,32 +423,62 @@ export class ARSession {
       this.emit("error", err);
       throw err;
     }
-
-    const size = FrameGrabber.fitProcessingSize(
-      this.camera.width,
-      this.camera.height,
-      this.config.processing.width,
-      this.config.processing.height,
-    );
-    this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
-    this.grabSamplesMs = [];
-    this.grabDecided = this.config.processing.grabber !== "auto";
-    this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
-
-    // Frame-synchronized display.
-    this.syncActive = false;
-    if (this.config.processing.syncVideoToPose && this.frameCanvas) {
-      this.presenter ??= new FramePresenter(this.frameCanvas);
-      this.syncActive = this.presenter.available;
+    if (this.stopRequested) {
+      this.releaseResources();
+      return;
     }
-    if (this.frameCanvas) this.frameCanvas.style.display = this.syncActive ? "block" : "none";
 
-    this.backend = await this.createBackend(size.width, size.height);
+    let size: { width: number; height: number };
+    try {
+      size = FrameGrabber.fitProcessingSize(
+        this.camera.width,
+        this.camera.height,
+        this.config.processing.width,
+        this.config.processing.height,
+      );
+      this.grabber = this.createGrabber(size.width, size.height, this.config.processing.grabber);
+      this.grabSamplesMs = [];
+      this.nextFrameId = 0;
+      this.grabDecided = this.config.processing.grabber !== "auto";
+      this.intrinsics = approximateIntrinsics(size.width, size.height, this.config.processing.longSideFovDeg);
+      // The projection is cached per viewport size; new intrinsics need a rebuild.
+      this.viewportSize = null;
+
+      // Frame-synchronized display.
+      this.syncActive = false;
+      if (this.config.processing.syncVideoToPose && this.frameCanvas) {
+        this.presenter ??= new FramePresenter(this.frameCanvas);
+        this.syncActive = this.presenter.available;
+      }
+      if (this.frameCanvas) this.frameCanvas.style.display = this.syncActive ? "block" : "none";
+
+      this.backend = await this.createBackend(size.width, size.height);
+    } catch (e) {
+      // The camera is already on: do not leave it (or a half-built backend) behind.
+      this.releaseResources();
+      const err = e instanceof ARError ? e : new ARError(ARErrorCode.CAMERA_UNAVAILABLE, String(e), { cause: e });
+      this.emit("error", err);
+      throw err;
+    }
+    if (this.stopRequested) {
+      this.releaseResources();
+      return;
+    }
     this.backend.onResult = (r) => this.handleResult(r);
     this.backend.onError = (message, gray) => {
       if (gray) this.grabber?.release(gray);
       this.logger.warn(`vision backend error: ${message}`);
     };
+
+    // A fresh run: nothing of a previous one is carried over.
+    this.planeWasFound = false;
+    this.prevWorldFrame = null;
+    this.prevPlaneNormal = null;
+    this.lastMapPose = null;
+    this.worldEstablished = false;
+    this.lastResultAt = 0;
+    this.lastWorldUpdateMs = 0;
+    this.objectVisibility = { visible: false, reason: "WORLD_NOT_READY" };
 
     this.running = true;
     this.setState(TrackingState.INITIALIZING);
@@ -435,8 +490,21 @@ export class ARSession {
     this.emit("started");
   }
 
+  /** Camera, backend and grabber of a run (or of a start that did not complete). */
+  private releaseResources(): void {
+    this.backend?.dispose();
+    this.backend = null;
+    this.grabber?.dispose?.();
+    this.grabber = null;
+    this.camera.stop();
+  }
+
   stop(): void {
-    if (!this.running) return;
+    if (!this.running) {
+      // A start in flight finishes its await, sees the request and releases.
+      if (this.starting) this.stopRequested = true;
+      return;
+    }
     this.running = false;
     if (this.rafHandle) cancelAnimationFrame(this.rafHandle);
     if (this.vfcHandle && "cancelVideoFrameCallback" in this.video) {
@@ -446,14 +514,13 @@ export class ARSession {
     }
     this.rafHandle = 0;
     this.vfcHandle = 0;
-    this.backend?.dispose();
-    this.backend = null;
-    this.grabber?.dispose?.();
-    this.grabber = null;
-    this.camera.stop();
+    this.releaseResources();
     this.renderer?.clear();
+    // The placed objects go with the world: tell the application like on a map reset.
+    const hadWorld = this.worldAnchor.isReady;
     this.worldAnchor.reset();
     this.world.setWorldReady(false);
+    if (hadWorld) this.emit("worldLost");
     this.presenter?.clear();
     this.poseFrameId = -1;
     this.presentedFrameId = -1;
@@ -563,6 +630,13 @@ export class ARSession {
     camera.updateMatrixWorld(true);
     const ndc = new THREE.Vector2((x / rect.width) * 2 - 1, 1 - (y / rect.height) * 2);
     const raycaster = new THREE.Raycaster();
+    // Three's default line / point thresholds are 1 world unit — 1 m here.
+    // The demo cube carries its edges as LineSegments, so with the default
+    // every ray within a metre of an edge "hit" the cube and a drag started
+    // anywhere on screen grabbed it. Only meshes are pick targets; near
+    // misses are the tolerance fallback's job below.
+    raycaster.params.Line.threshold = 0;
+    raycaster.params.Points.threshold = 0;
     raycaster.setFromCamera(ndc, camera);
     let best: ARObject | null = null;
     let bestDistance = Infinity;
@@ -754,6 +828,7 @@ export class ARSession {
       this.grabDecided = true;
       frame = this.grabber.grab(this.video, now, this.intrinsics, gravity);
     }
+    frame.frameId = this.nextFrameId++;
     this.maybeSwitchGrabber(g1 - g0);
     // Phase 2: the BA's anchor correction is fitted to the landmarks around
     // the world origin and the placed objects (map frame, current anchor).

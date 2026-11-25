@@ -105,4 +105,34 @@ describe("PlaneDetector", () => {
     expect(det.update(new Float64Array(0), [], 0, gravityFloor)).toBeNull();
     expect(det.isFound).toBe(false);
   });
+
+  it("a different plane does not inherit `found`: it earns it with its own stable frames", () => {
+    const rng = createRng(77);
+    const det = new PlaneDetector(DEFAULT_CONFIG.plane, createRng(3));
+    const need = DEFAULT_CONFIG.plane.stableFramesRequired;
+    const at = (d: number) => {
+      const plane = randomPlanePoints(rng, 150, [0, Math.SQRT1_2, Math.SQRT1_2], d, 0.8);
+      for (let i = 0; i < plane.length; i++) plane[i] += gauss(rng) * 0.002;
+      return plane;
+    };
+    const ids = Array.from({ length: 150 }, (_, i) => i + 1);
+    let last = null;
+    for (let f = 0; f < need + 3; f++) last = det.update(at(1.2), ids, 150, gravityFloor);
+    expect(last!.found).toBe(true);
+    // One inconsistent frame is tolerated…
+    last = det.update(at(2.0), ids, 150, gravityFloor);
+    expect(last!.found).toBe(true);
+    last = det.update(at(1.2), ids, 150, gravityFloor);
+    expect(last!.found).toBe(true);
+    // …a plane that keeps changing is not found…
+    for (let f = 0; f < 4; f++) last = det.update(at(f % 2 ? 2.0 : 0.7), ids, 150, gravityFloor);
+    expect(last!.found).toBe(false);
+    // …and the new steady plane is found only after its own stable frames.
+    for (let f = 0; f < need; f++) {
+      last = det.update(at(2.0), ids, 150, gravityFloor);
+      if (f < need - 1) expect(last!.found).toBe(false);
+    }
+    last = det.update(at(2.0), ids, 150, gravityFloor);
+    expect(last!.found).toBe(true);
+  });
 });

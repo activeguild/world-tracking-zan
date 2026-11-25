@@ -290,8 +290,23 @@ describe("v14 keyframe ranking and search budget (Tests 5–11, 14, AC-2 / AC-3)
     expect(back.r.keyframeId).toBe(3);
     expect(reloc.retryStateOf(3)!.lastSuccessFrame).toBe(14);
     // After the cooldown the same failed view is tried again (no permanent exclusion, §34–§35).
-    const again = tried(10 + RC.retryCooldownFrames + 1, other);
+    const again = tried(13 + RC.retryCooldownFrames + 1, other);
     expect(again.r.diagnostics.retrySuppressed).toBe(0);
+  });
+
+  it("at the engine's attempt cadence every keyframe gets its turn on an unchanged view", () => {
+    // Attempts run every attemptEveryNFrames (3) frames, not on consecutive
+    // ones: a cooldown that ended exactly on the second following attempt
+    // made the top-ranked batches alternate and left the rest untried.
+    const { map, reloc } = keyframeStore(textures);
+    const other = pyramidOf(makeTexture(W, H, createRng(999), [10, 25, 60, 150]));
+    const seen = new Set<number>();
+    for (let i = 0; i < 3; i++) {
+      const r = reloc.relocalize(other, map, K, null, 0, { frameId: 10 + i * RC.attemptEveryNFrames });
+      for (const t of r.diagnostics.trials) seen.add(t.keyframeId);
+    }
+    // Three attempts cover all eight (the documented intent of the cooldown).
+    expect(seen.size).toBe(8);
   });
 
   it("Test 12 / 13 (ranking): a strong candidate ranked first ends the search; preparation reuses the ranking on an unchanged view", () => {

@@ -42,8 +42,21 @@ export class CameraManager {
     return this.stream !== null;
   }
 
-  async start(): Promise<void> {
-    if (this.stream) return;
+  /** A start in flight: a second call joins it instead of opening a second stream. */
+  private starting: Promise<void> | null = null;
+
+  start(): Promise<void> {
+    if (this.stream && this._width > 0) return Promise.resolve();
+    if (this.starting) return this.starting;
+    this.starting = this.open().finally(() => {
+      this.starting = null;
+    });
+    return this.starting;
+  }
+
+  private async open(): Promise<void> {
+    // A stream left over from a start that failed half-way is not reused.
+    if (this.stream) this.stop();
 
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new ARError(ARErrorCode.CAMERA_UNAVAILABLE, "getUserMedia() is not available");
@@ -74,7 +87,12 @@ export class CameraManager {
     video.muted = true;
     video.autoplay = true;
 
-    await waitForMetadata(video);
+    try {
+      await waitForMetadata(video);
+    } catch (err) {
+      this.stop();
+      throw err;
+    }
     try {
       await video.play();
     } catch (err) {

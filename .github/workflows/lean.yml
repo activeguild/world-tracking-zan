@@ -1,0 +1,49 @@
+name: Lean guardrails
+
+on:
+  pull_request:
+  push:
+    branches:
+      - claude/webar-plane-tracking-engine-rdcbiv
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lean-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lean-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain version comes from lean/lean-toolchain (elan reads it).
+      - name: Cache elan toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('lean/lean-toolchain') }}
+
+      - name: Install elan
+        run: |
+          if [ ! -x "$HOME/.elan/bin/lake" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o elan-init.sh
+            sh elan-init.sh -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Proofs, no escape hatches, conformance table up to date
+        run: bash scripts/lean-check.sh
+
+      # The other half of the guardrail: the TypeScript state machine against
+      # the table the model just reproduced.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: TypeScript conforms to the Lean model
+        run: npx vitest run tests/lean

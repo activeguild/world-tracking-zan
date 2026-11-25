@@ -37,6 +37,42 @@ const base = makeTexture(W, H, createRng(99), [12, 30, 70, 160]);
 describe("VisionEngine pose (Phase 2)", () => {
   const config = resolveConfig();
 
+  it("the frame-to-frame rotation prior stays correct across a reference renewal", () => {
+    // Review finding: on the frame after the reference is renewed for large
+    // parallax, the prior combined a rotation relative to the new reference
+    // with one relative to the old (13.6° off after 34 frames of 0.4°).
+    const engine = new VisionEngine(W, H, config, createRng(1));
+    const internals = engine as unknown as {
+      prevFrameRotation: Mat3 | null;
+      lastRelative: { rotation: Mat3; model: string } | null;
+      referenceFrameId: number;
+    };
+    const stepDeg = 0.4;
+    const step = rotationY((stepDeg * Math.PI) / 180);
+    let renewals = 0;
+    let checked = 0;
+    let worst = 0;
+    let lastRef = -1;
+    for (let f = 0; f < 80; f++) {
+      const R = rotationY((f * stepDeg * Math.PI) / 180);
+      const img = f === 0 ? base : warpImage(base, W, H, pixelHomography(R, [0, 0, 0], [0, 0, 1], 1), 128);
+      const prev = internals.prevFrameRotation;
+      engine.process(input(f, img));
+      const rel = internals.lastRelative;
+      if (prev && rel && rel.model !== "none") {
+        // The prior exactly as updateMap builds it.
+        const prior = mat3Multiply(rel.rotation, new Float64Array([prev[0], prev[3], prev[6], prev[1], prev[4], prev[7], prev[2], prev[5], prev[8]]));
+        worst = Math.max(worst, deg(rotationDistance(prior, step)));
+        checked++;
+      }
+      if (lastRef >= 0 && internals.referenceFrameId !== lastRef) renewals++;
+      lastRef = internals.referenceFrameId;
+    }
+    expect(renewals).toBeGreaterThanOrEqual(1);
+    expect(checked).toBeGreaterThan(60);
+    expect(worst).toBeLessThan(1);
+  });
+
   it("pure yaw rotation: accumulated yaw follows the simulated camera", () => {
     const engine = new VisionEngine(W, H, config, createRng(1));
     const stepDeg = 0.4;

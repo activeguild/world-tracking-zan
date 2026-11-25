@@ -3,6 +3,7 @@ import { resolveConfig } from "../../src/ar/ARConfig";
 import { createRng } from "../../src/vision/OutlierRejection";
 import type { VisionInput, VisionOutput } from "../../src/vision/types";
 import { VisionEngine } from "../../src/vision/VisionEngine";
+import { makeTexture } from "../helpers/synthetic";
 import { TP_H, TP_K, TP_W, tpGravity, tpPose, tpRender } from "../helpers/twoPlaneScene";
 
 /**
@@ -122,7 +123,10 @@ describe("purge of inconsistent landmarks (v21)", () => {
 
   it("relink: a landmark whose keyframe patch lands ≥ 10 px from its projection is removed; off, it stays and keeps producing candidates", () => {
     const run = (purgeInconsistent: boolean) => {
-      const engine = new VisionEngine(W, H, resolveConfig({ landmarks: { purgeInconsistent } }), createRng(5));
+      // Without the keyframe BA: it removes the same landmarks through its
+      // own outlier purge on the next keyframe, before the relink path's
+      // second strike (a landmark goes on its second far landing).
+      const engine = new VisionEngine(W, H, resolveConfig({ landmarks: { purgeInconsistent }, bundleAdjustment: { enabled: false } }), createRng(5));
       const outs: VisionOutput[] = [];
       let f = 0;
       for (; f < 100; f++) outs.push(engine.process(input(f)));
@@ -201,5 +205,51 @@ describe("purge of inconsistent landmarks (v21)", () => {
     expect(off.purged).toBe(0);
     expect(off.remaining).toBe(30);
     expect(off.candidates).toBeGreaterThan(on.candidates * 2);
+  });
+});
+
+describe("purge needs a verified landing on a tracked frame", () => {
+  // Review finding: unrelated images (the camera looking elsewhere, or the
+  // scene occluded) must not erode a healthy map. The purge used to fire on
+  // forward-LK runaways that never passed the forward-backward check, and
+  // on lost frames where the predicted position — not the map — is wrong.
+  const unrelated: Uint8Array[] = [];
+  for (let i = 0; i < 20; i++) unrelated.push(makeTexture(W, H, createRng(31337 + i), [14, 36, 90, 200]));
+
+  function run(frames: (i: number) => Uint8Array) {
+    const engine = new VisionEngine(W, H, resolveConfig({}), createRng(5));
+    for (let f = 0; f < 100; f++) engine.process(input(f));
+    const before = engine.landmarkMap.size;
+    let purged = 0;
+    let purgedWhileLost = 0;
+    for (let i = 0; i < 20; i++) {
+      const out = engine.process({ ...input(99), frameId: 100 + i, timestamp: (100 + i) * 33.3, gray: frames(i) });
+      const mp = out.mapPose;
+      const p = mp?.relink?.purged ?? 0;
+      purged += p;
+      if (mp && mp.framesSinceTracked > 0) purgedWhileLost += p;
+    }
+    return { before, purged, purgedWhileLost };
+  }
+
+  it("a changing unrelated view purges nothing", () => {
+    const r = run((i) => unrelated[i]);
+    expect(r.before).toBeGreaterThan(200);
+    expect(r.purgedWhileLost).toBe(0);
+    expect(r.purged).toBe(0);
+  });
+
+  it("an occluder over the centre of the view purges nothing", () => {
+    const base = sequence[99];
+    const r = run((i) => {
+      const img = Uint8Array.from(base);
+      const occ = unrelated[i];
+      for (let y = Math.round(H * 0.2); y < Math.round(H * 0.8); y++) {
+        const o = y * W;
+        for (let x = Math.round(W * 0.2); x < Math.round(W * 0.8); x++) img[o + x] = occ[o + x];
+      }
+      return img;
+    });
+    expect(r.purged).toBeLessThanOrEqual(1);
   });
 });
