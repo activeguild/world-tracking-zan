@@ -207,6 +207,16 @@ Camera Start → Plane Detect → Tap → Cube/GLB Placement → Move Camera →
 
 ## 実装状況
 
+### ミューテーションテスト — `@mizchi/mutator`（2026-11-25、ユーザー要望）
+
+テストが「壊れたコードを本当に落とすか」を測る。[mizchi/mutator](https://github.com/mizchi/mutator) 0.5.5（固定）を devDependency に追加。エンジンの処理は不変、既存テストも未変更。
+
+- **対象**（`mutator.config.ts`）: 判定ロジック 8 ファイル — `ARState` / `ObjectVisibility` / `Guidance` / `ObjectGestures` / `PoseValidation` / `InitStageValidation` / `RelocalizationSchedule` / `PlaneRecovery`（Lean ガードレールと同じ「壊れても気づきにくい判定」）
+- **使うテスト**（`vitest.mutation.config.ts`）: それらの単体テスト 9 ファイルだけ。通常の設定のままだと合成映像のエンジンテスト 40 ファイルが対象を通り、テストごとのカバレッジ取得が 10 分で終わらなかった
+- **コマンド**: `npm run mutate`（対象全体。初回 約 7 分、以後は `.mutator/` のキャッシュで変更箇所だけ）、`npm run mutate:diff`（`origin/main` との差分に触れるミュータントだけ）。`.mutator/` はコミットしない
+- **初回の結果**: 1033 ミュータント — Killed 566 / Survived 104 / Timeout 4 / NoCoverage 6 / 型エラーで除外 353、**スコア 83.8%**。生き残りは `RelocalizationSchedule` 32+、`ObjectGestures` 21、`PlaneRecovery` 14、`Guidance` 9、`InitStageValidation` 8、`ARState` 3、`PoseValidation` 2（最後に走った 12 件の内訳は未集計）。多いのは閾値の境界（`<` → `<=`）で、ちょうど境界値のテストがない
+- **未対応**: 生き残りへのテスト追加、等価ミュータントの `mutator accept`、品質ゲート（`thresholds.break` / `critical`）、CI ジョブ。パッケージは Node 24 以上を要求するがこのリポジトリと CI は Node 22（動くが `node:sqlite` の ExperimentalWarning が出る、サポート外）
+
 ### Lean による形式ガードレール（2026-11-21、ユーザー要望）
 
 freee の記事（業務ルールを Lean に写し、検査を通らない操作は実行しない）の考え方を、**壊れても気づきにくい判定ロジック**に適用。`lean/`（Lean 4.24.0、Mathlib なし、Lake）。エンジンの処理は不変。
